@@ -2,38 +2,46 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const admin = require('firebase-admin');
-
-// Initialisation de Firebase Admin pour la vérification des tokens
-admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
-  projectId: 'chf-verification'
-});
 
 const app = express();
+
+// Client "normal" (clé anon) : utilisé pour les opérations courantes, respecte les
+// policies RLS de chaque table.
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
+// Client "admin" (clé service_role) : NE JAMAIS exposer côté frontend. Utilisé
+// uniquement pour les opérations privilégiées explicites ci-dessous (créer un
+// compte utilisateur). Si la variable n'est pas définie, ces routes répondent une
+// erreur claire plutôt que de planter.
+const supabaseAdmin = process.env.SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Middleware de vérification du token JWT Firebase
+// Route de test simple, sans authentification — utile pour vérifier que le service
+// est bien démarré sur Render (ouvrir l'URL du backend dans un navigateur doit
+// afficher ce message au lieu d'une erreur).
+app.get('/', (req, res) => res.json({ statut: 'CHF backend (Supabase) en ligne' }));
+
+// Middleware de vérification du token Supabase Auth envoyé dans l'en-tête
+// Authorization: Bearer <token> (remplace l'ancienne vérification Firebase).
 async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Token manquant ou invalide' });
   }
-  const idToken = authHeader.split('Bearer ')[1];
-  try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    req.user = decodedToken;
-    next();
-  } catch (error) {
-    console.error('Erreur vérification token:', error);
+  const token = authHeader.split('Bearer ')[1];
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data?.user) {
     return res.status(401).json({ error: 'Token invalide ou expiré' });
   }
+  req.user = data.user;
+  next();
 }
 
 // Application du middleware sur toutes les routes API
@@ -121,6 +129,29 @@ app.post('/api/paiements', async (req, res) => {
     .select();
   if (error) return res.status(500).json({ error: error.message });
   res.status(201).json(data[0]);
+});
+
+// Route : création d'un utilisateur par un administrateur (remplace
+// auth.createUserWithEmailAndPassword de Firebase, qui n'a pas d'équivalent sûr côté
+// client avec Supabase — créer un compte via le SDK client déconnecterait
+// l'administrateur en le remplaçant par la session du nouveau compte).
+// Protégée : seul un appelant dont la ligne dans la table "users" a role =
+// 'administrateur' peut l'utiliser.
+app.post('/api/admin/users', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquante côté serveur." });
+  }
+  const { data: profil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (!profil || profil.role !== 'administrateur') {
+    return res.status(403).json({ error: "Réservé aux administrateurs." });
+  }
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email et password requis.' });
+  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+    email, password, email_confirm: true
+  });
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json({ uid: data.user.id });
 });
 
 const PORT = process.env.PORT || 5000;
