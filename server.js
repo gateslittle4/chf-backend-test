@@ -3,6 +3,13 @@ const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  console.error('❌ SUPABASE_URL / SUPABASE_ANON_KEY manquants.');
+  console.error('   → Copiez .env.example vers .env et remplissez vos vraies valeurs');
+  console.error('   → (Supabase → Project Settings → API)');
+  process.exit(1);
+}
+
 const app = express();
 
 // Client "normal" (clé anon) : utilisé pour les opérations courantes, respecte les
@@ -47,44 +54,279 @@ async function verifyToken(req, res, next) {
 // Application du middleware sur toutes les routes API
 app.use('/api', verifyToken);
 
-// Route : récupération de tous les épisodes
+// ============================================================
+// COMPATIBILITÉ /api/episodes — le front-end existant (CalculateurPanel,
+// AnalyticsPanel, DashboardCaisse, ArchivesPanel) appelle encore ce chemin,
+// avec la forme plate historique. Ces routes traduisent cette forme vers/depuis
+// le nouveau modèle Dossier/Épisode/Fiches, SANS toucher au front-end existant.
+//
+// Correspondance des statuts (l'ancien avait 4 valeurs, le nouveau schéma
+// n'a que ouvert/ferme — les 2 valeurs supplémentaires se distinguent par
+// un champ déjà présent, pas un 3e statut) :
+//   'actif'     → statut='ouvert', date_suspension=null, mois_report=null
+//   'suspendu'  → statut='ouvert', date_suspension=<date>
+//   'reporte'   → statut='ouvert', mois_report=<valeur>
+//   'archived'  → statut='ferme'
+//
+// Correspondance typePatient : ancien 'ONG' → nouveau 'partenaire' ; tout
+// le reste (y compris undefined) → 'prive'.
+// ============================================================
+
+function statutVersFlat(ep) {
+  if (ep.statut === 'ferme') return 'archived';
+  if (ep.date_suspension) return 'suspendu';
+  if (ep.mois_report) return 'reporte';
+  return 'actif';
+}
+function flatVersStatut(status) {
+  return status === 'archived' ? 'ferme' : 'ouvert';
+}
+function typePatientVersFlat(tp) { return tp === 'partenaire' ? 'ONG' : 'Privé'; }
+function flatVersTypePatient(typePatient) { return typePatient === 'ONG' ? 'partenaire' : 'prive'; }
+
+function ficheVersFlat(f) {
+  return {
+    id: f.id, numeroFiche: f.numero_fiche, dateCreation: f.date_creation,
+    creePar: f.cree_par, probleme: f.probleme, noteProbleme: f.note_probleme,
+    totalGlobal: f.total_global, breakdown: f.breakdown, modePaiement: f.mode_paiement,
+    rawState: f.raw_state,
+  };
+}
+function ficheVersColonnes(f) {
+  return {
+    numero_fiche: f.numeroFiche, cree_par: f.creePar, probleme: !!f.probleme,
+    note_probleme: f.noteProbleme, total_global: f.totalGlobal || 0,
+    breakdown: f.breakdown || {}, mode_paiement: f.modePaiement, raw_state: f.rawState || {},
+  };
+}
+
+async function episodeVersFlat(ep) {
+  const { data: dossier } = await supabase.from('dossiers').select('*').eq('id', ep.dossier_id).single();
+  const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
+  return {
+    id: ep.id,
+    nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
+    telephone: dossier?.telephone, adresse: dossier?.adresse, numDossier: dossier?.numero_dossier,
+    typePatient: typePatientVersFlat(ep.type_patient),
+    ongPartenaire: ep.ong_partenaire || null,
+    serviceChoisi: ep.service,
+    status: statutVersFlat(ep),
+    dateSuspension: ep.date_suspension, moisReport: ep.mois_report,
+    numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
+    dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
+    timestamp: new Date(ep.date_ouverture).getTime(),
+    fiches: (fiches || []).map(ficheVersFlat),
+  };
+}
+
 app.get('/api/episodes', async (req, res) => {
-  const { data, error } = await supabase
+  const { data: episodes, error } = await supabase.from('episodes').select('*').order('date_ouverture', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const resultats = await Promise.all((episodes || []).map(episodeVersFlat));
+  res.json(resultats);
+});
+
+// Création : pas de dossier_id fourni par l'ancien flux (il ne connaît que la
+// création directe) → on crée un dossier ET un épisode ensemble dans ce cas.
+// Le flux anti-doublon (chercher un dossier existant d'abord) reste le rôle
+// du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
+app.post('/api/episodes', async (req, res) => {
+  const d = req.body;
+  const { data: dossier, error: erreurDossier } = await supabase
+    .from('dossiers')
+    .insert({
+      numero_dossier: d.numDossier || `AUTO-${Date.now()}`,
+      nom: d.nomPatient, date_naissance: d.dateNaissance, telephone: d.telephone, adresse: d.adresse,
+    })
+    .select().single();
+  if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
+
+  const { data: episode, error: erreurEpisode } = await supabase
     .from('episodes')
-    .select('*')
-    .order('timestamp', { ascending: false });
+    .insert({
+      dossier_id: dossier.id,
+      voie_entree: 'consultation', service: d.serviceChoisi || 'Général',
+      type_patient: flatVersTypePatient(d.typePatient), ong_partenaire: d.ongPartenaire || null,
+      statut: flatVersStatut(d.status), est_hospitalisation: false,
+    })
+    .select().single();
+  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+
+  if (Array.isArray(d.fiches) && d.fiches.length > 0) {
+    await supabase.from('fiches').insert(d.fiches.map(f => ({ episode_id: episode.id, ...ficheVersColonnes(f) })));
+  }
+  res.status(201).json(await episodeVersFlat(episode));
+});
+
+app.put('/api/episodes/:id', async (req, res) => {
+  const d = req.body;
+  const maj = {};
+  if (d.serviceChoisi !== undefined) maj.service = d.serviceChoisi;
+  if (d.typePatient !== undefined) maj.type_patient = flatVersTypePatient(d.typePatient);
+  if (d.ongPartenaire !== undefined) maj.ong_partenaire = d.ongPartenaire;
+  if (d.status !== undefined) {
+    maj.statut = flatVersStatut(d.status);
+    maj.date_suspension = d.status === 'suspendu' ? (d.dateSuspension || new Date().toISOString()) : null;
+    maj.mois_report = d.status === 'reporte' ? (d.moisReport || null) : null;
+  }
+  if (d.numeroLot !== undefined) maj.numero_lot = d.numeroLot;
+  if (d.verrouilleFacture !== undefined) maj.verrouille_facture = d.verrouilleFacture;
+
+  if (Object.keys(maj).length > 0) {
+    const { error } = await supabase.from('episodes').update(maj).eq('id', req.params.id);
+    if (error) return res.status(500).json({ error: error.message });
+  }
+
+  // Fiches : upsert (id fourni = mise à jour, sinon = nouvelle fiche). Ne supprime
+  // jamais une fiche absente du tableau reçu — cette route ne gère que l'ajout/modif,
+  // pas la suppression de fiches individuelles (aucun ancien appel ne l'utilisait ainsi).
+  if (Array.isArray(d.fiches)) {
+    for (const f of d.fiches) {
+      if (f.id) await supabase.from('fiches').update(ficheVersColonnes(f)).eq('id', f.id);
+      else await supabase.from('fiches').insert({ episode_id: req.params.id, ...ficheVersColonnes(f) });
+    }
+  }
+
+  const { data: episode, error: erreurLecture } = await supabase.from('episodes').select('*').eq('id', req.params.id).single();
+  if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
+  res.json(await episodeVersFlat(episode));
+});
+
+app.delete('/api/episodes/:id', async (req, res) => {
+  const { error } = await supabase.from('episodes').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
+// ============================================================
+// DOSSIER / ÉPISODE / FICHES — nouvelle structure (le vrai flux anti-doublon,
+// via l'onglet "🔍 Dossier/Épisode", séparé de la compatibilité ci-dessus)
+// ============================================================
+
+// Recherche simple par nom exact (insensible à la casse). La version floue
+// (fautes de frappe/variantes) est volontairement pas encore construite —
+// en attente de décision sur le niveau de tolérance.
+// Recherche par nom exact OU par numéro de dossier (si le patient a sa carte)
+app.get('/api/dossiers/recherche', async (req, res) => {
+  const nom = (req.query.nom || '').trim();
+  const numero = (req.query.numero || '').trim();
+  if (!nom && !numero) return res.json([]);
+
+  let requete = supabase.from('dossiers').select('*');
+  requete = numero ? requete.eq('numero_dossier', numero) : requete.ilike('nom', nom);
+
+  const { data, error } = await requete;
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
-// Route : création d'un épisode
+app.post('/api/dossiers', async (req, res) => {
+  const { numero_dossier, nom, date_naissance, telephone, adresse } = req.body;
+  if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
+  if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
+  const { data, error } = await supabase
+    .from('dossiers').insert({ numero_dossier, nom, date_naissance, telephone, adresse }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+});
+
+// Épisodes ouverts d'un dossier — la question centrale du flux anti-doublon
+app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
+  const { data, error } = await supabase
+    .from('episodes').select('*').eq('dossier_id', req.params.id).eq('statut', 'ouvert');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Création d'un épisode — règle anti-doublon appliquée ICI, pas seulement à l'écran.
 app.post('/api/episodes', async (req, res) => {
+  const { dossier_id, voie_entree, service, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
+  if (!dossier_id || !voie_entree || !service || !type_patient) {
+    return res.status(400).json({ error: 'dossier_id, voie_entree, service et type_patient sont requis' });
+  }
+
+  const { data: episodesOuverts, error: erreurRecherche } = await supabase
+    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
+  if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
+
+  const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
+
+  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
+  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
+  if (episodeHospitalisationOuvert) {
+    return res.status(409).json({
+      error: 'BLOCAGE_HOSPITALISATION',
+      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
+      episodeExistant: episodeHospitalisationOuvert,
+    });
+  }
+
+  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
+  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
+    return res.status(409).json({
+      error: 'AVERTISSEMENT_EPISODE_OUVERT',
+      message: 'Un épisode ouvert existe déjà pour ce dossier.',
+      episodesExistants: episodesOuverts,
+    });
+  }
+
   const { data, error } = await supabase
     .from('episodes')
-    .insert(req.body)
-    .select();
+    .insert({ dossier_id, voie_entree, service, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
+    .select().single();
   if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(data[0]);
+  res.status(201).json(data);
 });
 
-// Route : mise à jour d'un épisode
-app.put('/api/episodes/:id', async (req, res) => {
-  const { id } = req.params;
+// Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).
+app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
+  const { data: episode, error: erreurLecture } = await supabase
+    .from('episodes').select('est_hospitalisation').eq('id', req.params.id).single();
+  if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
+  if (episode.est_hospitalisation) {
+    return res.status(400).json({ error: 'Déjà en hospitalisation — pas de retour en arrière possible.' });
+  }
+  const { data, error } = await supabase
+    .from('episodes').update({ est_hospitalisation: true }).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Fermeture d'un épisode (exeat normal ou sans autorisation — même mécanisme, motif différent)
+app.patch('/api/episodes/:id/fermer', async (req, res) => {
+  const { motif_fermeture } = req.body;
   const { data, error } = await supabase
     .from('episodes')
-    .update(req.body)
-    .eq('id', id)
-    .select();
+    .update({ statut: 'ferme', motif_fermeture, date_fermeture: new Date().toISOString() })
+    .eq('id', req.params.id).select().single();
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data[0] || {});
+  res.json(data);
 });
 
-// Route : suppression d'un épisode
-app.delete('/api/episodes/:id', async (req, res) => {
-  const { id } = req.params;
-  const { error } = await supabase.from('episodes').delete().eq('id', id);
+// Badge ⏳ — uniquement pertinent quand la résolution déborde sur un autre jour
+app.patch('/api/episodes/:id/attente-resultats', async (req, res) => {
+  const { en_attente } = req.body;
+  const { data, error } = await supabase
+    .from('episodes').update({ en_attente_resultats: !!en_attente }).eq('id', req.params.id).select().single();
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ success: true });
+  res.json(data);
+});
+
+// Fiches — rattachées à un épisode
+app.post('/api/fiches', async (req, res) => {
+  const { episode_id, numero_fiche, cree_par, raw_state } = req.body;
+  if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
+  const { data, error } = await supabase
+    .from('fiches').insert({ episode_id, numero_fiche, cree_par, raw_state: raw_state || {} }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+});
+
+app.get('/api/fiches/episode/:episodeId', async (req, res) => {
+  const { data, error } = await supabase
+    .from('fiches').select('*').eq('episode_id', req.params.episodeId).order('date_creation');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 // Route : récupération du catalogue (médicaments ou actes)
