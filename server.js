@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   console.error('❌ SUPABASE_URL / SUPABASE_ANON_KEY manquants.');
@@ -17,8 +18,8 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   process.exit(1);
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT))
+initializeApp({
+  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT))
 });
 
 const app = express();
@@ -50,7 +51,7 @@ async function verifyToken(req, res, next) {
   }
   const token = authHeader.split('Bearer ')[1];
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await getAuth().verifyIdToken(token);
     req.user = { id: decoded.uid, email: decoded.email };
     next();
   } catch (e) {
@@ -133,14 +134,12 @@ app.get('/api/episodes', async (req, res) => {
   res.json(resultats);
 });
 
-// Création : DEUX formats arrivent sur ce même chemin, distingués par la présence de
-// dossier_id. Ces deux routes existaient SÉPARÉMENT avant (même chemin, même méthode) —
-// Express n'exécutait alors QUE la première (ci-dessous), la seconde (l'anti-doublon,
-// via l'onglet Dossier/Épisode) n'était donc jamais atteinte. Fusionnées ici pour de bon.
-async function creerEpisodeFormatCompatibilite(d, res) {
-  // Ancien flux (CalculateurPanel) : pas de dossier_id, il ne connaît que la création
-  // directe → on crée un dossier ET un épisode ensemble. Pas de vérif anti-doublon ici :
-  // ce flux n'a pas d'écran pour afficher un avertissement/blocage à l'utilisateur.
+// Création : pas de dossier_id fourni par l'ancien flux (il ne connaît que la
+// création directe) → on crée un dossier ET un épisode ensemble dans ce cas.
+// Le flux anti-doublon (chercher un dossier existant d'abord) reste le rôle
+// du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
+app.post('/api/episodes', async (req, res) => {
+  const d = req.body;
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
@@ -165,57 +164,6 @@ async function creerEpisodeFormatCompatibilite(d, res) {
     await supabase.from('fiches').insert(d.fiches.map(f => ({ episode_id: episode.id, ...ficheVersColonnes(f) })));
   }
   res.status(201).json(await episodeVersFlat(episode));
-}
-
-async function creerEpisodeFormatDossierExistant(d, res) {
-  // Nouveau flux (onglet 🔍 Dossier/Épisode) : le dossier a déjà été trouvé ou créé
-  // séparément via /api/dossiers — la règle anti-doublon s'applique ICI, pas seulement
-  // à l'écran, pour qu'un appel direct à cette route ne puisse pas la contourner.
-  const { dossier_id, voie_entree, service, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = d;
-  if (!voie_entree || !service || !type_patient) {
-    return res.status(400).json({ error: 'dossier_id, voie_entree, service et type_patient sont requis' });
-  }
-
-  const { data: episodesOuverts, error: erreurRecherche } = await supabase
-    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
-  if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
-
-  const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
-
-  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
-  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
-  if (episodeHospitalisationOuvert) {
-    return res.status(409).json({
-      error: 'BLOCAGE_HOSPITALISATION',
-      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
-      episodeExistant: episodeHospitalisationOuvert,
-    });
-  }
-
-  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
-  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
-    return res.status(409).json({
-      error: 'AVERTISSEMENT_EPISODE_OUVERT',
-      message: 'Un épisode ouvert existe déjà pour ce dossier.',
-      episodesExistants: episodesOuverts,
-    });
-  }
-
-  const { data, error } = await supabase
-    .from('episodes')
-    .insert({ dossier_id, voie_entree, service, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
-    .select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(data);
-}
-
-app.post('/api/episodes', async (req, res) => {
-  const d = req.body;
-  // Le nouveau flux fournit toujours dossier_id (dossier déjà choisi séparément) ;
-  // l'ancien flux ne le connaît pas et fournit nomPatient à la place — c'est ce qui
-  // distingue les deux cas sur ce même chemin.
-  if (d.dossier_id) return creerEpisodeFormatDossierExistant(d, res);
-  return creerEpisodeFormatCompatibilite(d, res);
 });
 
 app.put('/api/episodes/:id', async (req, res) => {
@@ -298,8 +246,45 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   res.json(data);
 });
 
-// Création d'un épisode — règle anti-doublon appliquée dans creerEpisodeFormatDossierExistant
-// ci-dessus (fusionnée avec la route de compatibilité, voir commentaire plus haut).
+// Création d'un épisode — règle anti-doublon appliquée ICI, pas seulement à l'écran.
+app.post('/api/episodes', async (req, res) => {
+  const { dossier_id, voie_entree, service, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
+  if (!dossier_id || !voie_entree || !service || !type_patient) {
+    return res.status(400).json({ error: 'dossier_id, voie_entree, service et type_patient sont requis' });
+  }
+
+  const { data: episodesOuverts, error: erreurRecherche } = await supabase
+    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
+  if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
+
+  const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
+
+  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
+  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
+  if (episodeHospitalisationOuvert) {
+    return res.status(409).json({
+      error: 'BLOCAGE_HOSPITALISATION',
+      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
+      episodeExistant: episodeHospitalisationOuvert,
+    });
+  }
+
+  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
+  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
+    return res.status(409).json({
+      error: 'AVERTISSEMENT_EPISODE_OUVERT',
+      message: 'Un épisode ouvert existe déjà pour ce dossier.',
+      episodesExistants: episodesOuverts,
+    });
+  }
+
+  const { data, error } = await supabase
+    .from('episodes')
+    .insert({ dossier_id, voie_entree, service, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+});
 
 // Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).
 app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
@@ -410,7 +395,7 @@ app.post('/api/admin/users', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email et password requis.' });
   try {
-    const nouvelUtilisateur = await admin.auth().createUser({ email, password, emailVerified: true });
+    const nouvelUtilisateur = await getAuth().createUser({ email, password, emailVerified: true });
     res.status(201).json({ uid: nouvelUtilisateur.uid });
   } catch (e) {
     res.status(500).json({ error: e.message });
