@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+const admin = require('firebase-admin');
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   console.error('❌ SUPABASE_URL / SUPABASE_ANON_KEY manquants.');
@@ -9,20 +10,27 @@ if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   console.error('   → (Supabase → Project Settings → API)');
   process.exit(1);
 }
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.error('❌ FIREBASE_SERVICE_ACCOUNT manquant.');
+  console.error('   → Firebase Console → ⚙️ Paramètres du projet → Comptes de service');
+  console.error('   → "Générer une nouvelle clé privée" → collez le JSON entier (une seule ligne) dans .env');
+  process.exit(1);
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT))
+});
 
 const app = express();
 
-// Client "normal" (clé anon) : utilisé pour les opérations courantes, respecte les
-// policies RLS de chaque table.
+// Base de données : reste Supabase, sans changement. RLS n'est pas encore activé
+// sur ces tables (chantier séparé, déjà connu) — donc la clé anon suffit pour
+// l'instant, la vraie porte d'entrée est maintenant la vérification Firebase ci-dessous.
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-// Client "admin" (clé service_role) : NE JAMAIS exposer côté frontend. Utilisé
-// uniquement pour les opérations privilégiées explicites ci-dessous (créer un
-// compte utilisateur). Si la variable n'est pas définie, ces routes répondent une
-// erreur claire plutôt que de planter.
 const supabaseAdmin = process.env.SUPABASE_SERVICE_ROLE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
@@ -30,25 +38,24 @@ const supabaseAdmin = process.env.SUPABASE_SERVICE_ROLE_KEY
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Route de test simple, sans authentification — utile pour vérifier que le service
-// est bien démarré sur Render (ouvrir l'URL du backend dans un navigateur doit
-// afficher ce message au lieu d'une erreur).
-app.get('/', (req, res) => res.json({ statut: 'CHF backend (Supabase) en ligne' }));
+app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));
 
-// Middleware de vérification du token Supabase Auth envoyé dans l'en-tête
-// Authorization: Bearer <token> (remplace l'ancienne vérification Firebase).
+// Vérification via Firebase Admin SDK — remplace la vérification Supabase.
+// req.user.id remplace l'ancien req.user.id Supabase ; c'est un UID Firebase (texte),
+// pas un UUID — voir le schéma (users.id, audit_log.effectue_par_uid sont en TEXT).
 async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Token manquant ou invalide' });
   }
   const token = authHeader.split('Bearer ')[1];
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data?.user) {
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = { id: decoded.uid, email: decoded.email };
+    next();
+  } catch (e) {
     return res.status(401).json({ error: 'Token invalide ou expiré' });
   }
-  req.user = data.user;
-  next();
 }
 
 // Application du middleware sur toutes les routes API
@@ -126,12 +133,14 @@ app.get('/api/episodes', async (req, res) => {
   res.json(resultats);
 });
 
-// Création : pas de dossier_id fourni par l'ancien flux (il ne connaît que la
-// création directe) → on crée un dossier ET un épisode ensemble dans ce cas.
-// Le flux anti-doublon (chercher un dossier existant d'abord) reste le rôle
-// du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
-app.post('/api/episodes', async (req, res) => {
-  const d = req.body;
+// Création : DEUX formats arrivent sur ce même chemin, distingués par la présence de
+// dossier_id. Ces deux routes existaient SÉPARÉMENT avant (même chemin, même méthode) —
+// Express n'exécutait alors QUE la première (ci-dessous), la seconde (l'anti-doublon,
+// via l'onglet Dossier/Épisode) n'était donc jamais atteinte. Fusionnées ici pour de bon.
+async function creerEpisodeFormatCompatibilite(d, res) {
+  // Ancien flux (CalculateurPanel) : pas de dossier_id, il ne connaît que la création
+  // directe → on crée un dossier ET un épisode ensemble. Pas de vérif anti-doublon ici :
+  // ce flux n'a pas d'écran pour afficher un avertissement/blocage à l'utilisateur.
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
@@ -156,6 +165,57 @@ app.post('/api/episodes', async (req, res) => {
     await supabase.from('fiches').insert(d.fiches.map(f => ({ episode_id: episode.id, ...ficheVersColonnes(f) })));
   }
   res.status(201).json(await episodeVersFlat(episode));
+}
+
+async function creerEpisodeFormatDossierExistant(d, res) {
+  // Nouveau flux (onglet 🔍 Dossier/Épisode) : le dossier a déjà été trouvé ou créé
+  // séparément via /api/dossiers — la règle anti-doublon s'applique ICI, pas seulement
+  // à l'écran, pour qu'un appel direct à cette route ne puisse pas la contourner.
+  const { dossier_id, voie_entree, service, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = d;
+  if (!voie_entree || !service || !type_patient) {
+    return res.status(400).json({ error: 'dossier_id, voie_entree, service et type_patient sont requis' });
+  }
+
+  const { data: episodesOuverts, error: erreurRecherche } = await supabase
+    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
+  if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
+
+  const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
+
+  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
+  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
+  if (episodeHospitalisationOuvert) {
+    return res.status(409).json({
+      error: 'BLOCAGE_HOSPITALISATION',
+      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
+      episodeExistant: episodeHospitalisationOuvert,
+    });
+  }
+
+  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
+  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
+    return res.status(409).json({
+      error: 'AVERTISSEMENT_EPISODE_OUVERT',
+      message: 'Un épisode ouvert existe déjà pour ce dossier.',
+      episodesExistants: episodesOuverts,
+    });
+  }
+
+  const { data, error } = await supabase
+    .from('episodes')
+    .insert({ dossier_id, voie_entree, service, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+}
+
+app.post('/api/episodes', async (req, res) => {
+  const d = req.body;
+  // Le nouveau flux fournit toujours dossier_id (dossier déjà choisi séparément) ;
+  // l'ancien flux ne le connaît pas et fournit nomPatient à la place — c'est ce qui
+  // distingue les deux cas sur ce même chemin.
+  if (d.dossier_id) return creerEpisodeFormatDossierExistant(d, res);
+  return creerEpisodeFormatCompatibilite(d, res);
 });
 
 app.put('/api/episodes/:id', async (req, res) => {
@@ -238,45 +298,8 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   res.json(data);
 });
 
-// Création d'un épisode — règle anti-doublon appliquée ICI, pas seulement à l'écran.
-app.post('/api/episodes', async (req, res) => {
-  const { dossier_id, voie_entree, service, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
-  if (!dossier_id || !voie_entree || !service || !type_patient) {
-    return res.status(400).json({ error: 'dossier_id, voie_entree, service et type_patient sont requis' });
-  }
-
-  const { data: episodesOuverts, error: erreurRecherche } = await supabase
-    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
-  if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
-
-  const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
-
-  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
-  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
-  if (episodeHospitalisationOuvert) {
-    return res.status(409).json({
-      error: 'BLOCAGE_HOSPITALISATION',
-      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
-      episodeExistant: episodeHospitalisationOuvert,
-    });
-  }
-
-  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
-  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
-    return res.status(409).json({
-      error: 'AVERTISSEMENT_EPISODE_OUVERT',
-      message: 'Un épisode ouvert existe déjà pour ce dossier.',
-      episodesExistants: episodesOuverts,
-    });
-  }
-
-  const { data, error } = await supabase
-    .from('episodes')
-    .insert({ dossier_id, voie_entree, service, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
-    .select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(data);
-});
+// Création d'un épisode — règle anti-doublon appliquée dans creerEpisodeFormatDossierExistant
+// ci-dessus (fusionnée avec la route de compatibilité, voir commentaire plus haut).
 
 // Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).
 app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
@@ -380,20 +403,18 @@ app.post('/api/paiements', async (req, res) => {
 // Protégée : seul un appelant dont la ligne dans la table "users" a role =
 // 'administrateur' peut l'utiliser.
 app.post('/api/admin/users', async (req, res) => {
-  if (!supabaseAdmin) {
-    return res.status(500).json({ error: "SUPABASE_SERVICE_ROLE_KEY manquante côté serveur." });
-  }
   const { data: profil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
   if (!profil || profil.role !== 'administrateur') {
     return res.status(403).json({ error: "Réservé aux administrateurs." });
   }
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email et password requis.' });
-  const { data, error } = await supabaseAdmin.auth.admin.createUser({
-    email, password, email_confirm: true
-  });
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json({ uid: data.user.id });
+  try {
+    const nouvelUtilisateur = await admin.auth().createUser({ email, password, emailVerified: true });
+    res.status(201).json({ uid: nouvelUtilisateur.uid });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
