@@ -402,19 +402,16 @@ app.get('/api/catalog/:type', async (req, res) => {
 app.put('/api/catalog/:type', async (req, res) => {
   const { type } = req.params;
   const { items } = req.body;
-  // Avant : aucune vérification que l'UPDATE avait vraiment touché une ligne — Postgres/Supabase
-  // renvoie "succès, 0 ligne modifiée" (pas une erreur) si le type ne correspond à rien ou si un
-  // blocage d'accès empêche silencieusement l'écriture. Le front recevait donc "succès" et
-  // affichait le message vert, alors que rien n'était enregistré — la modification disparaissait
-  // au rechargement suivant sans qu'aucune erreur n'ait jamais été visible nulle part.
+  // upsert (pas update) : la toute première écriture doit pouvoir CRÉER la ligne "medicaments"/
+  // "actes" si elle n'existe pas encore — un simple update ne peut jamais créer une ligne absente,
+  // ce qui rendait "Ajouter" impossible à utiliser tant que la table catalog était vide.
   const { data, error } = await supabase
     .from('catalog')
-    .update({ items, updated_at: new Date().toISOString() })
-    .eq('type', type)
+    .upsert({ type, items, updated_at: new Date().toISOString() }, { onConflict: 'type' })
     .select();
   if (error) return res.status(500).json({ error: error.message });
   if (!data || data.length === 0) {
-    return res.status(404).json({ error: `Catalogue "${type}" introuvable en base — rien n'a été enregistré (ni RLS, ni la clé service_role ne devraient bloquer ceci ; vérifie que la ligne existe dans la table catalog).` });
+    return res.status(500).json({ error: `Échec inattendu de l'enregistrement du catalogue "${type}".` });
   }
   res.json({ success: true });
 });
