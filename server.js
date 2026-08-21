@@ -138,6 +138,11 @@ app.get('/api/episodes', async (req, res) => {
 // du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
 app.post('/api/episodes', async (req, res) => {
   const d = req.body;
+  // Un nom manquant/vide laissait l'erreur brute de Postgres remonter telle quelle à l'écran
+  // ("null value in column nom... violates not-null constraint") au lieu d'un message clair.
+  if (!d.nomPatient || !String(d.nomPatient).trim()) {
+    return res.status(400).json({ error: "Le nom du patient est requis pour créer un dossier." });
+  }
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
@@ -159,7 +164,10 @@ app.post('/api/episodes', async (req, res) => {
   if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
 
   if (Array.isArray(d.fiches) && d.fiches.length > 0) {
-    await supabase.from('fiches').insert(d.fiches.map(f => ({ episode_id: episode.id, ...ficheVersColonnes(f) })));
+    // Avant : le résultat de cette insertion n'était jamais vérifié — un échec ici laissait
+    // quand même passer un 201 "succès" pour tout le dossier, fiches manquantes en silence.
+    const { error: erreurFiches } = await supabase.from('fiches').insert(d.fiches.map(f => ({ episode_id: episode.id, ...ficheVersColonnes(f) })));
+    if (erreurFiches) return res.status(500).json({ error: `Dossier créé, mais échec de l'enregistrement des fiches : ${erreurFiches.message}` });
   }
   res.status(201).json(await episodeVersFlat(episode));
 });
@@ -179,8 +187,9 @@ app.put('/api/episodes/:id', async (req, res) => {
   if (d.verrouilleFacture !== undefined) maj.verrouille_facture = d.verrouilleFacture;
 
   if (Object.keys(maj).length > 0) {
-    const { error } = await supabase.from('episodes').update(maj).eq('id', req.params.id);
+    const { data, error } = await supabase.from('episodes').update(maj).eq('id', req.params.id).select();
     if (error) return res.status(500).json({ error: error.message });
+    if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
   }
 
   // Fiches : upsert (id fourni = mise à jour, sinon = nouvelle fiche). Ne supprime
@@ -188,8 +197,17 @@ app.put('/api/episodes/:id', async (req, res) => {
   // pas la suppression de fiches individuelles (aucun ancien appel ne l'utilisait ainsi).
   if (Array.isArray(d.fiches)) {
     for (const f of d.fiches) {
-      if (f.id) await supabase.from('fiches').update(ficheVersColonnes(f)).eq('id', f.id);
-      else await supabase.from('fiches').insert({ episode_id: req.params.id, ...ficheVersColonnes(f) });
+      if (f.id) {
+        // Avant : ni l'erreur ni le nombre de lignes touchées n'étaient vérifiés ici —
+        // même angle mort que /api/catalog (succès silencieux même si rien n'est écrit).
+        const { data: fd, error: fe } = await supabase.from('fiches').update(ficheVersColonnes(f)).eq('id', f.id).select();
+        if (fe) return res.status(500).json({ error: `Fiche ${f.id} : ${fe.message}` });
+        if (!fd || fd.length === 0) return res.status(404).json({ error: `Fiche ${f.id} introuvable — rien n'a été modifié.` });
+      }
+      else {
+        const { error: ei } = await supabase.from('fiches').insert({ episode_id: req.params.id, ...ficheVersColonnes(f) });
+        if (ei) return res.status(500).json({ error: `Nouvelle fiche : ${ei.message}` });
+      }
     }
   }
 
@@ -384,11 +402,20 @@ app.get('/api/catalog/:type', async (req, res) => {
 app.put('/api/catalog/:type', async (req, res) => {
   const { type } = req.params;
   const { items } = req.body;
-  const { error } = await supabase
+  // Avant : aucune vérification que l'UPDATE avait vraiment touché une ligne — Postgres/Supabase
+  // renvoie "succès, 0 ligne modifiée" (pas une erreur) si le type ne correspond à rien ou si un
+  // blocage d'accès empêche silencieusement l'écriture. Le front recevait donc "succès" et
+  // affichait le message vert, alors que rien n'était enregistré — la modification disparaissait
+  // au rechargement suivant sans qu'aucune erreur n'ait jamais été visible nulle part.
+  const { data, error } = await supabase
     .from('catalog')
     .update({ items, updated_at: new Date().toISOString() })
-    .eq('type', type);
+    .eq('type', type)
+    .select();
   if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) {
+    return res.status(404).json({ error: `Catalogue "${type}" introuvable en base — rien n'a été enregistré (ni RLS, ni la clé service_role ne devraient bloquer ceci ; vérifie que la ligne existe dans la table catalog).` });
+  }
   res.json({ success: true });
 });
 
