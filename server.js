@@ -701,47 +701,6 @@ app.post('/api/admin/users', async (req, res) => {
   }
 });
 
-// Route temporaire — liste les comptes Firebase Auth (uid + email) pour permettre de retrouver
-// l'email d'un compte créé avant l'ajout de la colonne users.email (users.email était vide pour
-// ces comptes-là, mais le compte Firebase Auth, lui, a toujours eu un email). À retirer une fois
-// le backfill fait ; garde aussi une utilité ponctuelle pour l'audit recommandé dans PLAN_RLS.md
-// ("vérifie la liste des comptes existants... pour repérer un compte administrateur non reconnu").
-app.get('/api/admin/utilisateurs-firebase', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
-    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
-  }
-  try {
-    const { users } = await getAuth().listUsers();
-    res.json(users.map(u => ({ uid: u.uid, email: u.email || null })));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Route temporaire — supprime des comptes Firebase Auth fantômes : créés par un essai de
-// création d'utilisateur interrompu avant l'écriture du profil Supabase (voir le bug
-// created_at, commit 488b134 côté frontend) — le compte Firebase existe mais n'a jamais eu
-// de ligne dans users. Ne touche jamais un compte qui A un profil dans users (vérifié ici).
-app.post('/api/admin/supprimer-comptes-fantomes', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
-    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
-  }
-  const { uids } = req.body;
-  if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: 'uids (tableau non vide) requis.' });
-  const resultats = [];
-  for (const uid of uids) {
-    const { data: profil } = await supabase.from('users').select('id').eq('id', uid).maybeSingle();
-    if (profil) { resultats.push({ uid, supprime: false, raison: 'a un profil dans users — pas un fantôme, non supprimé' }); continue; }
-    try {
-      await getAuth().deleteUser(uid);
-      resultats.push({ uid, supprime: true });
-    } catch (e) {
-      resultats.push({ uid, supprime: false, raison: e.message });
-    }
-  }
-  res.json(resultats);
-});
-
 // Génère un lien de réinitialisation SANS envoyer d'email — identifiant@chf.com n'est pas une
 // vraie boîte mail (voir discussion avec Esdras du 22/08), donc sendPasswordResetEmail
 // n'atteindrait jamais personne tout en affichant "envoyé avec succès". L'administrateur
