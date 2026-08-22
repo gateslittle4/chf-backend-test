@@ -1,0 +1,175 @@
+# Sécuriser l'accès aux données CHF — plan en 3 étapes (à valider avec Esdras)
+
+## ⚠️ Déjà fait, à lire quand même
+La faille la plus grave trouvée le 18/08 (bouton "Créer un compte (test)" sur l'écran de
+connexion, qui donnait le rôle administrateur à quiconque cliquait dessus) est **corrigée**
+dans `chf-app-8.zip` et `chf-backend-complet-3.zip`. Avant d'aller plus loin :
+**vérifie la liste des comptes existants** (Firebase Console → Authentication, et la table
+Supabase `users`) pour repérer un compte administrateur que ni toi ni Esdras ne reconnaissez.
+Si l'app a déjà tourné en ligne avec ce bouton visible, ce n'est pas à exclure.
+
+---
+
+## Pourquoi ce n'est pas juste "activer RLS et écrire des règles"
+
+L'app se connecte avec Firebase (login), mais certains écrans (Utilisateurs, Demandes
+d'exonération, Partenaires, Salaires, Clôture de caisse, Journal d'audit) parlent
+**directement** au navigateur → Supabase, sans repasser par ton backend. Ce chemin direct
+utilise juste la clé "anon" — Supabase ne sait alors absolument pas *qui* fait la demande,
+seulement qu'elle vient de "quelqu'un avec la clé publique". Résultat : on ne peut pas encore
+écrire "seule la direction peut faire X", parce que Postgres n'a aucun moyen fiable de savoir
+si c'est la direction ou n'importe qui d'autre qui appelle. Il faut d'abord relier l'identité
+Firebase à Supabase — sinon les règles de l'étape 3 seraient soit inutiles, soit casseraient
+l'app. D'où 3 étapes, dans cet ordre strict.
+
+---
+
+## Étape 1 — Le backend utilise la clé service_role ✅ déjà fait
+
+`server.js` utilisait la clé "anon" pour parler à Supabase — la même famille de clé que celle
+exposée côté navigateur. Il utilise maintenant la clé **service_role** (qui contourne RLS),
+ce qui est correct : ce backend a déjà vérifié le jeton Firebase avant d'agir, donc RLS ne doit
+pas aussi le limiter. **Sur Render, ajoute la variable d'environnement
+`SUPABASE_SERVICE_ROLE_KEY`** (Supabase → Project Settings → API → service_role) — sans ça, le
+backend refusera de démarrer (`process.exit(1)`, message d'erreur clair dans les logs Render).
+
+---
+
+## Étape 2 — Brancher Firebase dans Supabase (Third-Party Auth)
+
+### 2a. Dans le tableau de bord Supabase
+Authentication → Third-Party Auth → nouvelle intégration → choisir Firebase → renseigner le
+Project ID Firebase (`chf-test1`, visible dans `api/firebase.js`). Documentation officielle :
+https://supabase.com/docs/guides/auth/third-party/firebase-auth
+
+### 2b. Attribuer la revendication requise à chaque utilisateur
+Supabase exige que chaque compte porte une revendication personnalisée Firebase
+`role: 'authenticated'` (nom malheureux — **rien à voir** avec le rôle CHF
+administrateur/direction/comptable/auditeur/lecteur stocké dans la table `users` ; c'est un
+simple marqueur que Supabase impose, toujours la même valeur pour tout le monde).
+- **Nouveaux comptes** : déjà fait automatiquement par le backend corrigé
+  (`/api/admin/users` appelle `setCustomUserClaims` à la création).
+- **Comptes déjà existants** : à traiter une fois, avec un petit script Node lancé par toi ou
+  Esdras (a accès aux vraies credentials Firebase) :
+```js
+// backfill-claims.js — à lancer une seule fois avec `node backfill-claims.js`
+require('dotenv').config();
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+
+(async () => {
+  const { users } = await getAuth().listUsers();
+  for (const u of users) {
+    await getAuth().setCustomUserClaims(u.uid, { role: 'authenticated' });
+    console.log('OK', u.email);
+  }
+})();
+```
+
+### 2c. Code frontend — à appliquer SEULEMENT après 2a et 2b
+Dans `api/firebase.js`, remplacer la création du client Supabase :
+```js
+// AVANT
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// APRÈS
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  accessToken: async () => (authReel.currentUser ? authReel.currentUser.getIdToken() : null)
+});
+```
+Je ne l'ai pas encore mis dans le zip livré : si ce code part avant que 2a soit configuré côté
+Supabase, les appels directs (Demandes, Partenaires, Utilisateurs...) risquent de se mettre à
+échouer. À appliquer et tester juste après 2a/2b, avant l'étape 3.
+
+---
+
+## Étape 3 — Activer RLS + règles (SQL, dans Supabase → SQL Editor)
+
+Un premier jet, par table, à relire avec Esdras — j'ai marqué ⚠️ ce qui dépend d'une règle
+métier que je ne connais pas avec certitude.
+
+```sql
+-- Fonction utilitaire : rôle CHF de l'utilisateur Firebase actuellement authentifié.
+-- SECURITY DEFINER évite la boucle "la policy sur users doit lire users pour s'évaluer".
+CREATE OR REPLACE FUNCTION mon_role_chf()
+RETURNS text LANGUAGE sql SECURITY DEFINER STABLE
+AS $$ SELECT role FROM users WHERE id = auth.uid(); $$;
+-- Si auth.uid() renvoie NULL avec les jetons Firebase chez vous, remplacer par
+-- (auth.jwt() ->> 'sub') partout dans ce fichier (fonction ci-dessus + policies).
+
+-- GROUPE 1 — episodes, dossiers, fiches, paiements, catalog : seul le backend
+-- (service_role, contourne RLS) doit y toucher. Aucune policy = accès refusé au
+-- navigateur, ce qui est le but.
+ALTER TABLE episodes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dossiers  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fiches    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paiements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE catalog   ENABLE ROW LEVEL SECURITY;
+
+-- GROUPE 2 — users : chacun lit sa propre fiche ; administrateur lit/modifie tout.
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY users_lecture_soi   ON users FOR SELECT USING (id = auth.uid());
+CREATE POLICY users_lecture_admin ON users FOR SELECT USING (mon_role_chf() = 'administrateur');
+CREATE POLICY users_ecriture_admin ON users FOR UPDATE USING (mon_role_chf() = 'administrateur');
+-- Pas de policy INSERT : création uniquement via /api/admin/users (service_role).
+
+-- GROUPE 3 — audit_log : on peut ajouter SA PROPRE trace, jamais lire/modifier/effacer
+-- depuis le navigateur (un journal ne se corrige pas soi-même).
+ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY audit_insertion_soi ON audit_log FOR INSERT WITH CHECK (effectue_par_uid = auth.uid());
+CREATE POLICY audit_lecture_admin ON audit_log FOR SELECT USING (mon_role_chf() = 'administrateur');
+
+-- GROUPE 4 — demandes_exoneration : un caissier voit/crée SES demandes ; direction/
+-- administrateur voient et répondent à TOUTES, seulement tant qu'en attente.
+-- ⚠️ à confirmer : comptable/auditeur doivent-ils aussi les voir ?
+ALTER TABLE demandes_exoneration ENABLE ROW LEVEL SECURITY;
+CREATE POLICY exoneration_lecture ON demandes_exoneration FOR SELECT
+  USING (demandeur_uid = auth.uid() OR mon_role_chf() IN ('direction','administrateur'));
+CREATE POLICY exoneration_creation ON demandes_exoneration FOR INSERT
+  WITH CHECK (demandeur_uid = auth.uid());
+CREATE POLICY exoneration_reponse ON demandes_exoneration FOR UPDATE
+  USING (mon_role_chf() IN ('direction','administrateur') AND statut = 'en_attente');
+
+-- GROUPE 5 — ong_partenaires : lecture ouverte (utilisée partout dans les formulaires),
+-- gestion de la liste réservée à direction/administrateur.
+ALTER TABLE ong_partenaires ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ong_lecture_tous ON ong_partenaires FOR SELECT USING (mon_role_chf() IS NOT NULL);
+CREATE POLICY ong_ecriture_admin ON ong_partenaires FOR ALL USING (mon_role_chf() IN ('direction','administrateur'));
+
+-- GROUPE 6 — salaires_service : sensible. ⚠️ à confirmer : un comptable peut-il MODIFIER
+-- ou seulement CONSULTER ? Ci-dessous, consultation pour comptable, modification direction/admin seul.
+ALTER TABLE salaires_service ENABLE ROW LEVEL SECURITY;
+CREATE POLICY salaires_lecture  ON salaires_service FOR SELECT USING (mon_role_chf() IN ('direction','administrateur','comptable'));
+CREATE POLICY salaires_ecriture ON salaires_service FOR ALL    USING (mon_role_chf() IN ('direction','administrateur'));
+
+-- GROUPE 7 — cloture_caisse : ⚠️ à confirmer avec Esdras (une clôture par caissier/jour,
+-- ou une seule partagée ?). Hypothèse ci-dessous : tout utilisateur connecté peut lire/écrire —
+-- à resserrer une fois la vraie règle connue.
+ALTER TABLE cloture_caisse ENABLE ROW LEVEL SECURITY;
+CREATE POLICY cloture_lecture_ecriture ON cloture_caisse FOR ALL USING (mon_role_chf() IS NOT NULL);
+```
+
+**Rollback d'urgence** si un écran casse après activation (à identifier via les messages
+d'erreur dans la console du navigateur, puis cibler la bonne table) :
+```sql
+ALTER TABLE nom_de_la_table DISABLE ROW LEVEL SECURITY;
+```
+
+---
+
+## Ordre de déploiement conseillé
+1. ✅ Déployer `chf-backend-complet-3.zip` (service_role + correctifs) — ajouter la variable
+   `SUPABASE_SERVICE_ROLE_KEY` sur Render.
+2. ✅ Déployer `chf-app-8.zip` (écran de connexion corrigé).
+3. Configurer Third-Party Auth côté Supabase (2a) + lancer le script de rattrapage (2b).
+4. Appliquer le changement frontend de 2c, tester que tout fonctionne **encore comme avant**
+   (rien ne doit changer, RLS n'est pas encore actif).
+5. Exécuter le SQL de l'étape 3, idéalement hors des heures de pointe.
+6. Tester chaque écran (Utilisateurs, Demandes, Partenaires, Salaires, Clôture, Calculateur,
+   Archives) avec un compte de chaque rôle si possible.
+
+## Hors scope de cette passe (mentionné précédemment, pas oublié)
+- Numéro de lot calculé côté navigateur (collision possible si 2 personnes génèrent un lot
+  au même instant).
+- Export Excel/Lots — pas encore relu en détail.

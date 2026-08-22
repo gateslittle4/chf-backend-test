@@ -33,6 +33,34 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+const { validerCreationEpisode } = require('./utils/validationEpisode');
+
+// Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
+// que le serveur puisse vérifier une permission même si la table catalog('permissions') est
+// encore vide (avant le premier enregistrement depuis l'écran "Rôles & permissions").
+const PERMISSIONS_PAR_DEFAUT = [
+  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer'] },
+  { role: 'direction', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
+  { role: 'comptable', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
+  { role: 'auditeur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','facturation_exporter','rapport_chf_voir'] },
+  { role: 'lecteur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir'] },
+  { role: 'archiviste', permissions: ['dossier_creer','fiche_patient_voir'] },
+  { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
+];
+
+// Vérifie qu'un utilisateur a une permission donnée : lit son rôle, puis la table des
+// permissions par rôle (catalog/permissions), avec repli sur les valeurs par défaut si cette
+// table n'a jamais été enregistrée. Utilisé partout où une route exige un droit précis, pour que
+// le backend reste toujours d'accord avec ce qu'affiche/autorise le front (pas 2 systèmes qui
+// pourraient diverger).
+async function aPermission(userId, cle) {
+  const { data: profil } = await supabase.from('users').select('role').eq('id', userId).maybeSingle();
+  if (!profil) return false;
+  const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'permissions').maybeSingle();
+  const table = (catalogue && catalogue.items && catalogue.items.length > 0) ? catalogue.items : PERMISSIONS_PAR_DEFAUT;
+  const entree = table.find(r => r.role === profil.role);
+  return !!(entree && entree.permissions && entree.permissions.includes(cle));
+}
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -119,6 +147,7 @@ async function episodeVersFlat(ep) {
     status: statutVersFlat(ep),
     dateSuspension: ep.date_suspension, moisReport: ep.mois_report,
     numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
+    estHospitalisation: ep.est_hospitalisation,
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
     fiches: (fiches || []).map(ficheVersFlat),
@@ -224,9 +253,8 @@ app.delete('/api/episodes/:id', async (req, res) => {
   const { data: episode, error: erreurLecture } = await supabase.from('episodes').select('statut').eq('id', req.params.id).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (episode && episode.statut === 'ferme') {
-    const { data: profil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
-    if (!profil || !(profil.role === 'direction' || profil.role === 'administrateur')) {
-      return res.status(403).json({ error: "Seule la direction peut supprimer un dossier déjà archivé." });
+    if (!(await aPermission(req.user.id, 'facturation_supprimer'))) {
+      return res.status(403).json({ error: "Permission 'facturation_supprimer' requise pour supprimer un dossier déjà archivé." });
     }
   }
   const { error } = await supabase.from('episodes').delete().eq('id', req.params.id);
@@ -318,18 +346,13 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
   // Infirmier/archiviste peuvent créer un Dossier (route ci-dessus) mais pas déclencher un
   // Épisode (Consultation/Hospitalisation) — vérifié ici aussi, pas seulement côté écran, sinon
   // un appel direct à cette route contournerait la restriction affichée dans l'app.
-  const { data: profilCreateur } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
-  if (profilCreateur && ['infirmier', 'archiviste'].includes(profilCreateur.role)) {
-    return res.status(403).json({ error: "Ce rôle peut créer un dossier, mais pas un épisode — réservé à la caisse." });
+  if (!(await aPermission(req.user.id, 'episode_creer'))) {
+    return res.status(403).json({ error: "Permission 'episode_creer' requise — ce rôle peut créer un dossier, mais pas un épisode." });
   }
   const dossier_id = req.params.dossierId;
   const { voie_entree, service, type_consultation, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
-  // Avant : "service" était exigé dans tous les cas — mais le front envoie volontairement
-  // service=null pour une consultation (il envoie type_consultation à la place), donc "Consultation"
-  // échouait systématiquement en erreur 400, jamais juste pour l'hospitalisation.
-  if (!dossier_id || !voie_entree || !type_patient || (!service && !type_consultation)) {
-    return res.status(400).json({ error: "dossier_id (dans l'URL), voie_entree, type_patient, et service (hospitalisation) OU type_consultation (consultation) sont requis" });
-  }
+  const erreurValidation = validerCreationEpisode({ dossier_id, voie_entree, service, type_consultation, type_patient });
+  if (erreurValidation) return res.status(400).json({ error: erreurValidation });
 
   const { data: episodesOuverts, error: erreurRecherche } = await supabase
     .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
@@ -477,9 +500,30 @@ app.post('/api/paiements', async (req, res) => {
     const { data: existant } = await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle();
     if (existant) return res.status(200).json(existant);
   }
+
+  const corps = { ...req.body };
+
+  // Remboursement de crédit : le solde de référence vient TOUJOURS du dernier paiement connu
+  // en base, jamais de ce que le navigateur affichait au moment du clic — sinon une donnée
+  // locale périmée (ou 2 remboursements lancés au même instant) pourrait faire passer le solde
+  // sous zéro sans que personne ne le remarque. solde_restant envoyé par le client est ignoré.
+  if (corps.mode === 'remboursement_credit') {
+    if (!corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
+    const { data: dernierPaiement, error: erreurLecture } = await supabase
+      .from('paiements').select('solde_restant').eq('episode_id', corps.episode_id)
+      .order('date_paiement', { ascending: false }).limit(1).maybeSingle();
+    if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+    const soldeActuel = (dernierPaiement && dernierPaiement.solde_restant) || 0;
+    const montant = parseFloat(corps.montant) || 0;
+    if (soldeActuel <= 0) return res.status(400).json({ error: 'Aucun solde de crédit à rembourser pour cet épisode.' });
+    if (montant <= 0) return res.status(400).json({ error: 'Le montant du remboursement doit être supérieur à 0.' });
+    if (montant > soldeActuel) return res.status(400).json({ error: `Le remboursement (${montant}) dépasse le solde restant (${soldeActuel}).` });
+    corps.solde_restant = soldeActuel - montant;
+  }
+
   const { data, error } = await supabase
     .from('paiements')
-    .insert({ ...req.body, local_id: local_id || null })
+    .insert({ ...corps, local_id: local_id || null })
     .select()
     .single();
   if (error) {
@@ -496,9 +540,8 @@ app.post('/api/paiements', async (req, res) => {
 // encaissé lui-même, pour éviter qu'une caissière encaisse en cash puis annule pour
 // empocher). Le paiement n'est jamais supprimé, juste marqué — la trace reste complète.
 app.patch('/api/paiements/:id/annuler', async (req, res) => {
-  const { data: profil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
-  if (!profil || !(profil.role === 'direction' || profil.role === 'administrateur')) {
-    return res.status(403).json({ error: "Seule la direction peut annuler une transaction déjà encaissée." });
+  if (!(await aPermission(req.user.id, 'paiement_annuler'))) {
+    return res.status(403).json({ error: "Permission 'paiement_annuler' requise pour annuler une transaction déjà encaissée." });
   }
   const { motif } = req.body;
   if (!motif || !motif.trim()) return res.status(400).json({ error: "Un motif est requis pour annuler une transaction." });
@@ -517,16 +560,27 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
   res.json(data);
 });
 
+// Numéro de lot suivant, pour un partenaire — ATOMIQUE (une seule requête SQL qui lit et
+// incrémente en même temps), contrairement à l'ancien calcul côté navigateur (max des lots
+// existants + 1) qui pouvait attribuer 2 fois le même numéro si généré 2 fois à quelques
+// secondes d'écart. ong_partenaires.prochain_numero devient la vraie source, mise à jour à
+// chaque appel — plus besoin de la recalculer depuis l'historique des lots.
+app.post('/api/lots/prochain-numero', async (req, res) => {
+  const { ong_partenaire } = req.body;
+  if (!ong_partenaire) return res.status(400).json({ error: 'ong_partenaire requis' });
+  const { data, error } = await supabase.rpc('incrementer_prochain_numero_lot', { p_ong: ong_partenaire });
+  if (error) return res.status(500).json({ error: error.message });
+  if (data === null || data === undefined) return res.status(404).json({ error: `Partenaire "${ong_partenaire}" introuvable.` });
+  res.json({ numero: data });
+});
+
 // Route : création d'un utilisateur par un administrateur (remplace
 // auth.createUserWithEmailAndPassword de Firebase, qui n'a pas d'équivalent sûr côté
 // client avec Supabase — créer un compte via le SDK client déconnecterait
 // l'administrateur en le remplaçant par la session du nouveau compte).
-// Protégée : seul un appelant dont la ligne dans la table "users" a role =
-// 'administrateur' peut l'utiliser.
 app.post('/api/admin/users', async (req, res) => {
-  const { data: profil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
-  if (!profil || profil.role !== 'administrateur') {
-    return res.status(403).json({ error: "Réservé aux administrateurs." });
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
   }
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email et password requis.' });
@@ -538,6 +592,25 @@ app.post('/api/admin/users', async (req, res) => {
     await getAuth().setCustomUserClaims(nouvelUtilisateur.uid, { role: 'authenticated' });
     res.status(201).json({ uid: nouvelUtilisateur.uid });
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Génère un lien de réinitialisation SANS envoyer d'email — identifiant@chf.com n'est pas une
+// vraie boîte mail (voir discussion avec Esdras du 22/08), donc sendPasswordResetEmail
+// n'atteindrait jamais personne tout en affichant "envoyé avec succès". L'administrateur
+// récupère le lien ici et le transmet lui-même (téléphone, WhatsApp, en personne).
+app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const { email } = req.body;
+  if (!email || !String(email).trim()) return res.status(400).json({ error: 'email requis.' });
+  try {
+    const lien = await getAuth().generatePasswordResetLink(email.trim(), { url: process.env.FRONTEND_URL || 'https://chf-app2.onrender.com' });
+    res.json({ lien });
+  } catch (e) {
+    if (e.code === 'auth/user-not-found') return res.status(404).json({ error: 'Aucun compte avec cet email.' });
     res.status(500).json({ error: e.message });
   }
 });
