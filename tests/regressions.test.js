@@ -163,3 +163,11 @@ test("episodeVersFlat recalcule totalGlobal à partir des fiches — la table ep
   assert.match(blocFonction, /Number\(f\.total_global\)/, "doit convertir total_global en nombre (peut revenir en chaîne depuis Postgres)");
   assert.match(blocFonction, /\n\s*totalGlobal,\n/, "totalGlobal doit être inclus dans l'objet renvoyé");
 });
+
+test("GET /api/admin/utilisateurs-firebase exige utilisateurs_gerer avant de lister les comptes Firebase (uid + email) — route temporaire pour retrouver l'email des comptes créés avant l'ajout de users.email", () => {
+  const debut = serverSrc.indexOf("app.get('/api/admin/utilisateurs-firebase'");
+  const blocRoute = serverSrc.slice(debut, debut + 500);
+  assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
+  assert.match(blocRoute, /getAuth\(\)\.listUsers\(\)/, "doit lister les comptes via Firebase Admin");
+  assert.doesNotMatch(blocRoute, /\bpassword\b/i, "ne doit jamais exposer de mot de passe");
+});

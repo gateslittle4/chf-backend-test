@@ -701,6 +701,23 @@ app.post('/api/admin/users', async (req, res) => {
   }
 });
 
+// Route temporaire — liste les comptes Firebase Auth (uid + email) pour permettre de retrouver
+// l'email d'un compte créé avant l'ajout de la colonne users.email (users.email était vide pour
+// ces comptes-là, mais le compte Firebase Auth, lui, a toujours eu un email). À retirer une fois
+// le backfill fait ; garde aussi une utilité ponctuelle pour l'audit recommandé dans PLAN_RLS.md
+// ("vérifie la liste des comptes existants... pour repérer un compte administrateur non reconnu").
+app.get('/api/admin/utilisateurs-firebase', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  try {
+    const { users } = await getAuth().listUsers();
+    res.json(users.map(u => ({ uid: u.uid, email: u.email || null })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Génère un lien de réinitialisation SANS envoyer d'email — identifiant@chf.com n'est pas une
 // vraie boîte mail (voir discussion avec Esdras du 22/08), donc sendPasswordResetEmail
 // n'atteindrait jamais personne tout en affichant "envoyé avec succès". L'administrateur
