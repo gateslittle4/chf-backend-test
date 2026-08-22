@@ -134,6 +134,14 @@ function ficheVersColonnes(f) {
   };
 }
 
+// Une fiche envoyée par le navigateur juste après sa création porte un id local généré
+// côté client ("fiche-" + Date.now()), pas encore un vrai UUID Postgres — cette fiche est
+// donc nouvelle, même si f.id n'est pas vide. La traiter comme UPDATE échouait avec
+// "invalid input syntax for type uuid", une erreur permanente jamais résolue par un
+// nouvel essai, qui bloquait l'opération indéfiniment dans la file hors-ligne du navigateur.
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function estUnVraiUuid(id) { return typeof id === 'string' && UUID_REGEX.test(id); }
+
 async function episodeVersFlat(ep) {
   const { data: dossier } = await supabase.from('dossiers').select('*').eq('id', ep.dossier_id).single();
   const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
@@ -226,7 +234,7 @@ app.put('/api/episodes/:id', async (req, res) => {
   // pas la suppression de fiches individuelles (aucun ancien appel ne l'utilisait ainsi).
   if (Array.isArray(d.fiches)) {
     for (const f of d.fiches) {
-      if (f.id) {
+      if (estUnVraiUuid(f.id)) {
         // Avant : ni l'erreur ni le nombre de lignes touchées n'étaient vérifiés ici —
         // même angle mort que /api/catalog (succès silencieux même si rien n'est écrit).
         const { data: fd, error: fe } = await supabase.from('fiches').update(ficheVersColonnes(f)).eq('id', f.id).select();

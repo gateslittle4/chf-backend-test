@@ -96,3 +96,15 @@ test("POST /api/dossiers et POST /api/dossiers/:dossierId/episodes vérifient lo
   assert.match(blocEpisode, /if \(local_id\)/, "POST /api/dossiers/:dossierId/episodes doit vérifier local_id avant d'insérer");
   assert.match(blocEpisode, /local_id: local_id \|\| null/, "doit enregistrer le local_id reçu");
 });
+
+test("PUT /api/episodes/:id ne traite une fiche comme UPDATE que si f.id est un vrai UUID — sinon un id local ('fiche-' + Date.now()) provoquait 'invalid input syntax for type uuid', une erreur permanente jamais résolue par un nouvel essai, qui bloquait l'opération indéfiniment dans pending_ops côté navigateur", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
+  assert.match(blocRoute, /estUnVraiUuid\(f\.id\)/, "la boucle sur d.fiches doit choisir UPDATE/INSERT via une validation UUID, pas juste 'if (f.id)'");
+  assert.doesNotMatch(blocRoute, /if \(f\.id\) \{/, "ne doit plus traiter tout f.id non-vide comme une fiche existante");
+
+  const uuidRegexMatch = serverSrc.match(/const UUID_REGEX = (\/.*\/i);/);
+  assert.ok(uuidRegexMatch, "UUID_REGEX introuvable dans server.js");
+  const UUID_REGEX = eval(uuidRegexMatch[1]);
+  assert.strictEqual(UUID_REGEX.test('fiche-1755878400000'), false, "un id généré côté navigateur ne doit pas passer pour un UUID");
+  assert.strictEqual(UUID_REGEX.test('a1b2c3d4-e5f6-7890-abcd-ef1234567890'), true, "un vrai UUID doit être reconnu");
+});
