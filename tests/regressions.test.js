@@ -146,3 +146,13 @@ test("episodeVersFlat journalise (ne l'avale plus silencieusement) l'erreur de l
   assert.match(blocFonction, /error: erreurDossier/, "doit capturer l'erreur de la requête sur dossiers");
   assert.match(blocFonction, /console\.error\(.*erreurDossier/, "doit journaliser l'erreur au lieu de l'ignorer");
 });
+
+test("dateOuNull convertit une date de naissance vide en null, jamais en chaîne vide — Postgres refuse '' pour une colonne date ('invalid input syntax for type date'), et la date de naissance est optionnelle (saisie rétroactive, patient qui ne la connaît pas)", () => {
+  assert.match(serverSrc, /function dateOuNull\(v\) \{ return v \? v : null; \}/, "dateOuNull introuvable ou modifiée");
+  for (const routeStart of ["app.post('/api/episodes'", "app.post('/api/dossiers'", "app.put('/api/dossiers/:id'"]) {
+    const i = serverSrc.indexOf(routeStart);
+    assert.ok(i !== -1, `route ${routeStart} introuvable`);
+    const bloc = serverSrc.slice(i, i + 1000);
+    assert.match(bloc, /date_naissance:\s*dateOuNull\(/, `${routeStart} doit passer date_naissance par dateOuNull()`);
+  }
+});

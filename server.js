@@ -118,6 +118,12 @@ function flatVersStatut(status) {
 function typePatientVersFlat(tp) { return tp === 'partenaire' ? 'ONG' : 'Privé'; }
 function flatVersTypePatient(typePatient) { return typePatient === 'ONG' ? 'partenaire' : 'prive'; }
 
+// La date de naissance est optionnelle côté formulaire (saisie rétroactive, patient qui ne la
+// connaît pas) : le champ vide arrive comme "" et Postgres refuse "" pour une colonne date
+// ("invalid input syntax for type date"). Convertit en null, seule valeur qu'une colonne date
+// accepte pour "pas de valeur".
+function dateOuNull(v) { return v ? v : null; }
+
 function ficheVersFlat(f) {
   return {
     id: f.id, numeroFiche: f.numero_fiche, dateCreation: f.date_creation,
@@ -191,7 +197,7 @@ app.post('/api/episodes', async (req, res) => {
     .from('dossiers')
     .insert({
       numero_dossier: d.numero_dossier || `AUTO-${Date.now()}`,
-      nom: d.nom_patient, date_naissance: d.date_naissance, telephone: d.telephone, adresse: d.adresse,
+      nom: d.nom_patient, date_naissance: dateOuNull(d.date_naissance), telephone: d.telephone, adresse: d.adresse,
     })
     .select().single();
   if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
@@ -336,7 +342,7 @@ app.post('/api/dossiers', async (req, res) => {
     if (existant) return res.status(200).json(existant);
   }
   const { data, error } = await supabase
-    .from('dossiers').insert({ numero_dossier, nom, date_naissance, telephone, adresse, local_id: local_id || null }).select().single();
+    .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
   if (error) {
     if (error.code === '23505' && local_id) {
       const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
@@ -360,7 +366,7 @@ app.put('/api/dossiers/:id', async (req, res) => {
   const { nom, date_naissance, telephone, adresse } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
   const { data, error } = await supabase
-    .from('dossiers').update({ nom, date_naissance, telephone, adresse }).eq('id', req.params.id).select();
+    .from('dossiers').update({ nom, date_naissance: dateOuNull(date_naissance), telephone, adresse }).eq('id', req.params.id).select();
   if (error) return res.status(500).json({ error: error.message });
   if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
   res.json(data[0]);
