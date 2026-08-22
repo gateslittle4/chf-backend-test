@@ -71,7 +71,7 @@ test("POST /api/paiements en mode remboursement_credit relit le solde en base �
 });
 
 test("episodeVersFlat expose est_hospitalisation — sinon l'onglet Hospitalisation et le taux d'occupation Direction ne peuvent pas savoir qui est hospitalisé", () => {
-  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf('function episodeVersFlat') + 800);
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf('function episodeVersFlat') + 1500);
   assert.match(blocFlat, /estHospitalisation:\s*ep\.est_hospitalisation/, "episodeVersFlat doit renvoyer estHospitalisation");
 });
 
@@ -107,4 +107,42 @@ test("PUT /api/episodes/:id ne traite une fiche comme UPDATE que si f.id est un 
   const UUID_REGEX = eval(uuidRegexMatch[1]);
   assert.strictEqual(UUID_REGEX.test('fiche-1755878400000'), false, "un id généré côté navigateur ne doit pas passer pour un UUID");
   assert.strictEqual(UUID_REGEX.test('a1b2c3d4-e5f6-7890-abcd-ef1234567890'), true, "un vrai UUID doit être reconnu");
+});
+
+test("POST /api/episodes lit le corps en snake_case (nom_patient, numero_dossier, service_choisi, type_patient, ong_partenaire) — tous les appelants passent par toEpisodeApi() côté navigateur, qui envoie du snake_case ; lire du camelCase laissait ces champs toujours undefined et bloquait TOUTE création de dossier avec 'Le nom du patient est requis', même nom valide fourni", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes'"), serverSrc.indexOf("app.put('/api/episodes/:id'"));
+  assert.match(blocRoute, /!d\.nom_patient/, "la vérification du nom doit lire d.nom_patient, pas d.nomPatient");
+  assert.doesNotMatch(blocRoute, /d\.nomPatient/, "ne doit plus lire d.nomPatient (camelCase) nulle part dans cette route");
+  assert.match(blocRoute, /d\.numero_dossier/, "doit lire d.numero_dossier pour le numéro de dossier saisi par l'utilisateur");
+  assert.match(blocRoute, /d\.service_choisi/, "doit lire d.service_choisi");
+  assert.match(blocRoute, /d\.type_patient/, "doit lire d.type_patient");
+  assert.match(blocRoute, /d\.ong_partenaire/, "doit lire d.ong_partenaire");
+});
+
+test("PUT /api/episodes/:id lit le corps en snake_case (service_choisi, type_patient, ong_partenaire, numero_lot, verrouille_facture, date_suspension, mois_report) — sinon l'assignation à un lot de facturation, le changement de service/ONG/type, la suspension et le report au mois suivant réussissaient (200 OK) sans jamais rien écrire en base", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
+  for (const champ of ['service_choisi', 'type_patient', 'ong_partenaire', 'numero_lot', 'verrouille_facture', 'date_suspension', 'mois_report']) {
+    assert.match(blocRoute, new RegExp(`d\\.${champ}\\b`), `doit lire d.${champ}`);
+  }
+  assert.doesNotMatch(blocRoute, /d\.(serviceChoisi|typePatient|ongPartenaire|numeroLot|verrouilleFacture|dateSuspension|moisReport)\b/, "ne doit plus lire ces champs en camelCase");
+});
+
+test("PUT /api/episodes/:id exige la permission facturation_modifier pour modifier un dossier déjà archivé (statut ferme) — avant, n'importe quel utilisateur connecté pouvait modifier les fiches/totaux d'un dossier déjà facturé et verrouillé en appelant l'API directement, même si le bouton était caché dans l'interface", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
+  assert.match(blocRoute, /statut === 'ferme'/, "doit vérifier le statut de l'épisode avant toute modification");
+  assert.match(blocRoute, /aPermission\(req\.user\.id, 'facturation_modifier'\)/, "doit exiger la permission facturation_modifier pour un dossier déjà archivé");
+  assert.match(blocRoute, /res\.status\(403\)/, "doit renvoyer 403 si la permission manque");
+});
+
+test("PUT /api/episodes/:id met à jour dossiers.nom quand nom_patient est fourni — avant, corriger un nom de patient depuis Archives affichait 'succès' sans que rien ne soit jamais enregistré (le nom vit sur dossiers, que cette route ne touchait pas du tout)", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
+  assert.match(blocRoute, /d\.nom_patient !== undefined/, "doit vérifier la présence de d.nom_patient");
+  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: d\.nom_patient \}\)/, "doit mettre à jour la colonne nom de la table dossiers");
+  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: d\.nom_patient \}\)\.eq\('id', episodeActuel\.dossier_id\)\.select\(\)/, "doit vérifier qu'une ligne a bien été affectée (même angle mort que les autres updates de ce fichier)");
+});
+
+test("episodeVersFlat journalise (ne l'avale plus silencieusement) l'erreur de lecture du dossier lié à un épisode — avant, un dossier introuvable ou une erreur Supabase transitoire faisait apparaître un patient 'sans nom' dans Archives/Analytics sans aucun signal d'erreur", () => {
+  const blocFonction = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf('async function episodeVersFlat') + 700);
+  assert.match(blocFonction, /error: erreurDossier/, "doit capturer l'erreur de la requête sur dossiers");
+  assert.match(blocFonction, /console\.error\(.*erreurDossier/, "doit journaliser l'erreur au lieu de l'ignorer");
 });

@@ -143,7 +143,11 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 function estUnVraiUuid(id) { return typeof id === 'string' && UUID_REGEX.test(id); }
 
 async function episodeVersFlat(ep) {
-  const { data: dossier } = await supabase.from('dossiers').select('*').eq('id', ep.dossier_id).single();
+  const { data: dossier, error: erreurDossier } = await supabase.from('dossiers').select('*').eq('id', ep.dossier_id).single();
+  // Avant : cette erreur était silencieusement ignorée — un épisode dont le dossier ne pouvait
+  // pas être lu (ligne orpheline, incident Supabase transitoire) apparaissait comme un patient
+  // "sans nom" dans Archives/Analytics sans le moindre signal qu'une donnée manque vraiment.
+  if (erreurDossier) console.error(`⚠️ episodeVersFlat: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id}) :`, erreurDossier.message);
   const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
   return {
     id: ep.id,
@@ -175,16 +179,19 @@ app.get('/api/episodes', async (req, res) => {
 // du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
 app.post('/api/episodes', async (req, res) => {
   const d = req.body;
+  // Tous les appelants passent par toEpisodeApi() côté navigateur avant d'envoyer, donc le
+  // corps reçu ici est en snake_case (nom_patient, pas nomPatient) — lire les champs en
+  // camelCase les laissait toujours undefined, et cette création échouait systématiquement.
   // Un nom manquant/vide laissait l'erreur brute de Postgres remonter telle quelle à l'écran
   // ("null value in column nom... violates not-null constraint") au lieu d'un message clair.
-  if (!d.nomPatient || !String(d.nomPatient).trim()) {
+  if (!d.nom_patient || !String(d.nom_patient).trim()) {
     return res.status(400).json({ error: "Le nom du patient est requis pour créer un dossier." });
   }
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
-      numero_dossier: d.numDossier || `AUTO-${Date.now()}`,
-      nom: d.nomPatient, date_naissance: d.dateNaissance, telephone: d.telephone, adresse: d.adresse,
+      numero_dossier: d.numero_dossier || `AUTO-${Date.now()}`,
+      nom: d.nom_patient, date_naissance: d.date_naissance, telephone: d.telephone, adresse: d.adresse,
     })
     .select().single();
   if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
@@ -193,8 +200,8 @@ app.post('/api/episodes', async (req, res) => {
     .from('episodes')
     .insert({
       dossier_id: dossier.id,
-      voie_entree: 'consultation', service: d.serviceChoisi || 'Général',
-      type_patient: flatVersTypePatient(d.typePatient), ong_partenaire: d.ongPartenaire || null,
+      voie_entree: 'consultation', service: d.service_choisi || 'Général',
+      type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null,
       statut: flatVersStatut(d.status), est_hospitalisation: false,
     })
     .select().single();
@@ -211,22 +218,47 @@ app.post('/api/episodes', async (req, res) => {
 
 app.put('/api/episodes/:id', async (req, res) => {
   const d = req.body;
+
+  // Même défaut que POST /api/episodes ci-dessus : tous les appelants envoient du snake_case
+  // via toEpisodeApi() — lire ces champs en camelCase les laissait toujours undefined, donc
+  // ces mises à jour (lot de facturation, service, ONG, type patient, suspension, report au
+  // mois suivant) réussissaient (200 OK) sans jamais rien écrire.
+  const { data: episodeActuel, error: erreurActuel } = await supabase.from('episodes').select('statut, dossier_id').eq('id', req.params.id).maybeSingle();
+  if (erreurActuel) return res.status(500).json({ error: erreurActuel.message });
+  // Modifier un dossier déjà archivé (statut 'ferme' — donc potentiellement déjà facturé/lotté)
+  // n'avait aucun contrôle de rôle, contrairement à DELETE juste en dessous. Même logique ici,
+  // avec la permission 'facturation_modifier' : un dossier encore ouvert reste librement
+  // modifiable (saisie rétroactive normale), un dossier déjà archivé ne l'est plus pour tous.
+  if (episodeActuel && episodeActuel.statut === 'ferme') {
+    if (!(await aPermission(req.user.id, 'facturation_modifier'))) {
+      return res.status(403).json({ error: "Permission 'facturation_modifier' requise pour modifier un dossier déjà archivé." });
+    }
+  }
+
   const maj = {};
-  if (d.serviceChoisi !== undefined) maj.service = d.serviceChoisi;
-  if (d.typePatient !== undefined) maj.type_patient = flatVersTypePatient(d.typePatient);
-  if (d.ongPartenaire !== undefined) maj.ong_partenaire = d.ongPartenaire;
+  if (d.service_choisi !== undefined) maj.service = d.service_choisi;
+  if (d.type_patient !== undefined) maj.type_patient = flatVersTypePatient(d.type_patient);
+  if (d.ong_partenaire !== undefined) maj.ong_partenaire = d.ong_partenaire;
   if (d.status !== undefined) {
     maj.statut = flatVersStatut(d.status);
-    maj.date_suspension = d.status === 'suspendu' ? (d.dateSuspension || new Date().toISOString()) : null;
-    maj.mois_report = d.status === 'reporte' ? (d.moisReport || null) : null;
+    maj.date_suspension = d.status === 'suspendu' ? (d.date_suspension || new Date().toISOString()) : null;
+    maj.mois_report = d.status === 'reporte' ? (d.mois_report || null) : null;
   }
-  if (d.numeroLot !== undefined) maj.numero_lot = d.numeroLot;
-  if (d.verrouilleFacture !== undefined) maj.verrouille_facture = d.verrouilleFacture;
+  if (d.numero_lot !== undefined) maj.numero_lot = d.numero_lot;
+  if (d.verrouille_facture !== undefined) maj.verrouille_facture = d.verrouille_facture;
 
   if (Object.keys(maj).length > 0) {
     const { data, error } = await supabase.from('episodes').update(maj).eq('id', req.params.id).select();
     if (error) return res.status(500).json({ error: error.message });
     if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
+  }
+
+  // Le nom du patient vit sur la table dossiers, pas episodes — cette route ne le touchait
+  // jamais, donc corriger un nom depuis Archives affichait "succès" sans rien enregistrer.
+  if (d.nom_patient !== undefined && String(d.nom_patient).trim() && episodeActuel) {
+    const { data: nomMaj, error: erreurNom } = await supabase.from('dossiers').update({ nom: d.nom_patient }).eq('id', episodeActuel.dossier_id).select();
+    if (erreurNom) return res.status(500).json({ error: erreurNom.message });
+    if (!nomMaj || nomMaj.length === 0) return res.status(404).json({ error: "Dossier lié introuvable — le nom n'a pas été modifié." });
   }
 
   // Fiches : upsert (id fourni = mise à jour, sinon = nouvelle fiche). Ne supprime
