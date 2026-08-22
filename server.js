@@ -315,6 +315,13 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
 // hospitalisation) et faisait créer un dossier en double par l'écran "🔍 Dossier/Épisode" au lieu
 // de rattacher l'épisode au dossier existant. Voir api/apiDossierEpisode.js (creerEpisode) côté front.
 app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
+  // Infirmier/archiviste peuvent créer un Dossier (route ci-dessus) mais pas déclencher un
+  // Épisode (Consultation/Hospitalisation) — vérifié ici aussi, pas seulement côté écran, sinon
+  // un appel direct à cette route contournerait la restriction affichée dans l'app.
+  const { data: profilCreateur } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (profilCreateur && ['infirmier', 'archiviste'].includes(profilCreateur.role)) {
+    return res.status(403).json({ error: "Ce rôle peut créer un dossier, mais pas un épisode — réservé à la caisse." });
+  }
   const dossier_id = req.params.dossierId;
   const { voie_entree, service, type_consultation, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
   // Avant : "service" était exigé dans tous les cas — mais le front envoie volontairement
