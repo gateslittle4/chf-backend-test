@@ -718,6 +718,30 @@ app.get('/api/admin/utilisateurs-firebase', async (req, res) => {
   }
 });
 
+// Route temporaire — supprime des comptes Firebase Auth fantômes : créés par un essai de
+// création d'utilisateur interrompu avant l'écriture du profil Supabase (voir le bug
+// created_at, commit 488b134 côté frontend) — le compte Firebase existe mais n'a jamais eu
+// de ligne dans users. Ne touche jamais un compte qui A un profil dans users (vérifié ici).
+app.post('/api/admin/supprimer-comptes-fantomes', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const { uids } = req.body;
+  if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: 'uids (tableau non vide) requis.' });
+  const resultats = [];
+  for (const uid of uids) {
+    const { data: profil } = await supabase.from('users').select('id').eq('id', uid).maybeSingle();
+    if (profil) { resultats.push({ uid, supprime: false, raison: 'a un profil dans users — pas un fantôme, non supprimé' }); continue; }
+    try {
+      await getAuth().deleteUser(uid);
+      resultats.push({ uid, supprime: true });
+    } catch (e) {
+      resultats.push({ uid, supprime: false, raison: e.message });
+    }
+  }
+  res.json(resultats);
+});
+
 // Génère un lien de réinitialisation SANS envoyer d'email — identifiant@chf.com n'est pas une
 // vraie boîte mail (voir discussion avec Esdras du 22/08), donc sendPasswordResetEmail
 // n'atteindrait jamais personne tout en affichant "envoyé avec succès". L'administrateur

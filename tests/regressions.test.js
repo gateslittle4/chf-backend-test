@@ -171,3 +171,12 @@ test("GET /api/admin/utilisateurs-firebase exige utilisateurs_gerer avant de lis
   assert.match(blocRoute, /getAuth\(\)\.listUsers\(\)/, "doit lister les comptes via Firebase Admin");
   assert.doesNotMatch(blocRoute, /\bpassword\b/i, "ne doit jamais exposer de mot de passe");
 });
+
+test("POST /api/admin/supprimer-comptes-fantomes exige utilisateurs_gerer et ne supprime JAMAIS un compte Firebase qui a un profil dans users — seulement les comptes fantômes (Firebase Auth créé, écriture du profil échouée juste après)", () => {
+  const debut = serverSrc.indexOf("app.post('/api/admin/supprimer-comptes-fantomes'");
+  const blocRoute = serverSrc.slice(debut, debut + 900);
+  assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
+  assert.match(blocRoute, /\.from\('users'\)\.select\('id'\)\.eq\('id', uid\)\.maybeSingle\(\)/, "doit vérifier l'absence de profil users avant de supprimer");
+  assert.match(blocRoute, /if \(profil\) \{.*supprime: false/s, "doit refuser de supprimer un compte qui a un profil users");
+  assert.match(blocRoute, /getAuth\(\)\.deleteUser\(uid\)/, "doit supprimer via Firebase Admin uniquement pour les vrais fantômes");
+});
