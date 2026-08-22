@@ -266,6 +266,40 @@ app.post('/api/dossiers', async (req, res) => {
   res.status(201).json(data);
 });
 
+// Fiche patient — infos de base (nom, tél, adresse, date de naissance), pour affichage/préremplissage.
+app.get('/api/dossiers/:id', async (req, res) => {
+  const { data, error } = await supabase.from('dossiers').select('*').eq('id', req.params.id).single();
+  if (error) return res.status(404).json({ error: 'Dossier introuvable' });
+  res.json(data);
+});
+
+// Modifier les infos de base d'un patient (ex : nouveau numéro de téléphone) — n'importe qui de
+// connecté peut le faire (comme la création), pas une action sensible comme l'annulation d'un paiement.
+app.put('/api/dossiers/:id', async (req, res) => {
+  const { nom, date_naissance, telephone, adresse } = req.body;
+  if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
+  const { data, error } = await supabase
+    .from('dossiers').update({ nom, date_naissance, telephone, adresse }).eq('id', req.params.id).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
+  res.json(data[0]);
+});
+
+// Historique complet d'un patient : TOUS ses épisodes (pas seulement les ouverts, contrairement à
+// episodes-ouverts ci-dessous), chacun avec son dernier paiement connu pour déduire le statut
+// (payé / solde restant / jamais facturé) sans recalculer côté serveur — le front décide de l'affichage.
+app.get('/api/dossiers/:id/historique', async (req, res) => {
+  const { data: episodes, error } = await supabase
+    .from('episodes').select('*').eq('dossier_id', req.params.id).order('date_ouverture', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const enrichis = await Promise.all((episodes || []).map(async (ep) => {
+    const { data: paiements } = await supabase
+      .from('paiements').select('*').eq('episode_id', ep.id).order('date_paiement', { ascending: false }).limit(1);
+    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null };
+  }));
+  res.json(enrichis);
+});
+
 // Épisodes ouverts d'un dossier — la question centrale du flux anti-doublon
 app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   const { data, error } = await supabase
@@ -283,8 +317,11 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
 app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
   const dossier_id = req.params.dossierId;
   const { voie_entree, service, type_consultation, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
-  if (!dossier_id || !voie_entree || !service || !type_patient) {
-    return res.status(400).json({ error: 'dossier_id (dans l\'URL), voie_entree, service et type_patient sont requis' });
+  // Avant : "service" était exigé dans tous les cas — mais le front envoie volontairement
+  // service=null pour une consultation (il envoie type_consultation à la place), donc "Consultation"
+  // échouait systématiquement en erreur 400, jamais juste pour l'hospitalisation.
+  if (!dossier_id || !voie_entree || !type_patient || (!service && !type_consultation)) {
+    return res.status(400).json({ error: "dossier_id (dans l'URL), voie_entree, type_patient, et service (hospitalisation) OU type_consultation (consultation) sont requis" });
   }
 
   const { data: episodesOuverts, error: erreurRecherche } = await supabase
