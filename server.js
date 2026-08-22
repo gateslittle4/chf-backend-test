@@ -285,12 +285,25 @@ app.get('/api/dossiers/recherche', async (req, res) => {
 });
 
 app.post('/api/dossiers', async (req, res) => {
-  const { numero_dossier, nom, date_naissance, telephone, adresse } = req.body;
+  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
+  // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
+  // apiDossierEpisode passe par la file d'attente hors-ligne (avant, cette route n'était jamais
+  // rejouée automatiquement, donc jamais appelée deux fois pour la même action).
+  if (local_id) {
+    const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
+    if (existant) return res.status(200).json(existant);
+  }
   const { data, error } = await supabase
-    .from('dossiers').insert({ numero_dossier, nom, date_naissance, telephone, adresse }).select().single();
-  if (error) return res.status(500).json({ error: error.message });
+    .from('dossiers').insert({ numero_dossier, nom, date_naissance, telephone, adresse, local_id: local_id || null }).select().single();
+  if (error) {
+    if (error.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
   res.status(201).json(data);
 });
 
@@ -350,9 +363,18 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     return res.status(403).json({ error: "Permission 'episode_creer' requise — ce rôle peut créer un dossier, mais pas un épisode." });
   }
   const dossier_id = req.params.dossierId;
-  const { voie_entree, service, type_consultation, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement } = req.body;
+  const { voie_entree, service, type_consultation, type_patient, ong_partenaire, est_hospitalisation, forcerMalgreAvertissement, local_id } = req.body;
   const erreurValidation = validerCreationEpisode({ dossier_id, voie_entree, service, type_consultation, type_patient });
   if (erreurValidation) return res.status(400).json({ error: erreurValidation });
+
+  // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
+  // apiDossierEpisode passe par la file d'attente hors-ligne. Vérifiée AVANT la règle de blocage
+  // hospitalisation ci-dessous : si c'est une vraie répétition de la même tentative (déjà créée),
+  // il faut renvoyer cet épisode, pas le comparer à lui-même et le bloquer par erreur.
+  if (local_id) {
+    const { data: existant } = await supabase.from('episodes').select('*').eq('local_id', local_id).maybeSingle();
+    if (existant) return res.status(200).json(existant);
+  }
 
   const { data: episodesOuverts, error: erreurRecherche } = await supabase
     .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
@@ -381,9 +403,15 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
 
   const { data, error } = await supabase
     .from('episodes')
-    .insert({ dossier_id, voie_entree, service: service || null, type_consultation: type_consultation || null, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation })
+    .insert({ dossier_id, voie_entree, service: service || null, type_consultation: type_consultation || null, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation, local_id: local_id || null })
     .select().single();
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    if (error.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('episodes').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
   res.status(201).json(data);
 });
 
@@ -572,6 +600,29 @@ app.post('/api/lots/prochain-numero', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   if (data === null || data === undefined) return res.status(404).json({ error: `Partenaire "${ong_partenaire}" introuvable.` });
   res.json({ numero: data });
+});
+
+// Décrémente le stock de façon atomique (voir fonction_decrementer_stock.sql) — remplace le
+// calcul côté navigateur + réécriture complète du catalogue, qui pouvait perdre une vente si
+// 2 ventes du même médicament arrivaient presque en même temps (2e écriture qui efface la
+// 1ère au lieu de s'additionner). Tout-ou-rien : si un seul article manque, rien n'est décrémenté.
+app.post('/api/stock/decrementer', async (req, res) => {
+  const { decrements } = req.body; // [{ id, qte }, ...]
+  if (!Array.isArray(decrements) || decrements.length === 0) {
+    return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
+  }
+  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  if (!data.succes) {
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant)`).join(', ');
+    return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+  }
+  res.json({ success: true, items: data.items });
 });
 
 // Route : création d'un utilisateur par un administrateur (remplace

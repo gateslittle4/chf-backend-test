@@ -80,3 +80,19 @@ test("POST /api/admin/generer-lien-reinitialisation exige utilisateurs_gerer et 
   assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
   assert.match(blocRoute, /generatePasswordResetLink/, "doit générer le lien sans l'envoyer");
 });
+
+test("POST /api/stock/decrementer appelle la fonction Postgres atomique decrementer_stock_medicaments et renvoie 409 si le stock est insuffisant", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/stock/decrementer'"));
+  assert.match(blocRoute, /supabase\.rpc\('decrementer_stock_medicaments'/, "doit appeler la fonction Postgres atomique, pas un update direct de la table catalog");
+  assert.match(blocRoute, /res\.status\(409\)/, "doit renvoyer 409 (pas 200) si le stock est insuffisant");
+});
+
+test("POST /api/dossiers et POST /api/dossiers/:dossierId/episodes vérifient local_id avant d'insérer — nécessaire maintenant que apiDossierEpisode.js peut rejouer ces appels automatiquement (file d'attente hors-ligne)", () => {
+  const blocDossier = serverSrc.slice(serverSrc.indexOf("app.post('/api/dossiers'"), serverSrc.indexOf("app.get('/api/dossiers/:id'"));
+  assert.match(blocDossier, /if \(local_id\)/, "POST /api/dossiers doit vérifier local_id avant d'insérer");
+  assert.match(blocDossier, /local_id: local_id \|\| null/, "doit enregistrer le local_id reçu");
+
+  const blocEpisode = serverSrc.slice(serverSrc.indexOf("app.post('/api/dossiers/:dossierId/episodes'"), serverSrc.indexOf("app.patch('/api/episodes/:id/hospitaliser'"));
+  assert.match(blocEpisode, /if \(local_id\)/, "POST /api/dossiers/:dossierId/episodes doit vérifier local_id avant d'insérer");
+  assert.match(blocEpisode, /local_id: local_id \|\| null/, "doit enregistrer le local_id reçu");
+});
