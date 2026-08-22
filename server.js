@@ -155,6 +155,13 @@ async function episodeVersFlat(ep) {
   // "sans nom" dans Archives/Analytics sans le moindre signal qu'une donnée manque vraiment.
   if (erreurDossier) console.error(`⚠️ episodeVersFlat: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id}) :`, erreurDossier.message);
   const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
+  // episodes n'a pas de colonne total_global — ce total n'existait qu'en mémoire côté
+  // navigateur, calculé une fois à l'archivage (executerArchivage) et jamais recalculé au
+  // chargement suivant. Tout dossier rechargé depuis le serveur (nouvel onglet, F5, écran
+  // Lots & Facturation qui lit ce total pour chaque dossier) affichait donc 0 Gdes malgré des
+  // fiches réelles en base. Recalculé ici à chaque lecture, à partir des vraies fiches — source
+  // unique de vérité, plutôt que de rapiécer chaque écran qui lit ce total un par un.
+  const totalGlobal = (fiches || []).reduce((s, f) => s + (Number(f.total_global) || 0), 0);
   return {
     id: ep.id,
     nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
@@ -168,6 +175,7 @@ async function episodeVersFlat(ep) {
     estHospitalisation: ep.est_hospitalisation,
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
+    totalGlobal,
     fiches: (fiches || []).map(ficheVersFlat),
   };
 }

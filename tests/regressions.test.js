@@ -71,7 +71,7 @@ test("POST /api/paiements en mode remboursement_credit relit le solde en base �
 });
 
 test("episodeVersFlat expose est_hospitalisation — sinon l'onglet Hospitalisation et le taux d'occupation Direction ne peuvent pas savoir qui est hospitalisé", () => {
-  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf('function episodeVersFlat') + 1500);
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
   assert.match(blocFlat, /estHospitalisation:\s*ep\.est_hospitalisation/, "episodeVersFlat doit renvoyer estHospitalisation");
 });
 
@@ -155,4 +155,11 @@ test("dateOuNull convertit une date de naissance vide en null, jamais en chaîne
     const bloc = serverSrc.slice(i, i + 1000);
     assert.match(bloc, /date_naissance:\s*dateOuNull\(/, `${routeStart} doit passer date_naissance par dateOuNull()`);
   }
+});
+
+test("episodeVersFlat recalcule totalGlobal à partir des fiches — la table episodes n'a pas de colonne total_global, ce total n'existait qu'en mémoire côté navigateur (calculé une fois à l'archivage, jamais recalculé au chargement suivant) ; tout dossier rechargé depuis le serveur (F5, nouvel onglet, écran Lots & Facturation) affichait 0 Gdes malgré des fiches réelles en base", () => {
+  const blocFonction = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFonction, /const totalGlobal = \(fiches \|\| \[\]\)\.reduce\(/, "totalGlobal doit être recalculé depuis les fiches réellement en base");
+  assert.match(blocFonction, /Number\(f\.total_global\)/, "doit convertir total_global en nombre (peut revenir en chaîne depuis Postgres)");
+  assert.match(blocFonction, /\n\s*totalGlobal,\n/, "totalGlobal doit être inclus dans l'objet renvoyé");
 });
