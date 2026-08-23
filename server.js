@@ -405,9 +405,18 @@ app.post('/api/dossiers', async (req, res) => {
   const { data, error } = await supabase
     .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
   if (error) {
-    if (error.code === '23505' && local_id) {
-      const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
-      if (existant) return res.status(200).json(existant);
+    if (error.code === '23505') {
+      if (local_id) {
+        const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
+        if (existant) return res.status(200).json(existant);
+      }
+      // 23505 non résolu par le local_id : un VRAI conflit (numero_dossier déjà pris par un autre
+      // patient), pas une simple répétition de cette même tentative. Avant, ceci tombait dans le
+      // 500 générique ci-dessous — indiscernable côté client d'une vraie panne serveur, donc une
+      // création hors ligne bloquée sur ce conflit était réessayée indéfiniment toutes les 30
+      // secondes (elle ne peut pourtant jamais réussir avec les mêmes données) au lieu d'être
+      // signalée clairement une seule fois. Voir CHF_API.syncPending (api/supabase.js, chf-app2).
+      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
     }
     return res.status(500).json({ error: error.message });
   }

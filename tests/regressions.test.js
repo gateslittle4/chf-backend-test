@@ -105,6 +105,20 @@ test("POST /api/dossiers et POST /api/dossiers/:dossierId/episodes vérifient lo
   assert.match(blocEpisode, /local_id: local_id \|\| null/, "doit enregistrer le local_id reçu");
 });
 
+// Retour d'Esdras (23/08) : un dossier créé hors ligne avec un numero_dossier déjà pris par un
+// AUTRE patient (vraie violation de la contrainte unique dossiers_numero_dossier_key, pas résolue
+// par le local_id) tombait dans le 500 générique — indiscernable côté client d'une vraie panne
+// serveur, donc syncPending() le réessayait indéfiniment toutes les 30s au lieu de le signaler une
+// fois : c'est ce qui faisait "apparaître et disparaître" un dossier bloqué dans la file hors ligne.
+test("POST /api/dossiers renvoie 409 (pas 500) quand la violation 23505 n'est PAS résolue par le local_id — un vrai conflit de numero_dossier, permanent, à distinguer d'une panne serveur transitoire", () => {
+  const blocDossier = serverSrc.slice(serverSrc.indexOf("app.post('/api/dossiers'"), serverSrc.indexOf("app.get('/api/dossiers/:id'"));
+  assert.match(blocDossier, /if \(error\.code === '23505'\)/, "doit distinguer 23505 des autres erreurs avant de statuer sur le code HTTP");
+  assert.match(blocDossier, /res\.status\(409\)\.json\(\{ error: `Le numéro de dossier/, "un conflit numero_dossier non résolu par local_id doit renvoyer 409 avec un message clair");
+  const posConflit = blocDossier.indexOf("status(409)");
+  const posLocalIdCheck = blocDossier.indexOf("if (local_id) {", blocDossier.indexOf("error.code === '23505'"));
+  assert.ok(posLocalIdCheck !== -1 && posLocalIdCheck < posConflit, "doit d'abord retenter la résolution par local_id (retour 200 si c'est bien notre propre tentative rejouée) avant de conclure à un vrai conflit 409");
+});
+
 test("PUT /api/episodes/:id ne traite une fiche comme UPDATE que si f.id est un vrai UUID — sinon un id local ('fiche-' + Date.now()) provoquait 'invalid input syntax for type uuid', une erreur permanente jamais résolue par un nouvel essai, qui bloquait l'opération indéfiniment dans pending_ops côté navigateur", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
   assert.match(blocRoute, /estUnVraiUuid\(f\.id\)/, "la boucle sur d.fiches doit choisir UPDATE/INSERT via une validation UUID, pas juste 'if (f.id)'");
