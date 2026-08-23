@@ -352,3 +352,25 @@ test("verifyToken rejette (403) un compte désactivé (active===false) ou dont d
   assert.match(bloc, /new Date\(profil\.date_expiration\) < new Date\(\)/, "doit rejeter un accès expiré");
   assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403, pas laisser passer");
 });
+
+// Retour d'Esdras (23/08) : pièces jointes au dossier, en priorité les fiches de référence ONG.
+test("Pièces jointes : GET est ouvert (comme GET /api/dossiers/:id), POST/DELETE exigent fiche_patient_modifier (comme PUT /api/dossiers/:id)", () => {
+  const blocGet = blocRoutePermission("app.get('/api/dossiers/:id/pieces-jointes'", "app.post('/api/dossiers/:id/pieces-jointes'");
+  assert.doesNotMatch(blocGet, /aPermission/, "la lecture doit rester ouverte à tout compte connecté, comme GET /api/dossiers/:id");
+
+  const blocPost = blocRoutePermission("app.post('/api/dossiers/:id/pieces-jointes'", "app.get('/api/dossiers/:id/pieces-jointes/:fichierId/lien'");
+  assert.match(blocPost, /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/, "l'ajout doit exiger fiche_patient_modifier");
+
+  const blocDelete = blocRoutePermission("app.delete('/api/dossiers/:id/pieces-jointes/:fichierId'", "app.get('/api/dossiers/:id/episodes-ouverts'");
+  assert.match(blocDelete, /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/, "la suppression doit exiger fiche_patient_modifier");
+});
+
+test("Pièces jointes : le lien de téléchargement est un lien signé temporaire (createSignedUrl), le fichier ne transite jamais par ce serveur", () => {
+  const bloc = blocRoutePermission("app.get('/api/dossiers/:id/pieces-jointes/:fichierId/lien'", "app.delete('/api/dossiers/:id/pieces-jointes/:fichierId'");
+  assert.match(bloc, /createSignedUrl\(piece\.storage_path, 3600\)/, "doit générer un lien signé (1h), pas streamer les octets");
+});
+
+test("Pièces jointes : le bucket Storage est privé (public: false) et créé automatiquement s'il n'existe pas encore, même principe que les sauvegardes automatiques", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function assurerBucketPiecesJointes'), serverSrc.indexOf("app.get('/api/dossiers/:id/pieces-jointes'"));
+  assert.match(bloc, /createBucket\(BUCKET_PIECES_JOINTES, \{ public: false \}\)/, "le bucket doit être privé");
+});

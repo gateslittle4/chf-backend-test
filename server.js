@@ -450,6 +450,92 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
   res.json(enrichis);
 });
 
+// ============================================================
+// PIÈCES JOINTES — retour d'Esdras (23/08) : pouvoir attacher un document à un dossier,
+// en priorité les fiches de référence envoyées par un ONG partenaire (pas un dossier clinique
+// complet, juste éviter qu'un papier important se perde). Stockage Supabase Storage (bucket
+// dédié, privé), métadonnées dans la table pieces_jointes — même principe que les sauvegardes
+// automatiques plus bas dans ce fichier.
+// ============================================================
+const BUCKET_PIECES_JOINTES = 'pieces-jointes-dossiers';
+
+async function assurerBucketPiecesJointes() {
+  const { data: buckets, error } = await supabase.storage.listBuckets();
+  if (error) throw new Error(`Liste des buckets : ${error.message}`);
+  if (!buckets.some(b => b.name === BUCKET_PIECES_JOINTES)) {
+    const { error: erreurCreation } = await supabase.storage.createBucket(BUCKET_PIECES_JOINTES, { public: false });
+    if (erreurCreation) throw new Error(`Création du bucket : ${erreurCreation.message}`);
+  }
+}
+
+app.get('/api/dossiers/:id/pieces-jointes', async (req, res) => {
+  const { data, error } = await supabase
+    .from('pieces_jointes').select('*').eq('dossier_id', req.params.id).order('date_ajout', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// contenu_base64 (pas de multipart/form-data) : réutilise express.json() déjà en place
+// (limite 10mb), pas besoin d'une dépendance d'upload de fichiers séparée pour ce volume
+// (photo d'un document, PDF scanné) — largement suffisant pour une fiche de référence ONG.
+app.post('/api/dossiers/:id/pieces-jointes', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
+  }
+  const { nom_original, type_document, contenu_base64, content_type } = req.body;
+  if (!nom_original || !contenu_base64) {
+    return res.status(400).json({ error: 'nom_original et contenu_base64 sont requis.' });
+  }
+  try {
+    await assurerBucketPiecesJointes();
+    const buffer = Buffer.from(contenu_base64, 'base64');
+    // Horodatage dans le chemin : 2 documents du même nom sur le même dossier ne s'écrasent
+    // jamais l'un l'autre (contrairement aux sauvegardes, où upsert écrase volontairement).
+    const cheminStockage = `${req.params.id}/${Date.now()}-${nom_original}`;
+    const { error: erreurUpload } = await supabase.storage
+      .from(BUCKET_PIECES_JOINTES)
+      .upload(cheminStockage, buffer, { contentType: content_type || 'application/octet-stream' });
+    if (erreurUpload) return res.status(500).json({ error: `Envoi vers Storage : ${erreurUpload.message}` });
+
+    const { data, error } = await supabase.from('pieces_jointes').insert({
+      dossier_id: req.params.id, storage_path: cheminStockage, nom_original,
+      type_document: type_document || null, taille_octets: buffer.length,
+      ajoute_par: req.body.ajoute_par || null, ajoute_par_uid: req.user.id,
+    }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.status(201).json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lien signé temporaire (1h) plutôt que de faire transiter les octets du fichier par ce serveur —
+// le navigateur télécharge directement depuis Supabase Storage.
+app.get('/api/dossiers/:id/pieces-jointes/:fichierId/lien', async (req, res) => {
+  const { data: piece, error: erreurPiece } = await supabase
+    .from('pieces_jointes').select('storage_path, nom_original').eq('id', req.params.fichierId).eq('dossier_id', req.params.id).maybeSingle();
+  if (erreurPiece) return res.status(500).json({ error: erreurPiece.message });
+  if (!piece) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+  const { data, error } = await supabase.storage.from(BUCKET_PIECES_JOINTES).createSignedUrl(piece.storage_path, 3600);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ lien: data.signedUrl, nomOriginal: piece.nom_original });
+});
+
+app.delete('/api/dossiers/:id/pieces-jointes/:fichierId', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
+  }
+  const { data: piece, error: erreurPiece } = await supabase
+    .from('pieces_jointes').select('storage_path').eq('id', req.params.fichierId).eq('dossier_id', req.params.id).maybeSingle();
+  if (erreurPiece) return res.status(500).json({ error: erreurPiece.message });
+  if (!piece) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+  const { error: erreurSuppressionFichier } = await supabase.storage.from(BUCKET_PIECES_JOINTES).remove([piece.storage_path]);
+  if (erreurSuppressionFichier) return res.status(500).json({ error: erreurSuppressionFichier.message });
+  const { error } = await supabase.from('pieces_jointes').delete().eq('id', req.params.fichierId);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
 // Épisodes ouverts d'un dossier — la question centrale du flux anti-doublon
 app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   const { data, error } = await supabase
