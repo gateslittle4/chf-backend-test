@@ -374,3 +374,24 @@ test("Pièces jointes : le bucket Storage est privé (public: false) et créé a
   const bloc = serverSrc.slice(serverSrc.indexOf('async function assurerBucketPiecesJointes'), serverSrc.indexOf("app.get('/api/dossiers/:id/pieces-jointes'"));
   assert.match(bloc, /createBucket\(BUCKET_PIECES_JOINTES, \{ public: false \}\)/, "le bucket doit être privé");
 });
+
+// Retour d'Esdras (23/08) : réquisition de stock par un autre service, jusqu'ici seulement
+// possible en corrigeant chaque médicament un par un dans "Gestion des stocks" (fastidieux, sans
+// trace de quel service a pris quoi).
+test("POST /api/requisitions exige stock_gerer (pas caisse_travailler — retirer du stock pour un service n'est pas une vente), réutilise decrementer_stock_medicaments (tout-ou-rien) et renvoie 409 si le stock est insuffisant", () => {
+  const bloc = blocRoutePermission("app.post('/api/requisitions'", "app.get('/api/requisitions'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'stock_gerer'\)/, "doit exiger stock_gerer");
+  assert.doesNotMatch(bloc, /'caisse_travailler'/, "une réquisition n'est pas une vente");
+  assert.match(bloc, /supabase\.rpc\('decrementer_stock_medicaments'/, "doit réutiliser la fonction atomique déjà utilisée pour les ventes, pas une nouvelle fonction dupliquée");
+  assert.match(bloc, /res\.status\(409\)/, "doit refuser (409) si le stock est insuffisant, pas laisser passer");
+});
+
+test("POST /api/requisitions capture les noms des médicaments depuis le catalogue à jour renvoyé par le décrément, PAS depuis req.body — la réquisition doit rester lisible même si un médicament est renommé/supprimé plus tard", () => {
+  const bloc = blocRoutePermission("app.post('/api/requisitions'", "app.get('/api/requisitions'");
+  assert.match(bloc, /article = \(data\.items \|\| \[\]\)\.find\(i => i\.id === l\.id\)/, "doit chercher le nom dans data.items (catalogue à jour), pas faire confiance à un nom envoyé par le navigateur");
+});
+
+test("GET /api/requisitions accepte stock_gerer OU analytics_voir — Direction/comptable doivent pouvoir consulter le rapport sans avoir le droit de sortir du stock", () => {
+  const bloc = blocRoutePermission("app.get('/api/requisitions'", "app.post('/api/stock/ajouter'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'stock_gerer'\)\) && !\(await aPermission\(req\.user\.id, 'analytics_voir'\)/, "doit accepter stock_gerer OU analytics_voir");
+});

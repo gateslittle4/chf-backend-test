@@ -944,6 +944,65 @@ app.post('/api/stock/decrementer', async (req, res) => {
   res.json({ success: true, items: data.items });
 });
 
+// ============================================================
+// RÉQUISITIONS — retour d'Esdras (23/08) : jusqu'ici, réquisitionner du stock pour un autre
+// service voulait dire aller corriger chaque médicament un par un dans "Gestion des stocks"
+// (fastidieux, aucune trace de quel service a pris quoi). Réutilise la fonction Postgres
+// atomique de décrément déjà utilisée pour les ventes (tout-ou-rien, jamais de survente), avec
+// une trace en plus (table requisitions) pour le rapport "médicaments par service".
+// ============================================================
+
+// stock_gerer : même permission que le reste de "Gestion des stocks" — une réquisition retire du
+// vrai stock, ce n'est pas une vente (donc pas caisse_travailler).
+app.post('/api/requisitions', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  }
+  const { service_demandeur, lignes, demande_par } = req.body;
+  if (!service_demandeur || !String(service_demandeur).trim()) {
+    return res.status(400).json({ error: 'service_demandeur est requis.' });
+  }
+  if (!Array.isArray(lignes) || lignes.length === 0) {
+    return res.status(400).json({ error: 'lignes (tableau non vide) requis.' });
+  }
+  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', {
+    p_decrements: lignes.map(l => ({ id: l.id, qte: l.qte })),
+  });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  if (!data.succes) {
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant)`).join(', ');
+    return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+  }
+  // Les noms viennent du catalogue à jour renvoyé par le décrément (pas de req.body) — la
+  // réquisition doit rester lisible même si un médicament est renommé/supprimé plus tard.
+  const lignesAvecNoms = lignes.map(l => {
+    const article = (data.items || []).find(i => i.id === l.id);
+    return { id: l.id, nom: article ? article.nom : l.id, quantite: l.qte };
+  });
+  const { data: requisition, error: erreurInsert } = await supabase.from('requisitions').insert({
+    service_demandeur: service_demandeur.trim(), lignes: lignesAvecNoms,
+    demande_par: demande_par || null, demande_par_uid: req.user.id,
+  }).select().single();
+  if (erreurInsert) return res.status(500).json({ error: erreurInsert.message });
+  res.status(201).json({ ...requisition, items: data.items });
+});
+
+// analytics_voir en plus de stock_gerer : Direction/comptable doivent pouvoir consulter le
+// rapport "médicaments par service" sans avoir le droit de sortir du stock eux-mêmes.
+app.get('/api/requisitions', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'analytics_voir'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' ou 'analytics_voir' requise." });
+  }
+  const { data, error } = await supabase.from('requisitions').select('*').order('date_requisition', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 // Ajoute du stock à UN médicament de façon atomique (voir fonction_maj_stock_medicament.sql) —
 // remplace le read-modify-write complet du catalogue fait depuis GestionStock.js (lecture d'un
 // instantané frais du catalogue puis réécriture du tableau entier), qui pouvait perdre la
