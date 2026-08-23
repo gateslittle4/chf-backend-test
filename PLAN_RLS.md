@@ -37,35 +37,30 @@ backend refusera de démarrer (`process.exit(1)`, message d'erreur clair dans le
 
 ## Étape 2 — Brancher Firebase dans Supabase (Third-Party Auth)
 
-### 2a. Dans le tableau de bord Supabase
+### 2a. Dans le tableau de bord Supabase — ⏳ PAS ENCORE FAIT (confirmé par Esdras le 23/08)
 Authentication → Third-Party Auth → nouvelle intégration → choisir Firebase → renseigner le
 Project ID Firebase (`chf-test1`, visible dans `api/firebase.js`). Documentation officielle :
 https://supabase.com/docs/guides/auth/third-party/firebase-auth
+Lien direct (remplace `<ref>` par la référence du projet, visible dans l'URL Supabase ou dans
+`SUPABASE_URL`) : `https://supabase.com/dashboard/project/<ref>/auth/third-party`
+Session du 23/08 : pas d'accès MCP à ce projet Supabase précis pour le faire à la place
+d'Esdras (le connecteur Supabase de cette session pointe vers un autre compte) — à refaire à
+chaque nouvelle session, ou donner un token d'accès Supabase (Account → Access Tokens) si on
+veut que Claude l'exécute directement via la Management API
+(`POST /v1/projects/<ref>/config/auth/third-party-auth`).
 
-### 2b. Attribuer la revendication requise à chaque utilisateur
+### 2b. Attribuer la revendication requise à chaque utilisateur — script prêt, pas encore lancé
 Supabase exige que chaque compte porte une revendication personnalisée Firebase
 `role: 'authenticated'` (nom malheureux — **rien à voir** avec le rôle CHF
 administrateur/direction/comptable/auditeur/lecteur stocké dans la table `users` ; c'est un
 simple marqueur que Supabase impose, toujours la même valeur pour tout le monde).
 - **Nouveaux comptes** : déjà fait automatiquement par le backend corrigé
   (`/api/admin/users` appelle `setCustomUserClaims` à la création).
-- **Comptes déjà existants** : à traiter une fois, avec un petit script Node lancé par toi ou
-  Esdras (a accès aux vraies credentials Firebase) :
-```js
-// backfill-claims.js — à lancer une seule fois avec `node backfill-claims.js`
-require('dotenv').config();
-const { initializeApp, cert } = require('firebase-admin/app');
-const { getAuth } = require('firebase-admin/auth');
-initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
-
-(async () => {
-  const { users } = await getAuth().listUsers();
-  for (const u of users) {
-    await getAuth().setCustomUserClaims(u.uid, { role: 'authenticated' });
-    console.log('OK', u.email);
-  }
-})();
-```
+- **Comptes déjà existants** : script committé le 23/08, voir
+  `scripts/backfill-claims-supabase.js` (dans `chf-backend-test`) — remplir
+  `FIREBASE_SERVICE_ACCOUNT` dans `.env` puis `node scripts/backfill-claims-supabase.js`.
+  À lancer **après** 2a (sinon la revendication ne sert à rien tant que Supabase ne fait pas
+  confiance aux jetons Firebase).
 
 ### 2c. Code frontend — à appliquer SEULEMENT après 2a et 2b
 Dans `api/firebase.js`, remplacer la création du client Supabase :
