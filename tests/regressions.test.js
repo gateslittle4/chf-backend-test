@@ -127,6 +127,19 @@ test("POST /api/episodes lit le corps en snake_case (nom_patient, numero_dossier
   assert.match(blocRoute, /d\.ong_partenaire/, "doit lire d.ong_partenaire");
 });
 
+test("POST /api/episodes lit voie_entree/est_hospitalisation depuis le corps de la requête, plus jamais figés en dur — sinon un épisode Achat Express (voie_entree:'vente_comptoir') redevient indiscernable d'une consultation classique dès qu'il passe par cette route de compatibilité", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes'"), serverSrc.indexOf("app.put('/api/episodes/:id'"));
+  assert.doesNotMatch(blocRoute, /voie_entree:\s*'consultation'/, "voie_entree ne doit plus être figé en dur sur 'consultation'");
+  assert.doesNotMatch(blocRoute, /est_hospitalisation:\s*false\s*,/, "est_hospitalisation ne doit plus être figé en dur sur false");
+  assert.match(blocRoute, /voie_entree:\s*d\.voie_entree\s*\|\|\s*'consultation'/, "doit lire d.voie_entree, avec 'consultation' comme valeur par défaut (comportement inchangé pour les appelants qui ne l'envoient pas)");
+  assert.match(blocRoute, /est_hospitalisation:\s*!!d\.est_hospitalisation/, "doit lire d.est_hospitalisation");
+});
+
+test("episodeVersFlat expose voieEntree — sinon le badge de classification ne peut pas distinguer Consultation de Vente comptoir (les deux ont estHospitalisation: false)", () => {
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFlat, /voieEntree:\s*ep\.voie_entree/, "episodeVersFlat doit renvoyer voieEntree");
+});
+
 test("PUT /api/episodes/:id lit le corps en snake_case (service_choisi, type_patient, ong_partenaire, numero_lot, verrouille_facture, date_suspension, mois_report) — sinon l'assignation à un lot de facturation, le changement de service/ONG/type, la suspension et le report au mois suivant réussissaient (200 OK) sans jamais rien écrire en base", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
   for (const champ of ['service_choisi', 'type_patient', 'ong_partenaire', 'numero_lot', 'verrouille_facture', 'date_suspension', 'mois_report']) {

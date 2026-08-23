@@ -174,6 +174,9 @@ async function episodeVersFlat(ep) {
     numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
     estHospitalisation: ep.est_hospitalisation,
     motifFermeture: ep.motif_fermeture, dateFermeture: ep.date_fermeture,
+    // Distingue Consultation de Vente comptoir (Achat Express) — les deux ont
+    // estHospitalisation: false, seul voie_entree ('consultation' vs 'vente_comptoir') les sépare.
+    voieEntree: ep.voie_entree,
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
     totalGlobal,
@@ -218,9 +221,16 @@ app.post('/api/episodes', async (req, res) => {
     .from('episodes')
     .insert({
       dossier_id: dossier.id,
-      voie_entree: 'consultation', service: d.service_choisi || 'Général',
+      // Avant : voie_entree/est_hospitalisation étaient figés en dur ('consultation'/false),
+      // donc un épisode "Achat Express" (voir components/AchatExpress.js) était indiscernable
+      // d'une vraie consultation classique en base. Maintenant lus depuis le corps de la requête
+      // (comme la route POST /api/dossiers/:dossierId/episodes le fait déjà) — les 3 autres
+      // appelants de cette route (nouveau dossier rapide, archivage sans id serveur, restauration
+      // de sauvegarde) n'envoient pas ces champs et gardent donc exactement le même comportement
+      // par défaut qu'avant.
+      voie_entree: d.voie_entree || 'consultation', service: d.service_choisi || 'Général',
       type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null,
-      statut: flatVersStatut(d.status), est_hospitalisation: false,
+      statut: flatVersStatut(d.status), est_hospitalisation: !!d.est_hospitalisation,
     })
     .select().single();
   if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
