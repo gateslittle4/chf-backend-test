@@ -106,11 +106,11 @@ directement par `anon` (RPC public), seulement par `authenticated` (dont mes pol
 **Restent, non urgents, notés pour plus tard :** `search_path` mutable sur des fonctions
 préexistantes non touchées aujourd'hui (`increment_counter`, `decrementer_stock_medicaments`,
 `incrementer_prochain_numero_lot`, `ajouter_stock_medicament`, `definir_stock_medicament`) ;
-protection contre les mots de passe compromis (HaveIBeenPwned) désactivée dans Auth ; quelques
-tables (`compteurs`, `demandes_decaissement`, `demandes_requisition`, `depenses_caisse`,
-`partenaires`, `tickets_securite`) ont RLS activée sans policy depuis un moment non documenté —
-déjà sûr par défaut (accès refusé), juste à clarifier si ces tables doivent un jour être
-utilisées par un écran.
+protection contre les mots de passe compromis (HaveIBeenPwned) désactivée dans Auth ; `depenses_caisse`
+a RLS activée sans policy depuis un moment non documenté — déjà sûr par défaut (accès refusé),
+juste à clarifier si elle doit un jour être utilisée par un écran. `demandes_decaissement`,
+`demandes_requisition`, `tickets_securite` et `partenaires` (vides, jamais utilisées par aucun
+écran) ont été supprimées le 23/08 — `compteurs` gardée, elle sert `increment_counter`.
 
 **⚠️ Reste à faire par Esdras : tester chaque écran avec un compte de chaque rôle réel** (au
 minimum administrateur + un rôle non-administrateur) pour confirmer que rien ne s'est cassé —

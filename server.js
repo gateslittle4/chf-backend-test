@@ -535,7 +535,7 @@ app.post('/api/fiches', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
   }
-  const { episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id } = req.body;
+  const { episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
@@ -546,8 +546,15 @@ app.post('/api/fiches', async (req, res) => {
     if (existante) return res.status(200).json(existante);
   }
 
+  // total_global/breakdown/mode_paiement sont écrits dès la création (pas seulement à
+  // l'archivage) — sinon un dossier encore actif affiche un total de 0 malgré des
+  // transactions déjà encaissées.
   const { data, error } = await supabase
-    .from('fiches').insert({ episode_id, numero_fiche, cree_par, cree_par_uid: cree_par_uid || null, raw_state: raw_state || {}, local_id: local_id || null }).select().single();
+    .from('fiches').insert({
+      episode_id, numero_fiche, cree_par, cree_par_uid: cree_par_uid || null,
+      raw_state: raw_state || {}, local_id: local_id || null,
+      total_global: total_global || 0, breakdown: breakdown || {}, mode_paiement: mode_paiement || null,
+    }).select().single();
   if (error) {
     if (error.code === '23505') { // violation de contrainte unique — quelqu'un d'autre l'a inséré entre-temps
       const { data: existante } = await supabase.from('fiches').select('*').eq('local_id', local_id).maybeSingle();

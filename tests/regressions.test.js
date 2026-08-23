@@ -213,6 +213,14 @@ test("POST /api/fiches et POST /api/paiements acceptent caisse_travailler OU dem
   }
 });
 
+test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès la création — avant, ces champs n'étaient écrits qu'à l'archivage (ficheVersColonnes, route PUT /api/episodes/:id), donc un dossier encore actif affichait un total de 0 malgré des transactions déjà encaissées", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
+  assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement \}/, "doit lire total_global, breakdown et mode_paiement depuis req.body");
+  assert.match(blocRoute, /total_global: total_global \|\| 0/, "doit insérer total_global");
+  assert.match(blocRoute, /breakdown: breakdown \|\| \{\}/, "doit insérer breakdown");
+  assert.match(blocRoute, /mode_paiement: mode_paiement \|\| null/, "doit insérer mode_paiement");
+});
+
 test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer OU caisse_travailler pour medicaments/actes, catalogue_gerer sinon", () => {
   const bloc = blocRoutePermission("app.put('/api/catalog/:type'", "// Route : récupération des paiements");
   assert.match(bloc, /if \(type === 'permissions'\)/);
