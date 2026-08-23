@@ -75,7 +75,47 @@ activée, ce changement seul ne restreint rien pour l'instant).
 
 ---
 
-## Étape 3 — Activer RLS + règles (SQL, dans Supabase → SQL Editor)
+## Étape 3 — Activer RLS + règles — ✅ FAIT et vérifié le 23/08
+
+Appliquée directement en base (project `woghiwalsxusqtxvpzfo`) via migrations Supabase, testée
+en simulant chaque rôle réel (`SET LOCAL ROLE authenticated` + `request.jwt.claims`, dans des
+transactions annulées par ROLLBACK — aucune donnée touchée), puis confirmée propre par
+`get_advisors` (plus aucune erreur de sécurité).
+
+**2 pièges trouvés et corrigés en vérifiant, à retenir pour la suite :**
+1. **`auth.uid()` ne marche PAS avec les jetons Firebase.** Elle caste le `sub` du jeton en
+   `uuid` (`pg_get_functiondef` confirmé), or un UID Firebase (`U9BWGNmVVFVsi5R7PNwZtIpNVsw1`)
+   n'est pas un UUID valide — ça lève une erreur à chaque évaluation de policy. Remplacé partout
+   par une fonction maison `mon_uid()` qui fait `auth.jwt() ->> 'sub'` (texte brut, pas de cast).
+2. **Des policies permissives `USING (true)` existaient déjà** sur `users`, `ong_partenaires`
+   (x2), `cloture_caisse`, `salaires_service` — créées à un moment non documenté, dormantes tant
+   que RLS était désactivée. En activant RLS, elles se sont réveillées et annulaient TOUTES les
+   policies restrictives qu'on venait d'écrire (Postgres combine les policies PERMISSIVE par OR).
+   Détecté en testant avec un compte auditeur qui voyait pourtant toute la table `users`.
+   Supprimées (`DROP POLICY`). **Si un écran s'ouvre trop largement après une future modif de
+   policy, vérifier `SELECT * FROM pg_policies WHERE qual = 'true'` en premier réflexe.**
+
+**Bonus trouvé par `get_advisors` en cours de route (rien à voir avec ce plan, corrigé quand
+même car gratuit) :** les tables `actes` et `medicaments` (vides, jamais utilisées — les vraies
+données vivent dans `catalog.items`) avaient RLS **désactivée** (pas juste "pas de policy" —
+carrément désactivée), donc lisibles/modifiables par n'importe qui avec la clé anon publique.
+Fermées avec RLS activée + zéro policy, comme le GROUPE 1. `search_path` fixé sur `mon_uid()`/
+`mon_role_chf()` (autre avertissement du linter). `mon_role_chf()` n'est plus appelable
+directement par `anon` (RPC public), seulement par `authenticated` (dont mes policies).
+
+**Restent, non urgents, notés pour plus tard :** `search_path` mutable sur des fonctions
+préexistantes non touchées aujourd'hui (`increment_counter`, `decrementer_stock_medicaments`,
+`incrementer_prochain_numero_lot`, `ajouter_stock_medicament`, `definir_stock_medicament`) ;
+protection contre les mots de passe compromis (HaveIBeenPwned) désactivée dans Auth ; quelques
+tables (`compteurs`, `demandes_decaissement`, `demandes_requisition`, `depenses_caisse`,
+`partenaires`, `tickets_securite`) ont RLS activée sans policy depuis un moment non documenté —
+déjà sûr par défaut (accès refusé), juste à clarifier si ces tables doivent un jour être
+utilisées par un écran.
+
+**⚠️ Reste à faire par Esdras : tester chaque écran avec un compte de chaque rôle réel** (au
+minimum administrateur + un rôle non-administrateur) pour confirmer que rien ne s'est cassé —
+la simulation SQL couvre la logique des policies, pas le vrai jeton émis par Firebase de bout
+en bout.
 
 Règles métier confirmées avec Esdras le 23/08 :
 - **Demandes d'exonération** : comptable (écrit les transactions) + direction + administrateur
@@ -88,26 +128,34 @@ Règles métier confirmées avec Esdras le 23/08 :
   administrateur et comptable voient toutes les clôtures (supervision/comptabilité).
 
 ```sql
--- Fonction utilitaire : rôle CHF de l'utilisateur Firebase actuellement authentifié.
+-- Uid Firebase de l'utilisateur authentifié actuel. PAS auth.uid() (voir piège n°1 ci-dessus).
+CREATE OR REPLACE FUNCTION mon_uid()
+RETURNS text LANGUAGE sql STABLE SET search_path = public
+AS $$ SELECT auth.jwt() ->> 'sub'; $$;
+
+-- Rôle CHF de l'utilisateur Firebase actuellement authentifié.
 -- SECURITY DEFINER évite la boucle "la policy sur users doit lire users pour s'évaluer".
 CREATE OR REPLACE FUNCTION mon_role_chf()
-RETURNS text LANGUAGE sql SECURITY DEFINER STABLE
-AS $$ SELECT role FROM users WHERE id = auth.uid(); $$;
--- Si auth.uid() renvoie NULL avec les jetons Firebase chez vous, remplacer par
--- (auth.jwt() ->> 'sub') partout dans ce fichier (fonction ci-dessus + policies).
+RETURNS text LANGUAGE sql SECURITY DEFINER STABLE SET search_path = public
+AS $$ SELECT role FROM users WHERE id = mon_uid(); $$;
+REVOKE EXECUTE ON FUNCTION mon_role_chf() FROM anon, public;
+GRANT EXECUTE ON FUNCTION mon_role_chf() TO authenticated;
 
 -- GROUPE 1 — episodes, dossiers, fiches, paiements, catalog : seul le backend
 -- (service_role, contourne RLS) doit y toucher. Aucune policy = accès refusé au
--- navigateur, ce qui est le but.
-ALTER TABLE episodes  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE dossiers  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE fiches    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE paiements ENABLE ROW LEVEL SECURITY;
-ALTER TABLE catalog   ENABLE ROW LEVEL SECURITY;
+-- navigateur, ce qui est le but. actes/medicaments : tables vides et inutilisées, fermées pareil
+-- (avaient RLS carrément désactivée avant — ERROR du linter Supabase, corrigé au passage).
+ALTER TABLE episodes    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dossiers    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fiches      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paiements   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE catalog     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE actes       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE medicaments ENABLE ROW LEVEL SECURITY;
 
 -- GROUPE 2 — users : chacun lit sa propre fiche ; administrateur lit/modifie tout.
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-CREATE POLICY users_lecture_soi   ON users FOR SELECT USING (id = auth.uid());
+CREATE POLICY users_lecture_soi   ON users FOR SELECT USING (id = mon_uid());
 CREATE POLICY users_lecture_admin ON users FOR SELECT USING (mon_role_chf() = 'administrateur');
 CREATE POLICY users_ecriture_admin ON users FOR UPDATE USING (mon_role_chf() = 'administrateur');
 -- Pas de policy INSERT : création uniquement via /api/admin/users (service_role).
@@ -115,16 +163,16 @@ CREATE POLICY users_ecriture_admin ON users FOR UPDATE USING (mon_role_chf() = '
 -- GROUPE 3 — audit_log : on peut ajouter SA PROPRE trace, jamais lire/modifier/effacer
 -- depuis le navigateur (un journal ne se corrige pas soi-même).
 ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
-CREATE POLICY audit_insertion_soi ON audit_log FOR INSERT WITH CHECK (effectue_par_uid = auth.uid());
+CREATE POLICY audit_insertion_soi ON audit_log FOR INSERT WITH CHECK (effectue_par_uid = mon_uid());
 CREATE POLICY audit_lecture_admin ON audit_log FOR SELECT USING (mon_role_chf() = 'administrateur');
 
 -- GROUPE 4 — demandes_exoneration : un caissier voit/crée SES demandes ; comptable/direction/
 -- administrateur/auditeur voient tout ; direction/administrateur répondent, tant qu'en attente.
 ALTER TABLE demandes_exoneration ENABLE ROW LEVEL SECURITY;
 CREATE POLICY exoneration_lecture ON demandes_exoneration FOR SELECT
-  USING (demandeur_uid = auth.uid() OR mon_role_chf() IN ('comptable','direction','administrateur','auditeur'));
+  USING (demandeur_uid = mon_uid() OR mon_role_chf() IN ('comptable','direction','administrateur','auditeur'));
 CREATE POLICY exoneration_creation ON demandes_exoneration FOR INSERT
-  WITH CHECK (demandeur_uid = auth.uid());
+  WITH CHECK (demandeur_uid = mon_uid());
 CREATE POLICY exoneration_reponse ON demandes_exoneration FOR UPDATE
   USING (mon_role_chf() IN ('direction','administrateur') AND statut = 'en_attente');
 
@@ -143,10 +191,14 @@ CREATE POLICY salaires_lecture_ecriture ON salaires_service FOR ALL USING (mon_r
 -- GROUPE 7 — cloture_caisse : un caissier ne voit/modifie QUE ses propres clôtures
 -- (colonne cloturee_par_uid, ajoutée le 23/08) ; comptable/direction/administrateur voient tout.
 ALTER TABLE cloture_caisse ENABLE ROW LEVEL SECURITY;
-CREATE POLICY cloture_lecture_soi     ON cloture_caisse FOR SELECT USING (cloturee_par_uid = auth.uid());
+CREATE POLICY cloture_lecture_soi     ON cloture_caisse FOR SELECT USING (cloturee_par_uid = mon_uid());
 CREATE POLICY cloture_lecture_super   ON cloture_caisse FOR SELECT USING (mon_role_chf() IN ('comptable','direction','administrateur'));
-CREATE POLICY cloture_ecriture_soi    ON cloture_caisse FOR ALL    USING (cloturee_par_uid = auth.uid());
+CREATE POLICY cloture_ecriture_soi    ON cloture_caisse FOR ALL    USING (cloturee_par_uid = mon_uid());
 ```
+
+Cette version (`mon_uid()`, tables `actes`/`medicaments` incluses, `search_path` fixé) est
+celle réellement appliquée en base le 23/08 — vérifiée avec `pg_policies` après coup pour
+confirmer qu'elle correspond exactement.
 
 **Rollback d'urgence** si un écran casse après activation (à identifier via les messages
 d'erreur dans la console du navigateur, puis cibler la bonne table) :
@@ -163,10 +215,11 @@ ALTER TABLE nom_de_la_table DISABLE ROW LEVEL SECURITY;
 3. ✅ Configurer Third-Party Auth côté Supabase (2a) + rattrapage des claims (2b).
 4. ✅ Appliquer le changement frontend de 2c, testé en production — rien n'a changé (RLS pas
    encore actif).
-5. ⏳ Exécuter le SQL de l'étape 3 (ci-dessus, règles confirmées le 23/08), idéalement hors des
-   heures de pointe.
-6. ⏳ Tester chaque écran (Utilisateurs, Demandes, Partenaires, Salaires, Clôture, Calculateur,
-   Archives) avec un compte de chaque rôle si possible.
+5. ✅ SQL de l'étape 3 exécuté le 23/08, vérifié par simulation de rôles + `get_advisors`
+   (plus aucune erreur de sécurité).
+6. ⏳ **Reste à faire par Esdras** : tester chaque écran (Utilisateurs, Demandes, Partenaires,
+   Salaires, Clôture, Calculateur, Archives) avec un compte de chaque rôle réel — la simulation
+   SQL couvre la logique, pas le vrai jeton Firebase de bout en bout.
 
 ## Hors scope de cette passe (mentionné précédemment, pas oublié)
 - Numéro de lot calculé côté navigateur (collision possible si 2 personnes génèrent un lot
