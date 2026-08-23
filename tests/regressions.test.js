@@ -275,9 +275,16 @@ test("POST /api/dossiers/:dossierId/episodes bloque une 2e hospitalisation, mais
   assert.doesNotMatch(bloc, /if \(episodeHospitalisationOuvert\) \{/, "ne doit plus bloquer sur la seule présence d'une hospitalisation ouverte, sans regarder le type du nouvel épisode");
 });
 
-test("GET /api/dossiers/recherche fait une recherche PARTIELLE par nom (%nom%), pas exacte — avant, taper 'Jean' ne retrouvait jamais 'Jean Baptiste Pierre', la moindre variation faisait croire qu'aucun dossier n'existait et créait un doublon au lieu de retrouver le patient existant", () => {
+test("GET /api/dossiers/recherche par nom appelle rechercher_dossiers_flou (tolérant aux fautes de frappe/accents, pg_trgm), avec un repli %nom% si la fonction/extension n'existe pas encore (code 42883, même patron que les autres fonctions atomiques du projet) — avant, la moindre variation faisait croire qu'aucun dossier n'existait et créait un doublon au lieu de retrouver le patient existant", () => {
   const bloc = blocRoutePermission("app.get('/api/dossiers/recherche'", "app.post('/api/dossiers'");
-  assert.match(bloc, /requete\.ilike\('nom', `%\$\{nom\}%`\)/, "doit chercher avec des jokers autour du nom, pas une correspondance exacte");
+  assert.match(bloc, /supabase\.rpc\('rechercher_dossiers_flou', \{ p_nom: nom \}\)/, "doit appeler la fonction Postgres de recherche floue");
+  assert.match(bloc, /error\.code === '42883'/, "doit détecter l'absence de la fonction/extension");
+  assert.match(bloc, /\.ilike\('nom', `%\$\{nom\}%`\)/, "doit se replier sur une recherche partielle si la fonction n'existe pas encore");
+});
+
+test("GET /api/dossiers/recherche par numéro reste une correspondance EXACTE (numero_dossier) — pas de recherche floue sur un identifiant, seulement sur le nom", () => {
+  const bloc = blocRoutePermission("app.get('/api/dossiers/recherche'", "app.post('/api/dossiers'");
+  assert.match(bloc, /\.eq\('numero_dossier', numero\)/, "la recherche par numéro doit rester une égalité stricte");
 });
 
 test("Sauvegarde automatique : planifiée tous les jours (cron), n'écrit jamais sur le disque du serveur (éphémère sur Render — perdu à chaque redéploiement), et reste déclenchable manuellement pour vérifier qu'elle fonctionne sans attendre l'exécution planifiée", () => {

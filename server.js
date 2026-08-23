@@ -343,25 +343,32 @@ app.delete('/api/episodes/:id', async (req, res) => {
 // via l'onglet "🔍 Dossier/Épisode", séparé de la compatibilité ci-dessus)
 // ============================================================
 
-// Recherche simple par nom exact (insensible à la casse). La version floue
-// (fautes de frappe/variantes) est volontairement pas encore construite —
-// en attente de décision sur le niveau de tolérance.
-// Recherche par nom exact OU par numéro de dossier (si le patient a sa carte)
+// Recherche par nom exact OU par numéro de dossier (si le patient a sa carte). Pour le nom :
+// tolérante aux fautes de frappe/accents (fonction Postgres atomique rechercher_dossiers_flou,
+// extension pg_trgm — voir fonction_recherche_floue_dossiers.sql) — sans ça, la moindre variation
+// (espace en trop, faute de frappe) faisait croire qu'aucun dossier n'existait, créant un doublon
+// au lieu de retrouver le patient existant. Repli sur %nom% si la fonction/l'extension n'existe
+// pas encore (comme les autres fonctions atomiques du projet, code d'erreur 42883).
 app.get('/api/dossiers/recherche', async (req, res) => {
   const nom = (req.query.nom || '').trim();
   const numero = (req.query.numero || '').trim();
   if (!nom && !numero) return res.json([]);
 
-  let requete = supabase.from('dossiers').select('*');
-  // Recherche PARTIELLE (%nom%), pas exacte — avant, taper "Jean" ne retrouvait jamais "Jean
-  // Baptiste Pierre", et la moindre variation (espace en trop, faute de frappe) faisait croire
-  // qu'aucun dossier n'existait, créant un doublon au lieu de retrouver le patient existant.
-  // Reste sensible aux vraies fautes de frappe/accents (tolérance complète = extension Postgres
-  // pg_trgm, pas encore activée — voir NOTES_POUR_PROCHAIN_CLAUDE.md).
-  requete = numero ? requete.eq('numero_dossier', numero) : requete.ilike('nom', `%${nom}%`);
+  if (numero) {
+    const { data, error } = await supabase.from('dossiers').select('*').eq('numero_dossier', numero);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
 
-  const { data, error } = await requete;
-  if (error) return res.status(500).json({ error: error.message });
+  const { data, error } = await supabase.rpc('rechercher_dossiers_flou', { p_nom: nom });
+  if (error) {
+    if (error.code === '42883') {
+      const { data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').ilike('nom', `%${nom}%`);
+      if (erreurRepli) return res.status(500).json({ error: erreurRepli.message });
+      return res.json(repli);
+    }
+    return res.status(500).json({ error: error.message });
+  }
   res.json(data);
 });
 
