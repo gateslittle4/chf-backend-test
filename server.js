@@ -463,17 +463,22 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
 
   const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
 
-  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir un 2e dossier ouvert.
-  // Aucun moyen de passer outre, même avec forcerMalgreAvertissement.
-  if (episodeHospitalisationOuvert) {
+  // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir une 2e hospitalisation ouverte en
+  // même temps. Aucun moyen de passer outre, même avec forcerMalgreAvertissement. Une consultation
+  // reste en revanche autorisée pendant une hospitalisation en cours (ex: un patient hospitalisé
+  // qui a besoin d'une consultation spécialisée ailleurs) — avant, N'IMPORTE QUEL nouvel épisode
+  // (même une simple consultation) était bloqué dès qu'une hospitalisation était ouverte, retour
+  // d'Esdras. Seul le cumul de 2 hospitalisations est bloqué en dur.
+  if (episodeHospitalisationOuvert && est_hospitalisation) {
     return res.status(409).json({
       error: 'BLOCAGE_HOSPITALISATION',
-      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en créer un nouveau.",
+      message: "Ce patient a déjà un épisode hospitalisation ouvert — impossible d'en ouvrir un 2e.",
       episodeExistant: episodeHospitalisationOuvert,
     });
   }
 
-  // Règle souple : épisode ouvert non-hospitalisation → avertissement contournable.
+  // Règle souple : tout épisode ouvert (hospitalisation ou consultation) → avertissement
+  // contournable, sauf le cas bloqué ci-dessus (2 hospitalisations).
   if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
     return res.status(409).json({
       error: 'AVERTISSEMENT_EPISODE_OUVERT',

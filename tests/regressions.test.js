@@ -269,3 +269,9 @@ test("episodeVersFlat expose motifFermeture et dateFermeture — sinon Fiche Pat
   const blocFonction = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
   assert.match(blocFonction, /motifFermeture: ep\.motif_fermeture, dateFermeture: ep\.date_fermeture,/);
 });
+
+test("POST /api/dossiers/:dossierId/episodes bloque une 2e hospitalisation, mais autorise une consultation pendant une hospitalisation en cours — avant, N'IMPORTE QUEL nouvel épisode (même une consultation) était bloqué dès qu'une hospitalisation était ouverte, retour d'Esdras", () => {
+  const bloc = blocRoutePermission("app.post('/api/dossiers/:dossierId/episodes'", "app.patch('/api/episodes/:id/hospitaliser'");
+  assert.match(bloc, /if \(episodeHospitalisationOuvert && est_hospitalisation\) \{/, "le blocage dur doit exiger que le NOUVEL épisode soit aussi une hospitalisation, pas n'importe quel épisode");
+  assert.doesNotMatch(bloc, /if \(episodeHospitalisationOuvert\) \{/, "ne doit plus bloquer sur la seule présence d'une hospitalisation ouverte, sans regarder le type du nouvel épisode");
+});
