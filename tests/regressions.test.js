@@ -163,3 +163,9 @@ test("episodeVersFlat recalcule totalGlobal à partir des fiches — la table ep
   assert.match(blocFonction, /Number\(f\.total_global\)/, "doit convertir total_global en nombre (peut revenir en chaîne depuis Postgres)");
   assert.match(blocFonction, /\n\s*totalGlobal,\n/, "totalGlobal doit être inclus dans l'objet renvoyé");
 });
+
+test("POST /api/fiches enregistre cree_par_uid — envoyé par CalculateurPanel.js mais silencieusement ignoré jusqu'ici (aucune colonne correspondante lue) : on ne savait pas QUI (par UID Firebase) avait créé une fiche, seulement son nom affiché", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
+  assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid,/, "doit lire cree_par_uid depuis req.body");
+  assert.match(blocRoute, /cree_par_uid: cree_par_uid \|\| null/, "doit l'inclure dans l'insertion");
+});

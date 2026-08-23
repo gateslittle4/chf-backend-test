@@ -505,7 +505,7 @@ app.patch('/api/episodes/:id/attente-resultats', async (req, res) => {
 
 // Fiches — rattachées à un épisode
 app.post('/api/fiches', async (req, res) => {
-  const { episode_id, numero_fiche, cree_par, raw_state, local_id } = req.body;
+  const { episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
@@ -517,7 +517,7 @@ app.post('/api/fiches', async (req, res) => {
   }
 
   const { data, error } = await supabase
-    .from('fiches').insert({ episode_id, numero_fiche, cree_par, raw_state: raw_state || {}, local_id: local_id || null }).select().single();
+    .from('fiches').insert({ episode_id, numero_fiche, cree_par, cree_par_uid: cree_par_uid || null, raw_state: raw_state || {}, local_id: local_id || null }).select().single();
   if (error) {
     if (error.code === '23505') { // violation de contrainte unique — quelqu'un d'autre l'a inséré entre-temps
       const { data: existante } = await supabase.from('fiches').select('*').eq('local_id', local_id).maybeSingle();
