@@ -442,3 +442,25 @@ test("episodeVersFlat expose lit — sinon Hospitalisation ne peut jamais affich
   const blocFlat = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
   assert.match(blocFlat, /lit: ep\.lit \|\| null,/);
 });
+
+// Chantier de robustesse hors ligne, item 8 (23/08) : jusqu'ici seule la CRÉATION d'un dossier/
+// épisode avait une protection contre les doublons (local_id) — une MODIFICATION (transfert, lit)
+// partie en file d'attente hors ligne pouvait écraser en aveugle un changement fait entre-temps
+// par quelqu'un d'autre en ligne sur ce même patient, sans jamais prévenir personne.
+test("PATCH /api/episodes/:id/lit détecte un conflit (409) si lit_attendu (optionnel) ne correspond plus au lit RÉEL actuel du patient — le lit a été changé entre-temps par quelqu'un d'autre pendant que cette requête attendait en file hors ligne", () => {
+  const blocLit = blocRoutePermission("app.patch('/api/episodes/:id/lit'", "app.post('/api/fiches'");
+  assert.match(blocLit, /const \{ lit, lit_attendu \} = req\.body;/, "doit accepter lit_attendu, optionnel");
+  assert.match(blocLit, /\.select\('service, est_hospitalisation, statut, lit'\)/, "doit relire le lit RÉEL actuel du patient pour pouvoir le comparer");
+  assert.match(blocLit, /if \(lit_attendu !== undefined && \(episode\.lit \|\| null\) !== \(lit_attendu \|\| null\)\)/, "ne doit vérifier le conflit QUE si lit_attendu a été transmis — un appelant qui ne l'envoie pas garde l'ancien comportement");
+  assert.match(blocLit, /return res\.status\(409\)\.json\(\{\s*error: `Conflit/, "doit renvoyer 409 avec un message explicite, pas écraser silencieusement");
+});
+
+test("PATCH /api/episodes/:id/transferer détecte un conflit (409) si service_attendu (optionnel) ne correspond plus au service RÉEL actuel du patient — même principe que /lit ci-dessus", () => {
+  const blocTransfert = serverSrc.slice(serverSrc.indexOf("app.patch('/api/episodes/:id/transferer'"), serverSrc.indexOf("app.get('/api/episodes/:id/transferts'"));
+  assert.match(blocTransfert, /const \{ nouveau_service, motif, transfere_par, service_attendu \} = req\.body;/, "doit accepter service_attendu, optionnel");
+  assert.match(blocTransfert, /if \(service_attendu !== undefined && episode\.service !== service_attendu\)/, "ne doit vérifier le conflit QUE si service_attendu a été transmis");
+  assert.match(blocTransfert, /return res\.status\(409\)\.json\(\{\s*error: `Conflit/, "doit renvoyer 409 avec un message explicite, pas écraser silencieusement");
+  // Le contrôle de conflit doit avoir lieu AVANT l'update — sinon le transfert est déjà appliqué
+  // quand le conflit est détecté, ce qui ne protège plus rien.
+  assert.ok(blocTransfert.indexOf('service_attendu') < blocTransfert.indexOf(".update({ service: nouveau_service.trim(), lit: null })"), "la vérification du conflit doit précéder l'update, pas le suivre");
+});

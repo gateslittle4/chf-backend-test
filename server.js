@@ -676,7 +676,7 @@ app.patch('/api/episodes/:id/transferer', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
   }
-  const { nouveau_service, motif, transfere_par } = req.body;
+  const { nouveau_service, motif, transfere_par, service_attendu } = req.body;
   if (!nouveau_service || !String(nouveau_service).trim()) {
     return res.status(400).json({ error: 'nouveau_service est requis.' });
   }
@@ -685,6 +685,17 @@ app.patch('/api/episodes/:id/transferer', async (req, res) => {
   if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
   if (!episode.est_hospitalisation) return res.status(400).json({ error: 'Seul un épisode en hospitalisation peut être transféré entre services.' });
   if (episode.statut !== 'ouvert') return res.status(400).json({ error: 'Épisode déjà fermé — impossible de le transférer.' });
+
+  // Détection de conflit (retour d'Esdras du 23/08, chantier de robustesse hors ligne, item 8) —
+  // même principe que /lit ci-dessous : service_attendu = le service que le poste appelant
+  // voyait pour ce patient avant de préparer ce transfert. Si cette requête a attendu en file
+  // hors ligne et que quelqu'un d'autre a déjà transféré ce même patient entre-temps (en ligne),
+  // appliquer quand même écraserait ce transfert sans prévenir personne.
+  if (service_attendu !== undefined && episode.service !== service_attendu) {
+    return res.status(409).json({
+      error: `Conflit : le service de ce patient a été changé entre-temps par quelqu'un d'autre (actuellement "${episode.service}", tu voyais "${service_attendu}"). Recharge la page pour voir l'état actuel avant de réessayer.`
+    });
+  }
 
   // Le lit assigné (retour d'Esdras du 23/08) appartient à l'ANCIEN service — il faut le vider,
   // sinon le patient "occupe" encore un lit d'un service où il n'est plus, et ce lit reste
@@ -717,12 +728,25 @@ app.patch('/api/episodes/:id/lit', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
   }
-  const { lit } = req.body;
+  const { lit, lit_attendu } = req.body;
   const { data: episode, error: erreurLecture } = await supabase
-    .from('episodes').select('service, est_hospitalisation, statut').eq('id', req.params.id).single();
+    .from('episodes').select('service, est_hospitalisation, statut, lit').eq('id', req.params.id).single();
   if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
   if (!episode.est_hospitalisation) return res.status(400).json({ error: "Seul un épisode en hospitalisation peut avoir un lit assigné." });
   if (episode.statut !== 'ouvert') return res.status(400).json({ error: 'Épisode déjà fermé.' });
+
+  // Détection de conflit (retour d'Esdras du 23/08, chantier de robustesse hors ligne, item 8) —
+  // lit_attendu = le lit que le poste appelant voyait pour ce patient AVANT de préparer ce
+  // changement (transmis par le frontend, voir HospitalisationPanel.js). Si cette requête a
+  // attendu en file hors ligne et que quelqu'un d'autre a changé le lit de ce même patient
+  // entre-temps (en ligne), appliquer quand même écraserait ce changement sans prévenir personne
+  // — jusqu'ici seule la CRÉATION avait une protection de ce genre (local_id), pas la
+  // modification. Optionnel : un appelant qui ne l'envoie pas garde l'ancien comportement.
+  if (lit_attendu !== undefined && (episode.lit || null) !== (lit_attendu || null)) {
+    return res.status(409).json({
+      error: `Conflit : le lit de ce patient a été changé entre-temps par quelqu'un d'autre (actuellement "${episode.lit || 'aucun'}", tu voyais "${lit_attendu || 'aucun'}"). Recharge la page pour voir l'état actuel avant de réessayer.`
+    });
+  }
 
   if (lit) {
     const { data: occupants, error: erreurOccupants } = await supabase
