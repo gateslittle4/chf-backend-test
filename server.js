@@ -79,6 +79,21 @@ async function verifyToken(req, res, next) {
   const token = authHeader.split('Bearer ')[1];
   try {
     const decoded = await getAuth().verifyIdToken(token);
+    // "Désactiver un compte" (Gestion des utilisateurs) et l'accès à durée limitée (date
+    // d'expiration) n'étaient vérifiés NULLE PART jusqu'ici — ni ici, ni côté écran : le bouton
+    // "Désactiver" ne faisait qu'écrire un booléen que rien ne lisait jamais, un compte
+    // "désactivé" pouvait continuer à se connecter et travailler normalement. Vérifié à chaque
+    // requête, pas seulement à la connexion, pour qu'une désactivation en cours de session soit
+    // immédiate (pas besoin d'attendre que le token expire).
+    const { data: profil } = await supabase.from('users').select('active, date_expiration').eq('id', decoded.uid).maybeSingle();
+    if (profil) {
+      if (profil.active === false) {
+        return res.status(403).json({ error: 'Ce compte a été désactivé.' });
+      }
+      if (profil.date_expiration && new Date(profil.date_expiration) < new Date()) {
+        return res.status(403).json({ error: "Cet accès a expiré. Contacte l'administrateur pour le renouveler." });
+      }
+    }
     req.user = { id: decoded.uid, email: decoded.email };
     next();
   } catch (e) {

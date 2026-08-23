@@ -340,3 +340,15 @@ test("DELETE /api/catalog/:type/item/:id exige catalogue_gerer et appelle la fon
   assert.match(bloc, /aPermission\(req\.user\.id, 'catalogue_gerer'\)/, "doit exiger catalogue_gerer");
   assert.match(bloc, /supabase\.rpc\('supprimer_article_catalogue'/, "doit appeler la fonction Postgres atomique dédiée");
 });
+
+// Retour d'Esdras (23/08) : demande d'un rôle à accès temporaire. En creusant "Désactiver un
+// compte" (déjà existant), on découvre que ce bouton n'a JAMAIS été appliqué nulle part — ni
+// côté écran, ni côté serveur — il écrivait juste un booléen que rien ne lisait. Corrigé en même
+// temps que l'ajout de date_expiration, avec le même mécanisme.
+test("verifyToken rejette (403) un compte désactivé (active===false) ou dont date_expiration est dépassée — avant, ces 2 champs n'étaient vérifiés NULLE PART, un compte 'désactivé' pouvait continuer à travailler normalement", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function verifyToken'), serverSrc.indexOf('// Application du middleware'));
+  assert.match(bloc, /\.select\('active, date_expiration'\)\.eq\('id', decoded\.uid\)/, "doit relire active et date_expiration depuis la table users à CHAQUE requête, pas seulement à la connexion");
+  assert.match(bloc, /profil\.active === false/, "doit rejeter un compte désactivé");
+  assert.match(bloc, /new Date\(profil\.date_expiration\) < new Date\(\)/, "doit rejeter un accès expiré");
+  assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403, pas laisser passer");
+});
