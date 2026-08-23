@@ -679,6 +679,44 @@ app.post('/api/stock/decrementer', async (req, res) => {
   res.json({ success: true, items: data.items });
 });
 
+// Ajoute du stock à UN médicament de façon atomique (voir fonction_maj_stock_medicament.sql) —
+// remplace le read-modify-write complet du catalogue fait depuis GestionStock.js (lecture d'un
+// instantané frais du catalogue puis réécriture du tableau entier), qui pouvait perdre la
+// modification d'un autre poste si 2 personnes modifiaient le stock de 2 médicaments différents
+// presque au même moment.
+app.post('/api/stock/ajouter', async (req, res) => {
+  const { id, quantite } = req.body;
+  if (!id || typeof quantite !== 'number' || quantite <= 0) {
+    return res.status(400).json({ error: 'id et quantite (nombre positif) requis.' });
+  }
+  const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: id, p_quantite_ajoutee: quantite });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL ajouter_stock_medicament n'existe pas encore dans Supabase — colle fonction_maj_stock_medicament.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, item: data });
+});
+
+// Modifie stock + seuil d'alerte d'UN médicament de façon atomique (même fonction SQL, même
+// raison que ci-dessus).
+app.patch('/api/stock/:id', async (req, res) => {
+  const { id } = req.params;
+  const { quantite, seuilAlerte } = req.body;
+  if (typeof quantite !== 'number' || typeof seuilAlerte !== 'number') {
+    return res.status(400).json({ error: 'quantite et seuilAlerte (nombres) requis.' });
+  }
+  const { data, error } = await supabase.rpc('definir_stock_medicament', { p_id: id, p_quantite: quantite, p_seuil_alerte: seuilAlerte });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL definir_stock_medicament n'existe pas encore dans Supabase — colle fonction_maj_stock_medicament.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, item: data });
+});
+
 // Route : création d'un utilisateur par un administrateur (remplace
 // auth.createUserWithEmailAndPassword de Firebase, qui n'a pas d'équivalent sûr côté
 // client avec Supabase — créer un compte via le SDK client déconnecterait

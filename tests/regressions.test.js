@@ -87,6 +87,14 @@ test("POST /api/stock/decrementer appelle la fonction Postgres atomique decremen
   assert.match(blocRoute, /res\.status\(409\)/, "doit renvoyer 409 (pas 200) si le stock est insuffisant");
 });
 
+test("POST /api/stock/ajouter et PATCH /api/stock/:id appellent des fonctions Postgres atomiques (ajouter_stock_medicament, definir_stock_medicament), pas un update direct de la table catalog — sinon GestionStock.js peut de nouveau perdre la modification d'un poste en écrasant le catalogue entier avec un instantané périmé", () => {
+  const blocAjouter = serverSrc.slice(serverSrc.indexOf("app.post('/api/stock/ajouter'"), serverSrc.indexOf("app.patch('/api/stock/:id'"));
+  assert.match(blocAjouter, /supabase\.rpc\('ajouter_stock_medicament'/, "POST /api/stock/ajouter doit appeler la fonction Postgres atomique ajouter_stock_medicament");
+
+  const blocDefinir = serverSrc.slice(serverSrc.indexOf("app.patch('/api/stock/:id'"));
+  assert.match(blocDefinir, /supabase\.rpc\('definir_stock_medicament'/, "PATCH /api/stock/:id doit appeler la fonction Postgres atomique definir_stock_medicament");
+});
+
 test("POST /api/dossiers et POST /api/dossiers/:dossierId/episodes vérifient local_id avant d'insérer — nécessaire maintenant que apiDossierEpisode.js peut rejouer ces appels automatiquement (file d'attente hors-ligne)", () => {
   const blocDossier = serverSrc.slice(serverSrc.indexOf("app.post('/api/dossiers'"), serverSrc.indexOf("app.get('/api/dossiers/:id'"));
   assert.match(blocDossier, /if \(local_id\)/, "POST /api/dossiers doit vérifier local_id avant d'insérer");
