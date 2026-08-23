@@ -793,6 +793,55 @@ app.post('/api/stock/ajouter', async (req, res) => {
   res.json({ success: true, item: data });
 });
 
+// Ajoute du stock DONNÉ par un ONG à UN médicament (voir fonction_stock_dons.sql) — séparé du
+// stock acheté (catalog.items[].quantite), pour que le don d'un ONG ne se mélange jamais avec le
+// stock normal et reste réservé à ses propres patients (voir PLAN_DONS_ONG.md).
+app.post('/api/stock/ajouter-don', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  }
+  const { id, ong, quantite } = req.body;
+  if (!id || !ong || typeof quantite !== 'number' || quantite <= 0) {
+    return res.status(400).json({ error: 'id, ong et quantite (nombre positif) requis.' });
+  }
+  const { data, error } = await supabase.rpc('ajouter_stock_don_medicament', { p_id: id, p_ong: ong, p_quantite_ajoutee: quantite });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL ajouter_stock_don_medicament n'existe pas encore dans Supabase — colle fonction_stock_dons.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, item: data });
+});
+
+// Décrémente le stock DONNÉ par un ou plusieurs ONG, de façon atomique (voir
+// fonction_stock_dons.sql) — appelé à l'encaissement pour les lignes prises sur un stock donné
+// (réservation normale au patient du même ONG, ou déblocage exceptionnel justifié pour un autre
+// patient — cette route ne fait pas la distinction, c'est CalculateurPanel.js qui décide et
+// journalise le motif si c'est un déblocage). Tout-ou-rien, même principe que
+// POST /api/stock/decrementer pour le stock acheté.
+app.post('/api/stock/decrementer-dons', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
+  const { decrements } = req.body; // [{ id, ong, qte }, ...]
+  if (!Array.isArray(decrements) || decrements.length === 0) {
+    return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
+  }
+  const { data, error } = await supabase.rpc('decrementer_stock_dons', { p_decrements: decrements });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_dons n'existe pas encore dans Supabase — colle fonction_stock_dons.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  if (!data.succes) {
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} — don ${m.ong} (${m.disponible} restant)`).join(', ');
+    return res.status(409).json({ error: `Stock donné insuffisant : ${detail}`, manquants: data.manquants });
+  }
+  res.json({ success: true, items: data.items });
+});
+
 // Modifie stock + seuil d'alerte d'UN médicament de façon atomique (même fonction SQL, même
 // raison que ci-dessus).
 app.patch('/api/stock/:id', async (req, res) => {

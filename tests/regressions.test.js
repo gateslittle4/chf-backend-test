@@ -293,3 +293,14 @@ test("PERMISSIONS_PAR_DEFAUT (repli backend si le catalogue Supabase est vide) i
   const blocDefaut = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf("role: 'direction'"));
   assert.match(blocDefaut, /'sauvegarde_gerer'/, "administrateur doit avoir sauvegarde_gerer dans le repli par défaut");
 });
+
+test("POST /api/stock/ajouter-don et POST /api/stock/decrementer-dons appellent les fonctions Postgres atomiques dédiées au stock donné, séparées du stock acheté — sinon un don d'ONG risque de se mélanger avec le stock normal (catalog.items[].quantite), perdant la réservation au patient de cet ONG", () => {
+  const blocAjouter = blocRoutePermission("app.post('/api/stock/ajouter-don'", "app.post('/api/stock/decrementer-dons'");
+  assert.match(blocAjouter, /aPermission\(req\.user\.id, 'stock_gerer'\)/, "doit exiger stock_gerer");
+  assert.match(blocAjouter, /supabase\.rpc\('ajouter_stock_don_medicament'/, "doit appeler la fonction Postgres atomique dédiée au don, pas ajouter_stock_medicament (stock acheté)");
+
+  const blocDecrementer = blocRoutePermission("app.post('/api/stock/decrementer-dons'", "app.patch('/api/stock/:id'");
+  assert.match(blocDecrementer, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit exiger caisse_travailler");
+  assert.match(blocDecrementer, /supabase\.rpc\('decrementer_stock_dons'/, "doit appeler la fonction Postgres atomique dédiée au don, pas decrementer_stock_medicaments (stock acheté)");
+  assert.match(blocDecrementer, /res\.status\(409\)/, "doit renvoyer 409 si le stock donné est insuffisant, pas 200");
+});
