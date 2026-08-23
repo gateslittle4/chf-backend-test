@@ -236,3 +236,15 @@ test("PATCH /api/paiements/:id/annuler empêche d'annuler sa propre transaction 
   assert.match(bloc, /if \(paiement\.traite_par_uid && paiement\.traite_par_uid === req\.user\.id\)/, "doit comparer traite_par_uid à req.user.id");
   assert.match(bloc, /status\(403\)/, "doit refuser (403) l'auto-annulation");
 });
+
+test("PUT /api/episodes/:id enregistre motif_fermeture et date_fermeture à la clôture (status==='archived') — le bouton Clôturer existait déjà, seul le motif de sortie manquait", () => {
+  const bloc = blocRoutePermission("app.put('/api/episodes/:id'", "// Le nom du patient vit sur la table dossiers");
+  assert.match(bloc, /if \(d\.status === 'archived'\) \{/, "doit distinguer le cas clôture");
+  assert.match(bloc, /maj\.motif_fermeture = d\.motif_fermeture \|\| null;/, "doit écrire motif_fermeture");
+  assert.match(bloc, /maj\.date_fermeture = new Date\(\)\.toISOString\(\);/, "doit horodater la fermeture");
+});
+
+test("episodeVersFlat expose motifFermeture et dateFermeture — sinon Fiche Patient ne peut jamais afficher pourquoi/quand un patient hospitalisé est sorti", () => {
+  const blocFonction = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFonction, /motifFermeture: ep\.motif_fermeture, dateFermeture: ep\.date_fermeture,/);
+});

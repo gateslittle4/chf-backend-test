@@ -173,6 +173,7 @@ async function episodeVersFlat(ep) {
     dateSuspension: ep.date_suspension, moisReport: ep.mois_report,
     numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
     estHospitalisation: ep.est_hospitalisation,
+    motifFermeture: ep.motif_fermeture, dateFermeture: ep.date_fermeture,
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
     totalGlobal,
@@ -260,6 +261,13 @@ app.put('/api/episodes/:id', async (req, res) => {
     maj.statut = flatVersStatut(d.status);
     maj.date_suspension = d.status === 'suspendu' ? (d.date_suspension || new Date().toISOString()) : null;
     maj.mois_report = d.status === 'reporte' ? (d.mois_report || null) : null;
+    // Motif de sortie (hospitalisation uniquement — voir HebergementForm.js) : capturé au
+    // moment de la clôture, sur ce même chemin (Archiver), plutôt que via la route dédiée
+    // /fermer qui existait déjà mais qu'aucun écran n'appelait.
+    if (d.status === 'archived') {
+      maj.motif_fermeture = d.motif_fermeture || null;
+      maj.date_fermeture = new Date().toISOString();
+    }
   }
   if (d.numero_lot !== undefined) maj.numero_lot = d.numero_lot;
   if (d.verrouille_facture !== undefined) maj.verrouille_facture = d.verrouille_facture;
