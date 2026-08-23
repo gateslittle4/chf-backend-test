@@ -192,6 +192,9 @@ app.get('/api/episodes', async (req, res) => {
 // Le flux anti-doublon (chercher un dossier existant d'abord) reste le rôle
 // du nouvel onglet "Dossier/Épisode", pas de cette route de compatibilité.
 app.post('/api/episodes', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'dossier_creer'))) {
+    return res.status(403).json({ error: "Permission 'dossier_creer' requise." });
+  }
   const d = req.body;
   // Tous les appelants passent par toEpisodeApi() côté navigateur avant d'envoyer, donc le
   // corps reçu ici est en snake_case (nom_patient, pas nomPatient) — lire les champs en
@@ -339,6 +342,9 @@ app.get('/api/dossiers/recherche', async (req, res) => {
 });
 
 app.post('/api/dossiers', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'dossier_creer'))) {
+    return res.status(403).json({ error: "Permission 'dossier_creer' requise." });
+  }
   const { numero_dossier, nom, date_naissance, telephone, adresse, local_id } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
@@ -371,6 +377,9 @@ app.get('/api/dossiers/:id', async (req, res) => {
 // Modifier les infos de base d'un patient (ex : nouveau numéro de téléphone) — n'importe qui de
 // connecté peut le faire (comme la création), pas une action sensible comme l'annulation d'un paiement.
 app.put('/api/dossiers/:id', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
+  }
   const { nom, date_naissance, telephone, adresse } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
   const { data, error } = await supabase
@@ -471,6 +480,9 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
 
 // Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).
 app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
   const { data: episode, error: erreurLecture } = await supabase
     .from('episodes').select('est_hospitalisation').eq('id', req.params.id).single();
   if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
@@ -485,6 +497,9 @@ app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
 
 // Fermeture d'un épisode (exeat normal ou sans autorisation — même mécanisme, motif différent)
 app.patch('/api/episodes/:id/fermer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
   const { motif_fermeture } = req.body;
   const { data, error } = await supabase
     .from('episodes')
@@ -496,6 +511,9 @@ app.patch('/api/episodes/:id/fermer', async (req, res) => {
 
 // Badge ⏳ — uniquement pertinent quand la résolution déborde sur un autre jour
 app.patch('/api/episodes/:id/attente-resultats', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
   const { en_attente } = req.body;
   const { data, error } = await supabase
     .from('episodes').update({ en_attente_resultats: !!en_attente }).eq('id', req.params.id).select().single();
@@ -503,8 +521,12 @@ app.patch('/api/episodes/:id/attente-resultats', async (req, res) => {
   res.json(data);
 });
 
-// Fiches — rattachées à un épisode
+// Fiches — rattachées à un épisode. Appelée depuis le Calculateur (caisse_travailler) ET
+// depuis l'approbation d'une exonération (demandes_repondre) — voir Demandes.js.
 app.post('/api/fiches', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
+  }
   const { episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
 
@@ -550,6 +572,20 @@ app.get('/api/catalog/:type', async (req, res) => {
 // Route : mise à jour du catalogue
 app.put('/api/catalog/:type', async (req, res) => {
   const { type } = req.params;
+  // 'permissions' : réservé à permissions_gerer (écran Rôles & permissions).
+  // 'medicaments'/'actes' : catalogue_gerer (Tarifs Pharma/Actes) OU caisse_travailler — cette
+  // même route sert aussi à incrémenter un simple compteur d'usage depuis le Calculateur
+  // (CalculateurPanel.js), utilisé par tout caissier qui n'a pas forcément catalogue_gerer.
+  // Tout le reste (types_consultation, services_hospitalisation...) : catalogue_gerer.
+  let permissionOk;
+  if (type === 'permissions') {
+    permissionOk = await aPermission(req.user.id, 'permissions_gerer');
+  } else if (type === 'medicaments' || type === 'actes') {
+    permissionOk = (await aPermission(req.user.id, 'catalogue_gerer')) || (await aPermission(req.user.id, 'caisse_travailler'));
+  } else {
+    permissionOk = await aPermission(req.user.id, 'catalogue_gerer');
+  }
+  if (!permissionOk) return res.status(403).json({ error: `Permission requise pour modifier le catalogue "${type}".` });
   const { items } = req.body;
   // upsert (pas update) : la toute première écriture doit pouvoir CRÉER la ligne "medicaments"/
   // "actes" si elle n'existe pas encore — un simple update ne peut jamais créer une ligne absente,
@@ -576,7 +612,13 @@ app.get('/api/paiements', async (req, res) => {
 });
 
 // Route : création d'un paiement — idempotente via local_id, même principe que /api/fiches.
+// Appelée depuis la caisse (caisse_travailler), l'approbation d'une exonération
+// (demandes_repondre) ET l'enregistrement d'un remboursement de crédit (Fiche Patient) — d'où
+// aussi caisse_travailler puisque manier de l'argent reste une action de caisse.
 app.post('/api/paiements', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
+  }
   const local_id = req.body.local_id || req.body.localId;
   if (local_id) {
     const { data: existant } = await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle();
@@ -631,6 +673,13 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
   const { data: paiement, error: erreurLecture } = await supabase.from('paiements').select('*').eq('id', req.params.id).single();
   if (erreurLecture) return res.status(404).json({ error: "Paiement introuvable." });
   if (paiement.annule) return res.status(400).json({ error: "Ce paiement est déjà annulé." });
+  // Empêche d'annuler sa propre transaction (une caissière — ou n'importe qui ayant aussi
+  // caisse_travailler — ne doit jamais pouvoir encaisser en cash puis annuler pour empocher).
+  // traite_par_uid absent (ex: paiement d'exonération) = pas de vérification possible, on laisse
+  // passer plutôt que de bloquer une annulation légitime sans piste d'identification.
+  if (paiement.traite_par_uid && paiement.traite_par_uid === req.user.id) {
+    return res.status(403).json({ error: "Impossible d'annuler une transaction que vous avez vous-même encaissée — demande à quelqu'un d'autre." });
+  }
 
   const { data, error } = await supabase
     .from('paiements')
@@ -648,6 +697,9 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
 // secondes d'écart. ong_partenaires.prochain_numero devient la vraie source, mise à jour à
 // chaque appel — plus besoin de la recalculer depuis l'historique des lots.
 app.post('/api/lots/prochain-numero', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'facturation_exporter'))) {
+    return res.status(403).json({ error: "Permission 'facturation_exporter' requise." });
+  }
   const { ong_partenaire } = req.body;
   if (!ong_partenaire) return res.status(400).json({ error: 'ong_partenaire requis' });
   const { data, error } = await supabase.rpc('incrementer_prochain_numero_lot', { p_ong: ong_partenaire });
@@ -661,6 +713,9 @@ app.post('/api/lots/prochain-numero', async (req, res) => {
 // 2 ventes du même médicament arrivaient presque en même temps (2e écriture qui efface la
 // 1ère au lieu de s'additionner). Tout-ou-rien : si un seul article manque, rien n'est décrémenté.
 app.post('/api/stock/decrementer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
   const { decrements } = req.body; // [{ id, qte }, ...]
   if (!Array.isArray(decrements) || decrements.length === 0) {
     return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
@@ -685,6 +740,9 @@ app.post('/api/stock/decrementer', async (req, res) => {
 // modification d'un autre poste si 2 personnes modifiaient le stock de 2 médicaments différents
 // presque au même moment.
 app.post('/api/stock/ajouter', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  }
   const { id, quantite } = req.body;
   if (!id || typeof quantite !== 'number' || quantite <= 0) {
     return res.status(400).json({ error: 'id et quantite (nombre positif) requis.' });
@@ -702,6 +760,9 @@ app.post('/api/stock/ajouter', async (req, res) => {
 // Modifie stock + seuil d'alerte d'UN médicament de façon atomique (même fonction SQL, même
 // raison que ci-dessus).
 app.patch('/api/stock/:id', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  }
   const { id } = req.params;
   const { quantite, seuilAlerte } = req.body;
   if (typeof quantite !== 'number' || typeof seuilAlerte !== 'number') {

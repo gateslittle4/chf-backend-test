@@ -59,7 +59,7 @@ test("Toutes les écritures (update/insert) vérifient une ligne réellement aff
 
 test("La route de catalogue utilise upsert (pas update seul) — sinon impossible de créer la toute première ligne", () => {
   const blocCatalog = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog"));
-  assert.match(blocCatalog.slice(0, 500), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
+  assert.match(blocCatalog.slice(0, 1800), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
 });
 
 test("POST /api/paiements en mode remboursement_credit relit le solde en base — n'accepte jamais tel quel le solde_restant envoyé par le navigateur", () => {
@@ -160,7 +160,7 @@ test("dateOuNull convertit une date de naissance vide en null, jamais en chaîne
   for (const routeStart of ["app.post('/api/episodes'", "app.post('/api/dossiers'", "app.put('/api/dossiers/:id'"]) {
     const i = serverSrc.indexOf(routeStart);
     assert.ok(i !== -1, `route ${routeStart} introuvable`);
-    const bloc = serverSrc.slice(i, i + 1000);
+    const bloc = serverSrc.slice(i, i + 1400);
     assert.match(bloc, /date_naissance:\s*dateOuNull\(/, `${routeStart} doit passer date_naissance par dateOuNull()`);
   }
 });
@@ -176,4 +176,63 @@ test("POST /api/fiches enregistre cree_par_uid — envoyé par CalculateurPanel.
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
   assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid,/, "doit lire cree_par_uid depuis req.body");
   assert.match(blocRoute, /cree_par_uid: cree_par_uid \|\| null/, "doit l'inclure dans l'insertion");
+});
+
+// Audit du 23/08 : 13 routes d'écriture sur 19 n'avaient AUCUNE vérification de permission
+// côté serveur — les permissions ne protégeaient que l'écran, pas le serveur. N'importe quel
+// compte connecté (même un rôle censé être en lecture seule) pouvait créer des dossiers,
+// changer des prix, encaisser, gérer le stock... en appelant l'API directement. Un test par
+// route corrigée, pour qu'aucune ne redevienne silencieusement ouverte à l'avenir.
+function blocRoutePermission(debutRoute, prochaineRouteOuFin) {
+  const i = serverSrc.indexOf(debutRoute);
+  assert.ok(i !== -1, `route introuvable : ${debutRoute}`);
+  const fin = prochaineRouteOuFin ? serverSrc.indexOf(prochaineRouteOuFin, i) : i + 400;
+  assert.ok(fin !== -1, `borne de fin introuvable pour : ${debutRoute}`);
+  return serverSrc.slice(i, fin);
+}
+
+test("POST /api/episodes et POST /api/dossiers exigent dossier_creer", () => {
+  assert.match(blocRoutePermission("app.post('/api/episodes'"), /aPermission\(req\.user\.id, 'dossier_creer'\)/);
+  assert.match(blocRoutePermission("app.post('/api/dossiers',"), /aPermission\(req\.user\.id, 'dossier_creer'\)/);
+});
+
+test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche Patient l'appelle", () => {
+  assert.match(blocRoutePermission("app.put('/api/dossiers/:id'"), /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/);
+});
+
+test("hospitaliser / fermer / attente-resultats exigent caisse_travailler", () => {
+  assert.match(blocRoutePermission("app.patch('/api/episodes/:id/hospitaliser'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+  assert.match(blocRoutePermission("app.patch('/api/episodes/:id/fermer'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+  assert.match(blocRoutePermission("app.patch('/api/episodes/:id/attente-resultats'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+});
+
+test("POST /api/fiches et POST /api/paiements acceptent caisse_travailler OU demandes_repondre — utilisés à la fois par le Calculateur et par l'approbation d'une exonération", () => {
+  for (const route of ["app.post('/api/fiches'", "app.post('/api/paiements',"]) {
+    const bloc = blocRoutePermission(route);
+    assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)\) && !\(await aPermission\(req\.user\.id, 'demandes_repondre'\)/, `${route} doit accepter caisse_travailler OU demandes_repondre`);
+  }
+});
+
+test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer OU caisse_travailler pour medicaments/actes, catalogue_gerer sinon", () => {
+  const bloc = blocRoutePermission("app.put('/api/catalog/:type'", "// Route : récupération des paiements");
+  assert.match(bloc, /if \(type === 'permissions'\)/);
+  assert.match(bloc, /permissionOk = await aPermission\(req\.user\.id, 'permissions_gerer'\)/);
+  assert.match(bloc, /type === 'medicaments' \|\| type === 'actes'/);
+  assert.match(bloc, /permissionOk = \(await aPermission\(req\.user\.id, 'catalogue_gerer'\)\) \|\| \(await aPermission\(req\.user\.id, 'caisse_travailler'\)\)/);
+});
+
+test("POST /api/lots/prochain-numero exige facturation_exporter", () => {
+  assert.match(blocRoutePermission("app.post('/api/lots/prochain-numero'"), /aPermission\(req\.user\.id, 'facturation_exporter'\)/);
+});
+
+test("POST /api/stock/decrementer exige caisse_travailler ; POST /api/stock/ajouter et PATCH /api/stock/:id exigent stock_gerer", () => {
+  assert.match(blocRoutePermission("app.post('/api/stock/decrementer'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+  assert.match(blocRoutePermission("app.post('/api/stock/ajouter'"), /aPermission\(req\.user\.id, 'stock_gerer'\)/);
+  assert.match(blocRoutePermission("app.patch('/api/stock/:id'"), /aPermission\(req\.user\.id, 'stock_gerer'\)/);
+});
+
+test("PATCH /api/paiements/:id/annuler empêche d'annuler sa propre transaction — avant, un compte ayant à la fois caisse_travailler et paiement_annuler (direction/comptable) pouvait encaisser en cash puis annuler lui-même, exactement ce que le commentaire du code disait vouloir empêcher sans jamais le vérifier", () => {
+  const bloc = blocRoutePermission("app.patch('/api/paiements/:id/annuler'", "app.post('/api/lots/prochain-numero'");
+  assert.match(bloc, /if \(paiement\.traite_par_uid && paiement\.traite_par_uid === req\.user\.id\)/, "doit comparer traite_par_uid à req.user.id");
+  assert.match(bloc, /status\(403\)/, "doit refuser (403) l'auto-annulation");
 });
