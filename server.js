@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
@@ -39,7 +40,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
 // encore vide (avant le premier enregistrement depuis l'écran "Rôles & permissions").
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer'] },
+  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer','sauvegarde_gerer'] },
   { role: 'direction', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
   { role: 'comptable', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','facturation_exporter','rapport_chf_voir'] },
@@ -352,7 +353,12 @@ app.get('/api/dossiers/recherche', async (req, res) => {
   if (!nom && !numero) return res.json([]);
 
   let requete = supabase.from('dossiers').select('*');
-  requete = numero ? requete.eq('numero_dossier', numero) : requete.ilike('nom', nom);
+  // Recherche PARTIELLE (%nom%), pas exacte — avant, taper "Jean" ne retrouvait jamais "Jean
+  // Baptiste Pierre", et la moindre variation (espace en trop, faute de frappe) faisait croire
+  // qu'aucun dossier n'existait, créant un doublon au lieu de retrouver le patient existant.
+  // Reste sensible aux vraies fautes de frappe/accents (tolérance complète = extension Postgres
+  // pg_trgm, pas encore activée — voir NOTES_POUR_PROCHAIN_CLAUDE.md).
+  requete = numero ? requete.eq('numero_dossier', numero) : requete.ilike('nom', `%${nom}%`);
 
   const { data, error } = await requete;
   if (error) return res.status(500).json({ error: error.message });
@@ -845,6 +851,75 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
     res.json({ lien });
   } catch (e) {
     if (e.code === 'auth/user-not-found') return res.status(404).json({ error: 'Aucun compte avec cet email.' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// SAUVEGARDE AUTOMATIQUE — Backup/Restore (AppHospitaliere.js) reste manuel, dépend de
+// quelqu'un qui pense à cliquer. Ceci tourne tout seul, tous les jours, sans dépendre de
+// personne. Exporte les tables essentielles vers un bucket Supabase Storage dédié, jamais vers
+// le disque du serveur Render (éphémère — perdu à chaque redéploiement).
+// ============================================================
+const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
+const TABLES_A_SAUVEGARDER = ['dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires', 'users', 'audit_log'];
+
+async function sauvegarderVersStorage() {
+  const contenu = { genere_le: new Date().toISOString() };
+  for (const table of TABLES_A_SAUVEGARDER) {
+    const { data, error } = await supabase.from(table).select('*');
+    if (error) throw new Error(`Lecture de "${table}" : ${error.message}`);
+    contenu[table] = data;
+  }
+
+  const { data: buckets, error: erreurListeBuckets } = await supabase.storage.listBuckets();
+  if (erreurListeBuckets) throw new Error(`Liste des buckets : ${erreurListeBuckets.message}`);
+  if (!buckets.some(b => b.name === BUCKET_SAUVEGARDES)) {
+    const { error: erreurCreation } = await supabase.storage.createBucket(BUCKET_SAUVEGARDES, { public: false });
+    if (erreurCreation) throw new Error(`Création du bucket : ${erreurCreation.message}`);
+  }
+
+  const nomFichier = `backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const { error: erreurUpload } = await supabase.storage
+    .from(BUCKET_SAUVEGARDES)
+    .upload(nomFichier, Buffer.from(JSON.stringify(contenu)), { contentType: 'application/json', upsert: true });
+  if (erreurUpload) throw new Error(`Envoi vers Storage : ${erreurUpload.message}`);
+
+  // Rétention : garde les 30 dernières sauvegardes quotidiennes (~1 mois), supprime le reste —
+  // sinon le bucket grossit indéfiniment. upsert:true ci-dessus évite déjà les doublons si le
+  // job tourne 2 fois le même jour (même nom de fichier, écrase plutôt que d'empiler).
+  const { data: fichiers, error: erreurListeFichiers } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
+  if (!erreurListeFichiers && fichiers && fichiers.length > 30) {
+    const aSupprimer = fichiers.sort((a, b) => a.name.localeCompare(b.name)).slice(0, fichiers.length - 30).map(f => f.name);
+    await supabase.storage.from(BUCKET_SAUVEGARDES).remove(aSupprimer);
+  }
+
+  const nombreLignes = Object.fromEntries(TABLES_A_SAUVEGARDER.map(t => [t, contenu[t].length]));
+  return { fichier: nomFichier, nombreLignes };
+}
+
+// Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le
+// serveur si ça échoue (ex: bucket pas encore créé, quota Storage) — juste journalisé, à vérifier
+// dans les logs Render au besoin. Déclenchement manuel possible via POST /api/admin/backup-manuel.
+cron.schedule('0 6 * * *', async () => {
+  try {
+    const resultat = await sauvegarderVersStorage();
+    console.log(`✅ Sauvegarde automatique : ${resultat.fichier}`, resultat.nombreLignes);
+  } catch (e) {
+    console.error('❌ Échec de la sauvegarde automatique :', e.message);
+  }
+});
+
+// Déclenchement manuel — pour vérifier que la sauvegarde automatique fonctionne réellement sans
+// attendre la prochaine exécution planifiée, ou en cas de doute avant une opération risquée.
+app.post('/api/admin/backup-manuel', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
+    return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
+  }
+  try {
+    const resultat = await sauvegarderVersStorage();
+    res.json({ success: true, ...resultat });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });

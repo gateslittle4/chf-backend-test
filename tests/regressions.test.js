@@ -275,3 +275,21 @@ test("POST /api/dossiers/:dossierId/episodes bloque une 2e hospitalisation, mais
   assert.match(bloc, /if \(episodeHospitalisationOuvert && est_hospitalisation\) \{/, "le blocage dur doit exiger que le NOUVEL épisode soit aussi une hospitalisation, pas n'importe quel épisode");
   assert.doesNotMatch(bloc, /if \(episodeHospitalisationOuvert\) \{/, "ne doit plus bloquer sur la seule présence d'une hospitalisation ouverte, sans regarder le type du nouvel épisode");
 });
+
+test("GET /api/dossiers/recherche fait une recherche PARTIELLE par nom (%nom%), pas exacte — avant, taper 'Jean' ne retrouvait jamais 'Jean Baptiste Pierre', la moindre variation faisait croire qu'aucun dossier n'existait et créait un doublon au lieu de retrouver le patient existant", () => {
+  const bloc = blocRoutePermission("app.get('/api/dossiers/recherche'", "app.post('/api/dossiers'");
+  assert.match(bloc, /requete\.ilike\('nom', `%\$\{nom\}%`\)/, "doit chercher avec des jokers autour du nom, pas une correspondance exacte");
+});
+
+test("Sauvegarde automatique : planifiée tous les jours (cron), n'écrit jamais sur le disque du serveur (éphémère sur Render — perdu à chaque redéploiement), et reste déclenchable manuellement pour vérifier qu'elle fonctionne sans attendre l'exécution planifiée", () => {
+  assert.match(serverSrc, /cron\.schedule\('0 6 \* \* \*'/, "doit planifier une exécution quotidienne");
+  assert.match(serverSrc, /\.from\(BUCKET_SAUVEGARDES\)\s*\n?\s*\.upload\(/, "doit écrire vers Supabase Storage");
+  assert.doesNotMatch(serverSrc, /require\('fs'\)/, "ne doit jamais écrire de fichier sur le disque local du serveur (perdu au redéploiement)");
+  const blocManuel = blocRoutePermission("app.post('/api/admin/backup-manuel'", null);
+  assert.match(blocManuel, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/, "le déclenchement manuel doit exiger la permission sauvegarde_gerer");
+});
+
+test("PERMISSIONS_PAR_DEFAUT (repli backend si le catalogue Supabase est vide) inclut sauvegarde_gerer pour administrateur — sinon ce repli divergeait silencieusement de utils/permissions.js (front), qui l'a déjà", () => {
+  const blocDefaut = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf("role: 'direction'"));
+  assert.match(blocDefaut, /'sauvegarde_gerer'/, "administrateur doit avoir sauvegarde_gerer dans le repli par défaut");
+});
