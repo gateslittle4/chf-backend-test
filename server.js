@@ -758,37 +758,6 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
   }
 });
 
-// Route TEMPORAIRE — étape 2b du plan RLS (voir PLAN_RLS.md et scripts/backfill-claims-supabase.js).
-// Attribue la revendication `role: 'authenticated'` à TOUS les comptes Firebase existants
-// (les nouveaux comptes l'ont déjà via POST /api/admin/users ci-dessus). À exécuter UNE SEULE
-// FOIS après l'étape 2a, puis à retirer — même logique que le script committé, réutilisée ici
-// pour éviter de faire circuler FIREBASE_SERVICE_ACCOUNT en dehors de Render.
-app.post('/api/admin/backfill-claims-firebase', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
-    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
-  }
-  try {
-    let nextPageToken;
-    let total = 0;
-    const echecs = [];
-    do {
-      const page = await getAuth().listUsers(1000, nextPageToken);
-      for (const user of page.users) {
-        try {
-          await getAuth().setCustomUserClaims(user.uid, { role: 'authenticated' });
-          total++;
-        } catch (e) {
-          echecs.push({ compte: user.email || user.uid, erreur: e.message });
-        }
-      }
-      nextPageToken = page.pageToken;
-    } while (nextPageToken);
-    res.json({ total, echecs });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend CHF demarré sur le port ${PORT}`);

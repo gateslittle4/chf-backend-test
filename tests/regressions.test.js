@@ -177,11 +177,3 @@ test("POST /api/fiches enregistre cree_par_uid — envoyé par CalculateurPanel.
   assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid,/, "doit lire cree_par_uid depuis req.body");
   assert.match(blocRoute, /cree_par_uid: cree_par_uid \|\| null/, "doit l'inclure dans l'insertion");
 });
-
-test("POST /api/admin/backfill-claims-firebase (route temporaire, étape 2b du plan RLS) exige utilisateurs_gerer et attribue role:'authenticated' à tous les comptes Firebase en paginant listUsers — sinon les comptes créés avant le correctif de POST /api/admin/users restent sans la revendication requise par Third-Party Auth et ne pourront jamais lire/écrire une table une fois RLS activé", () => {
-  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/backfill-claims-firebase'"), serverSrc.indexOf('const PORT ='));
-  assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
-  assert.match(blocRoute, /getAuth\(\)\.listUsers\(1000, nextPageToken\)/, "doit paginer avec listUsers(1000, nextPageToken)");
-  assert.match(blocRoute, /getAuth\(\)\.setCustomUserClaims\(user\.uid, \{ role: 'authenticated' \}\)/, "doit attribuer role:'authenticated' à chaque compte");
-  assert.match(blocRoute, /while \(nextPageToken\)/, "doit boucler tant qu'il reste des pages");
-});

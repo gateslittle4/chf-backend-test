@@ -37,7 +37,9 @@ backend refusera de démarrer (`process.exit(1)`, message d'erreur clair dans le
 
 ## Étape 2 — Brancher Firebase dans Supabase (Third-Party Auth)
 
-### 2a. Dans le tableau de bord Supabase — ⏳ PAS ENCORE FAIT (confirmé par Esdras le 23/08)
+### 2a. Dans le tableau de bord Supabase — ✅ FAIT (confirmé par Esdras le 23/08, après correction
+d'une faute de frappe : le Project ID doit être en minuscules, `chf-test1`, pas `Chf-test1` —
+l'auto-capitalisation du clavier mobile l'avait changé)
 Authentication → Third-Party Auth → nouvelle intégration → choisir Firebase → renseigner le
 Project ID Firebase (`chf-test1`, visible dans `api/firebase.js`). Documentation officielle :
 https://supabase.com/docs/guides/auth/third-party/firebase-auth
@@ -49,40 +51,41 @@ chaque nouvelle session, ou donner un token d'accès Supabase (Account → Acces
 veut que Claude l'exécute directement via la Management API
 (`POST /v1/projects/<ref>/config/auth/third-party-auth`).
 
-### 2b. Attribuer la revendication requise à chaque utilisateur — script prêt, pas encore lancé
+### 2b. Attribuer la revendication requise à chaque utilisateur — ✅ FAIT le 23/08
 Supabase exige que chaque compte porte une revendication personnalisée Firebase
 `role: 'authenticated'` (nom malheureux — **rien à voir** avec le rôle CHF
 administrateur/direction/comptable/auditeur/lecteur stocké dans la table `users` ; c'est un
 simple marqueur que Supabase impose, toujours la même valeur pour tout le monde).
 - **Nouveaux comptes** : déjà fait automatiquement par le backend corrigé
   (`/api/admin/users` appelle `setCustomUserClaims` à la création).
-- **Comptes déjà existants** : script committé le 23/08, voir
-  `scripts/backfill-claims-supabase.js` (dans `chf-backend-test`) — remplir
-  `FIREBASE_SERVICE_ACCOUNT` dans `.env` puis `node scripts/backfill-claims-supabase.js`.
-  À lancer **après** 2a (sinon la revendication ne sert à rien tant que Supabase ne fait pas
-  confiance aux jetons Firebase).
+- **Comptes déjà existants** : rattrapés via une route backend temporaire (même logique que
+  `scripts/backfill-claims-supabase.js`, retirée après usage) — 4 comptes mis à jour, 0 échec.
 
-### 2c. Code frontend — à appliquer SEULEMENT après 2a et 2b
-Dans `api/firebase.js`, remplacer la création du client Supabase :
+### 2c. Code frontend — ✅ FAIT et déployé le 23/08
+Dans `api/firebase.js`, le client Supabase transmet maintenant le jeton Firebase à chaque
+requête :
 ```js
-// AVANT
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// APRÈS
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   accessToken: async () => (authReel.currentUser ? authReel.currentUser.getIdToken() : null)
 });
 ```
-Je ne l'ai pas encore mis dans le zip livré : si ce code part avant que 2a soit configuré côté
-Supabase, les appels directs (Demandes, Partenaires, Utilisateurs...) risquent de se mettre à
-échouer. À appliquer et tester juste après 2a/2b, avant l'étape 3.
+Testé en production après déploiement : Demandes, Partenaires, Utilisateurs, Salaires,
+Clôture de caisse, Journal d'audit fonctionnent toujours normalement (RLS n'étant pas encore
+activée, ce changement seul ne restreint rien pour l'instant).
 
 ---
 
 ## Étape 3 — Activer RLS + règles (SQL, dans Supabase → SQL Editor)
 
-Un premier jet, par table, à relire avec Esdras — j'ai marqué ⚠️ ce qui dépend d'une règle
-métier que je ne connais pas avec certitude.
+Règles métier confirmées avec Esdras le 23/08 :
+- **Demandes d'exonération** : comptable (écrit les transactions) + direction + administrateur
+  + auditeur (supervision) voient tout ; un caissier ne voit/crée que ses propres demandes.
+- **Salaires** : comptable n'y a **aucun accès**, ni lecture ni écriture — réservé à
+  direction/administrateur uniquement.
+- **Clôture de caisse** : chaque caissier ne voit/modifie QUE ses propres clôtures (le code
+  a été corrigé le 23/08 pour stocker un vrai `cloturee_par_uid`, voir DashboardCaisse.js —
+  avant, 2 caissiers travaillant le même jour partageaient la même fiche). Direction,
+  administrateur et comptable voient toutes les clôtures (supervision/comptabilité).
 
 ```sql
 -- Fonction utilitaire : rôle CHF de l'utilisateur Firebase actuellement authentifié.
@@ -115,12 +118,11 @@ ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
 CREATE POLICY audit_insertion_soi ON audit_log FOR INSERT WITH CHECK (effectue_par_uid = auth.uid());
 CREATE POLICY audit_lecture_admin ON audit_log FOR SELECT USING (mon_role_chf() = 'administrateur');
 
--- GROUPE 4 — demandes_exoneration : un caissier voit/crée SES demandes ; direction/
--- administrateur voient et répondent à TOUTES, seulement tant qu'en attente.
--- ⚠️ à confirmer : comptable/auditeur doivent-ils aussi les voir ?
+-- GROUPE 4 — demandes_exoneration : un caissier voit/crée SES demandes ; comptable/direction/
+-- administrateur/auditeur voient tout ; direction/administrateur répondent, tant qu'en attente.
 ALTER TABLE demandes_exoneration ENABLE ROW LEVEL SECURITY;
 CREATE POLICY exoneration_lecture ON demandes_exoneration FOR SELECT
-  USING (demandeur_uid = auth.uid() OR mon_role_chf() IN ('direction','administrateur'));
+  USING (demandeur_uid = auth.uid() OR mon_role_chf() IN ('comptable','direction','administrateur','auditeur'));
 CREATE POLICY exoneration_creation ON demandes_exoneration FOR INSERT
   WITH CHECK (demandeur_uid = auth.uid());
 CREATE POLICY exoneration_reponse ON demandes_exoneration FOR UPDATE
@@ -132,17 +134,18 @@ ALTER TABLE ong_partenaires ENABLE ROW LEVEL SECURITY;
 CREATE POLICY ong_lecture_tous ON ong_partenaires FOR SELECT USING (mon_role_chf() IS NOT NULL);
 CREATE POLICY ong_ecriture_admin ON ong_partenaires FOR ALL USING (mon_role_chf() IN ('direction','administrateur'));
 
--- GROUPE 6 — salaires_service : sensible. ⚠️ à confirmer : un comptable peut-il MODIFIER
--- ou seulement CONSULTER ? Ci-dessous, consultation pour comptable, modification direction/admin seul.
+-- GROUPE 6 — salaires_service : réservé à direction/administrateur, lecture ET écriture.
+-- Le comptable n'y a AUCUN accès (confirmé par Esdras le 23/08) — aucune policy pour lui,
+-- donc RLS le bloque par défaut, ce qui est le but.
 ALTER TABLE salaires_service ENABLE ROW LEVEL SECURITY;
-CREATE POLICY salaires_lecture  ON salaires_service FOR SELECT USING (mon_role_chf() IN ('direction','administrateur','comptable'));
-CREATE POLICY salaires_ecriture ON salaires_service FOR ALL    USING (mon_role_chf() IN ('direction','administrateur'));
+CREATE POLICY salaires_lecture_ecriture ON salaires_service FOR ALL USING (mon_role_chf() IN ('direction','administrateur'));
 
--- GROUPE 7 — cloture_caisse : ⚠️ à confirmer avec Esdras (une clôture par caissier/jour,
--- ou une seule partagée ?). Hypothèse ci-dessous : tout utilisateur connecté peut lire/écrire —
--- à resserrer une fois la vraie règle connue.
+-- GROUPE 7 — cloture_caisse : un caissier ne voit/modifie QUE ses propres clôtures
+-- (colonne cloturee_par_uid, ajoutée le 23/08) ; comptable/direction/administrateur voient tout.
 ALTER TABLE cloture_caisse ENABLE ROW LEVEL SECURITY;
-CREATE POLICY cloture_lecture_ecriture ON cloture_caisse FOR ALL USING (mon_role_chf() IS NOT NULL);
+CREATE POLICY cloture_lecture_soi     ON cloture_caisse FOR SELECT USING (cloturee_par_uid = auth.uid());
+CREATE POLICY cloture_lecture_super   ON cloture_caisse FOR SELECT USING (mon_role_chf() IN ('comptable','direction','administrateur'));
+CREATE POLICY cloture_ecriture_soi    ON cloture_caisse FOR ALL    USING (cloturee_par_uid = auth.uid());
 ```
 
 **Rollback d'urgence** si un écran casse après activation (à identifier via les messages
@@ -157,11 +160,12 @@ ALTER TABLE nom_de_la_table DISABLE ROW LEVEL SECURITY;
 1. ✅ Déployer `chf-backend-complet-3.zip` (service_role + correctifs) — ajouter la variable
    `SUPABASE_SERVICE_ROLE_KEY` sur Render.
 2. ✅ Déployer `chf-app-8.zip` (écran de connexion corrigé).
-3. Configurer Third-Party Auth côté Supabase (2a) + lancer le script de rattrapage (2b).
-4. Appliquer le changement frontend de 2c, tester que tout fonctionne **encore comme avant**
-   (rien ne doit changer, RLS n'est pas encore actif).
-5. Exécuter le SQL de l'étape 3, idéalement hors des heures de pointe.
-6. Tester chaque écran (Utilisateurs, Demandes, Partenaires, Salaires, Clôture, Calculateur,
+3. ✅ Configurer Third-Party Auth côté Supabase (2a) + rattrapage des claims (2b).
+4. ✅ Appliquer le changement frontend de 2c, testé en production — rien n'a changé (RLS pas
+   encore actif).
+5. ⏳ Exécuter le SQL de l'étape 3 (ci-dessus, règles confirmées le 23/08), idéalement hors des
+   heures de pointe.
+6. ⏳ Tester chaque écran (Utilisateurs, Demandes, Partenaires, Salaires, Clôture, Calculateur,
    Archives) avec un compte de chaque rôle si possible.
 
 ## Hors scope de cette passe (mentionné précédemment, pas oublié)
