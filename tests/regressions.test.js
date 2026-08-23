@@ -248,6 +248,19 @@ test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès 
   assert.match(blocRoute, /mode_paiement: mode_paiement \|\| null/, "doit insérer mode_paiement");
 });
 
+// Retour d'Esdras (23/08) : URGENT — cette route n'existait pas du tout. "🗑️ Supprimer" côté client
+// ne retirait la fiche que de l'état React local (+ restitution de stock) ; la fiche ET son
+// paiement restaient en base pour toujours, donc réapparaissaient au moindre rechargement de page.
+test("DELETE /api/fiches/:id existe, exige dossier_annuler, supprime les paiements liés (fiche_id) AVANT la fiche elle-même, et reste idempotente (fiche déjà absente = succès, pas une erreur)", () => {
+  const bloc = blocRoutePermission("app.delete('/api/fiches/:id'", "// Route : récupération du catalogue");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'dossier_annuler'\)/, "doit exiger la permission dossier_annuler (même permission que le bouton côté client)");
+  const posPaiements = bloc.indexOf("from('paiements').delete()");
+  const posFiche = bloc.indexOf("from('fiches').delete()");
+  assert.ok(posPaiements !== -1, "doit supprimer les paiements liés à cette fiche (fiche_id)");
+  assert.ok(posFiche !== -1 && posPaiements < posFiche, "doit supprimer les paiements AVANT la fiche — sinon un paiement pourrait rester orphelin si la 2e suppression échoue");
+  assert.match(bloc, /if \(!fiche\) return res\.status\(200\)\.json\(\{ success: true \}\);/, "une fiche déjà supprimée doit renvoyer un succès, pas une erreur — nécessaire pour une relecture idempotente depuis la file hors ligne");
+});
+
 test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer sinon (medicaments/actes déjà rejetés en 410 avant d'arriver ici)", () => {
   const bloc = blocRoutePermission("app.put('/api/catalog/:type'", "// Route : récupération des paiements");
   assert.match(bloc, /if \(type === 'permissions'\)/);

@@ -804,6 +804,29 @@ app.get('/api/fiches/episode/:episodeId', async (req, res) => {
   res.json(data);
 });
 
+// Retour d'Esdras (23/08, bug financier URGENT) : cette route N'EXISTAIT PAS — "🗑️ Supprimer" côté
+// client (CalculateurPanel.js) ne faisait qu'un retrait de l'état React local + restitution de
+// stock, jamais rien côté serveur. Une fiche "supprimée" réapparaissait donc (avec son paiement)
+// dès qu'on rechargeait la page ou rouvrait le dossier, puisqu'elle n'avait jamais quitté la base.
+// Supprime aussi les paiements liés (fiche_id) — sans ça, un paiement orphelin resterait compté
+// dans les totaux de Caisse/Direction pour une fiche qui n'existe plus.
+app.delete('/api/fiches/:id', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'dossier_annuler'))) {
+    return res.status(403).json({ error: "Permission 'dossier_annuler' requise pour supprimer une fiche." });
+  }
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('id').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!fiche) return res.status(200).json({ success: true }); // déjà supprimée (idempotent — utile pour une relecture de la file hors ligne)
+
+  const { error: erreurPaiements } = await supabase.from('paiements').delete().eq('fiche_id', req.params.id);
+  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+
+  const { error: erreurFiche } = await supabase.from('fiches').delete().eq('id', req.params.id);
+  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+
+  res.json({ success: true });
+});
+
 // Route : récupération du catalogue (médicaments ou actes)
 app.get('/api/catalog/:type', async (req, res) => {
   const { type } = req.params;
