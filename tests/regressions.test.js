@@ -408,6 +408,23 @@ test("PATCH /api/episodes/:id/transferer exige caisse_travailler, refuse un épi
 });
 
 test("GET /api/episodes/:id/transferts est ouvert (comme le reste de l'historique d'un dossier), pas de permission bloquante", () => {
-  const bloc = blocRoutePermission("app.get('/api/episodes/:id/transferts'", "app.post('/api/fiches'");
+  const bloc = blocRoutePermission("app.get('/api/episodes/:id/transferts'", "app.patch('/api/episodes/:id/lit'");
   assert.doesNotMatch(bloc, /aPermission/, "la lecture de l'historique des transferts doit rester ouverte");
+});
+
+// Retour d'Esdras (23/08) : lits nommés individuellement — "on sait X lits occupés à Maternité"
+// mais pas "Lit 3 occupé, Lit 4 libre".
+test("PATCH /api/episodes/:id/lit refuse d'assigner un lit déjà occupé par un AUTRE épisode ouvert du même service (409), et PATCH .../transferer vide le lit (appartient à l'ancien service)", () => {
+  const blocLit = blocRoutePermission("app.patch('/api/episodes/:id/lit'", "app.post('/api/fiches'");
+  assert.match(blocLit, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit exiger caisse_travailler");
+  assert.match(blocLit, /\.eq\('service', episode\.service\)\.eq\('lit', lit\)\.eq\('statut', 'ouvert'\)\.neq\('id', req\.params\.id\)/, "doit vérifier qu'aucun AUTRE épisode ouvert du même service n'a déjà ce lit");
+  assert.match(blocLit, /res\.status\(409\)/, "doit refuser (409) un lit déjà occupé, pas laisser 2 patients sur le même lit");
+
+  const blocTransfert = serverSrc.slice(serverSrc.indexOf("app.patch('/api/episodes/:id/transferer'"), serverSrc.indexOf("app.get('/api/episodes/:id/transferts'"));
+  assert.match(blocTransfert, /\.update\(\{ service: nouveau_service\.trim\(\), lit: null \}\)/, "un transfert doit vider le lit — il appartient à l'ancien service");
+});
+
+test("episodeVersFlat expose lit — sinon Hospitalisation ne peut jamais afficher quel lit est occupé", () => {
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFlat, /lit: ep\.lit \|\| null,/);
 });
