@@ -658,6 +658,44 @@ app.patch('/api/episodes/:id/attente-resultats', async (req, res) => {
   res.json(data);
 });
 
+// Transfert d'un patient hospitalisé vers un autre service (retour d'Esdras du 23/08) — ex.
+// Maternité -> Néonatologie. Rien ne traçait ça avant : chaque service voyait juste "son"
+// épisode séparément, sans lien formel. Change episode.service ET garde une trace (table
+// transferts_service) — motif, qui, quand, ancien/nouveau service.
+app.patch('/api/episodes/:id/transferer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
+  const { nouveau_service, motif, transfere_par } = req.body;
+  if (!nouveau_service || !String(nouveau_service).trim()) {
+    return res.status(400).json({ error: 'nouveau_service est requis.' });
+  }
+  const { data: episode, error: erreurLecture } = await supabase
+    .from('episodes').select('service, est_hospitalisation, statut').eq('id', req.params.id).single();
+  if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
+  if (!episode.est_hospitalisation) return res.status(400).json({ error: 'Seul un épisode en hospitalisation peut être transféré entre services.' });
+  if (episode.statut !== 'ouvert') return res.status(400).json({ error: 'Épisode déjà fermé — impossible de le transférer.' });
+
+  const { data, error } = await supabase
+    .from('episodes').update({ service: nouveau_service.trim() }).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+
+  const { error: erreurTrace } = await supabase.from('transferts_service').insert({
+    episode_id: req.params.id, ancien_service: episode.service, nouveau_service: nouveau_service.trim(),
+    motif: motif || null, transfere_par: transfere_par || null, transfere_par_uid: req.user.id,
+  });
+  if (erreurTrace) console.error('Transfert effectué mais non tracé (transferts_service) :', erreurTrace.message);
+
+  res.json(data);
+});
+
+app.get('/api/episodes/:id/transferts', async (req, res) => {
+  const { data, error } = await supabase
+    .from('transferts_service').select('*').eq('episode_id', req.params.id).order('date_transfert', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 // Fiches — rattachées à un épisode. Appelée depuis le Calculateur (caisse_travailler) ET
 // depuis l'approbation d'une exonération (demandes_repondre) — voir Demandes.js.
 app.post('/api/fiches', async (req, res) => {

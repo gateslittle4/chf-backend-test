@@ -395,3 +395,19 @@ test("GET /api/requisitions accepte stock_gerer OU analytics_voir — Direction/
   const bloc = blocRoutePermission("app.get('/api/requisitions'", "app.post('/api/stock/ajouter'");
   assert.match(bloc, /aPermission\(req\.user\.id, 'stock_gerer'\)\) && !\(await aPermission\(req\.user\.id, 'analytics_voir'\)/, "doit accepter stock_gerer OU analytics_voir");
 });
+
+// Retour d'Esdras (23/08) : transfert d'un patient hospitalisé entre services (ex. Maternité ->
+// Néonatologie) — rien ne traçait ça avant.
+test("PATCH /api/episodes/:id/transferer exige caisse_travailler, refuse un épisode non-hospitalisation ou déjà fermé, et trace le transfert (transferts_service) sans faire échouer la réponse si la trace échoue", () => {
+  const bloc = blocRoutePermission("app.patch('/api/episodes/:id/transferer'", "app.get('/api/episodes/:id/transferts'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit exiger caisse_travailler");
+  assert.match(bloc, /if \(!episode\.est_hospitalisation\)/, "doit refuser un épisode qui n'est pas en hospitalisation");
+  assert.match(bloc, /if \(episode\.statut !== 'ouvert'\)/, "doit refuser un épisode déjà fermé");
+  assert.match(bloc, /\.from\('transferts_service'\)\.insert/, "doit tracer le transfert");
+  assert.match(bloc, /console\.error\('Transfert effectué mais non tracé/, "un échec de la trace ne doit pas faire échouer le transfert lui-même (déjà appliqué à ce moment-là)");
+});
+
+test("GET /api/episodes/:id/transferts est ouvert (comme le reste de l'historique d'un dossier), pas de permission bloquante", () => {
+  const bloc = blocRoutePermission("app.get('/api/episodes/:id/transferts'", "app.post('/api/fiches'");
+  assert.doesNotMatch(bloc, /aPermission/, "la lecture de l'historique des transferts doit rester ouverte");
+});
