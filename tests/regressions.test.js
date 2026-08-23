@@ -234,12 +234,11 @@ test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès 
   assert.match(blocRoute, /mode_paiement: mode_paiement \|\| null/, "doit insérer mode_paiement");
 });
 
-test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer OU caisse_travailler pour medicaments/actes, catalogue_gerer sinon", () => {
+test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer sinon (medicaments/actes déjà rejetés en 410 avant d'arriver ici)", () => {
   const bloc = blocRoutePermission("app.put('/api/catalog/:type'", "// Route : récupération des paiements");
   assert.match(bloc, /if \(type === 'permissions'\)/);
   assert.match(bloc, /permissionOk = await aPermission\(req\.user\.id, 'permissions_gerer'\)/);
-  assert.match(bloc, /type === 'medicaments' \|\| type === 'actes'/);
-  assert.match(bloc, /permissionOk = \(await aPermission\(req\.user\.id, 'catalogue_gerer'\)\) \|\| \(await aPermission\(req\.user\.id, 'caisse_travailler'\)\)/);
+  assert.match(bloc, /permissionOk = await aPermission\(req\.user\.id, 'catalogue_gerer'\)/);
 });
 
 test("POST /api/lots/prochain-numero exige facturation_exporter", () => {
@@ -303,4 +302,34 @@ test("POST /api/stock/ajouter-don et POST /api/stock/decrementer-dons appellent 
   assert.match(blocDecrementer, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit exiger caisse_travailler");
   assert.match(blocDecrementer, /supabase\.rpc\('decrementer_stock_dons'/, "doit appeler la fonction Postgres atomique dédiée au don, pas decrementer_stock_medicaments (stock acheté)");
   assert.match(blocDecrementer, /res\.status\(409\)/, "doit renvoyer 409 si le stock donné est insuffisant, pas 200");
+});
+
+// Retour d'Esdras (23/08) : "on peut ajouter des médicaments en tarif pharmacie ET en stock,
+// n'est-ce pas un problème ?" — oui : GrilleEdition.js ("Tarifs Pharma") réécrivait TOUT le
+// catalogue à chaque prix modifié/article ajouté (lecture d'un instantané côté navigateur, puis
+// réenregistrement du tableau entier), ce qui pouvait silencieusement ANNULER un stock ou des
+// dons ONG décrémentés entre-temps par une vente. Corrigé par 3 fonctions Postgres atomiques
+// dédiées (fonction_champs_catalogue.sql) qui ne touchent jamais quantite/seuilAlerte/donsParOng.
+test("PUT /api/catalog/:type refuse maintenant medicaments et actes (410) — la réécriture complète du tableau pouvait annuler un stock/don décrémenté entre-temps par une vente", () => {
+  const blocPut = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog/:type'"), serverSrc.indexOf("app.post('/api/catalog/:type/item'"));
+  assert.match(blocPut, /type === 'medicaments' \|\| type === 'actes'/, "doit détecter medicaments/actes avant tout le reste");
+  assert.match(blocPut, /res\.status\(410\)/, "doit renvoyer 410 (route retirée), pas accepter l'écriture");
+});
+
+test("POST /api/catalog/:type/item (ajout d'un article) exige catalogue_gerer et force quantite=0/donsParOng={} pour medicaments — le stock initial ne doit jamais être fixable depuis Tarifs Pharma, quoi que le navigateur envoie", () => {
+  const bloc = blocRoutePermission("app.post('/api/catalog/:type/item'", "app.patch('/api/catalog/:type/champs'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'catalogue_gerer'\)/, "doit exiger catalogue_gerer (pas caisse_travailler — créer un article n'est pas une vente)");
+  assert.match(bloc, /supabase\.rpc\('ajouter_article_catalogue'/, "doit appeler la fonction Postgres atomique dédiée");
+});
+
+test("PATCH /api/catalog/:type/champs accepte catalogue_gerer OU caisse_travailler (utilisée aussi par le compteur d'usage du Calculateur) et appelle la fonction qui retire elle-même quantite/seuilAlerte/donsParOng", () => {
+  const bloc = blocRoutePermission("app.patch('/api/catalog/:type/champs'", "app.delete('/api/catalog/:type/item/:id'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'catalogue_gerer'\)\) && !\(await aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit accepter catalogue_gerer OU caisse_travailler");
+  assert.match(bloc, /supabase\.rpc\('definir_champs_catalogue_lot'/, "doit appeler la fonction Postgres atomique dédiée");
+});
+
+test("DELETE /api/catalog/:type/item/:id exige catalogue_gerer et appelle la fonction Postgres atomique dédiée", () => {
+  const bloc = blocRoutePermission("app.delete('/api/catalog/:type/item/:id'", null);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'catalogue_gerer'\)/, "doit exiger catalogue_gerer");
+  assert.match(bloc, /supabase\.rpc\('supprimer_article_catalogue'/, "doit appeler la fonction Postgres atomique dédiée");
 });

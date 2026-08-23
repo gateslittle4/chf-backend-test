@@ -608,24 +608,29 @@ app.get('/api/catalog/:type', async (req, res) => {
 // Route : mise à jour du catalogue
 app.put('/api/catalog/:type', async (req, res) => {
   const { type } = req.params;
+  // medicaments/actes n'acceptent PLUS de réécriture complète du tableau ici — cette route
+  // réécrivait TOUT le catalogue à chaque appel (lecture d'un instantané côté navigateur, puis
+  // ré-enregistrement du tableau entier), ce qui pouvait silencieusement ANNULER un stock ou des
+  // dons ONG décrémentés entre-temps par une vente. Voir POST /api/catalog/:type/item,
+  // PATCH /api/catalog/:type/champs, DELETE /api/catalog/:type/item/:id ci-dessous (fonctions
+  // Postgres atomiques, fonction_champs_catalogue.sql) — seules voies désormais pour ces 2 types.
+  if (type === 'medicaments' || type === 'actes') {
+    return res.status(410).json({
+      error: `PUT /api/catalog/${type} n'accepte plus de réécriture complète du tableau — utilise POST /api/catalog/${type}/item (créer), PATCH /api/catalog/${type}/champs (modifier), ou DELETE /api/catalog/${type}/item/:id (supprimer).`,
+    });
+  }
   // 'permissions' : réservé à permissions_gerer (écran Rôles & permissions).
-  // 'medicaments'/'actes' : catalogue_gerer (Tarifs Pharma/Actes) OU caisse_travailler — cette
-  // même route sert aussi à incrémenter un simple compteur d'usage depuis le Calculateur
-  // (CalculateurPanel.js), utilisé par tout caissier qui n'a pas forcément catalogue_gerer.
   // Tout le reste (types_consultation, services_hospitalisation...) : catalogue_gerer.
   let permissionOk;
   if (type === 'permissions') {
     permissionOk = await aPermission(req.user.id, 'permissions_gerer');
-  } else if (type === 'medicaments' || type === 'actes') {
-    permissionOk = (await aPermission(req.user.id, 'catalogue_gerer')) || (await aPermission(req.user.id, 'caisse_travailler'));
   } else {
     permissionOk = await aPermission(req.user.id, 'catalogue_gerer');
   }
   if (!permissionOk) return res.status(403).json({ error: `Permission requise pour modifier le catalogue "${type}".` });
   const { items } = req.body;
-  // upsert (pas update) : la toute première écriture doit pouvoir CRÉER la ligne "medicaments"/
-  // "actes" si elle n'existe pas encore — un simple update ne peut jamais créer une ligne absente,
-  // ce qui rendait "Ajouter" impossible à utiliser tant que la table catalog était vide.
+  // upsert (pas update) : la toute première écriture doit pouvoir CRÉER la ligne si elle
+  // n'existe pas encore — un simple update ne peut jamais créer une ligne absente.
   const { data, error } = await supabase
     .from('catalog')
     .upsert({ type, items, updated_at: new Date().toISOString() }, { onConflict: 'type' })
@@ -635,6 +640,67 @@ app.put('/api/catalog/:type', async (req, res) => {
     return res.status(500).json({ error: `Échec inattendu de l'enregistrement du catalogue "${type}".` });
   }
   res.json({ success: true });
+});
+
+// Ajoute UN article au catalogue (medicaments ou actes) de façon atomique (voir
+// fonction_champs_catalogue.sql) — remplace l'ancien read-modify-write complet de
+// GrilleEdition.js ("Tarifs Pharma"/"Tarifs Actes"). Pour "medicaments", le stock démarre
+// TOUJOURS à 0 (aucun don) quoi que le navigateur envoie — le stock initial se règle ensuite
+// depuis "Gestion des stocks", jamais depuis Tarifs Pharma (voir aussi le 410 ci-dessus).
+app.post('/api/catalog/:type/item', async (req, res) => {
+  const { type } = req.params;
+  if (!(await aPermission(req.user.id, 'catalogue_gerer'))) {
+    return res.status(403).json({ error: "Permission 'catalogue_gerer' requise." });
+  }
+  const { item } = req.body;
+  if (!item || typeof item !== 'object') return res.status(400).json({ error: 'item (objet) requis.' });
+  const { data, error } = await supabase.rpc('ajouter_article_catalogue', { p_type: type, p_item: item });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL ajouter_article_catalogue n'existe pas encore dans Supabase — colle fonction_champs_catalogue.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.status(201).json({ success: true, item: data });
+});
+
+// Modifie des champs (nom, prix, prixAchat, sub, ordre, nouveauPrix, nbUtilisations...) sur un ou
+// plusieurs articles existants, de façon atomique — jamais quantite/seuilAlerte/donsParOng (la
+// fonction Postgres retire elle-même ces clés, quoi que req.body contienne). Utilisée par
+// GrilleEdition.js (édition, application des nouveaux prix, tri du bon de labo) ET par
+// CalculateurPanel.js (compteur de fréquence d'usage) — d'où catalogue_gerer OU
+// caisse_travailler, comme avant sur l'ancienne route.
+app.patch('/api/catalog/:type/champs', async (req, res) => {
+  const { type } = req.params;
+  if (!(await aPermission(req.user.id, 'catalogue_gerer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'catalogue_gerer' ou 'caisse_travailler' requise." });
+  }
+  const { maj } = req.body; // [{ id, champs }, ...]
+  if (!Array.isArray(maj) || maj.length === 0) return res.status(400).json({ error: 'maj (tableau non vide) requis.' });
+  const { data, error } = await supabase.rpc('definir_champs_catalogue_lot', { p_type: type, p_maj: maj });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL definir_champs_catalogue_lot n'existe pas encore dans Supabase — colle fonction_champs_catalogue.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, items: data });
+});
+
+// Supprime UN article du catalogue par id, de façon atomique.
+app.delete('/api/catalog/:type/item/:id', async (req, res) => {
+  const { type, id } = req.params;
+  if (!(await aPermission(req.user.id, 'catalogue_gerer'))) {
+    return res.status(403).json({ error: "Permission 'catalogue_gerer' requise." });
+  }
+  const { data, error } = await supabase.rpc('supprimer_article_catalogue', { p_type: type, p_id: id });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL supprimer_article_catalogue n'existe pas encore dans Supabase — colle fonction_champs_catalogue.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, items: data });
 });
 
 // Route : récupération des paiements
