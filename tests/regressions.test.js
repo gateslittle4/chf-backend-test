@@ -508,3 +508,14 @@ test("PATCH /api/episodes/:id/transferer détecte un conflit (409) si service_at
   // quand le conflit est détecté, ce qui ne protège plus rien.
   assert.ok(blocTransfert.indexOf('service_attendu') < blocTransfert.indexOf(".update({ service: nouveau_service.trim(), lit: null })"), "la vérification du conflit doit précéder l'update, pas le suivre");
 });
+
+// Retour d'Esdras (24/08) : "corrige cela" — dernier coin non uniformisé de l'audit financier.
+// episodeVersFlat (utilisé par Statistiques/Direction/Archives) excluait déjà une fiche au
+// paiement annulé de totalGlobal, mais GET /api/fiches/episode/:episodeId (utilisé par le
+// Calculateur/Fiche Patient pour rouvrir un dossier en cours de facturation) n'avait pas ce même
+// filtre — les totaux affichés pendant une session de caisse active pouvaient rester faux.
+test("GET /api/fiches/episode/:episodeId marque chaque fiche avec paiement_annule (même source que episodeVersFlat : paiements.fiche_id + annule=true), pour que le Calculateur/Fiche Patient puisse exclure ces fiches de ses propres totaux", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"), serverSrc.indexOf("// PIÈCES JOINTES") !== -1 && serverSrc.indexOf("// PIÈCES JOINTES") > serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'") ? serverSrc.indexOf("// PIÈCES JOINTES") : serverSrc.length);
+  assert.match(blocRoute, /\.from\('paiements'\)\.select\('fiche_id'\)\.eq\('episode_id', req\.params\.episodeId\)\.eq\('annule', true\)\.not\('fiche_id', 'is', null\)/, "doit chercher les paiements annulés liés à une fiche de cet épisode, comme episodeVersFlat");
+  assert.match(blocRoute, /res\.json\(\(data \|\| \[\]\)\.map\(f => \(\{ \.\.\.f, paiement_annule: fichesAvecPaiementAnnule\.has\(f\.id\) \}\)\)\);/, "doit renvoyer chaque fiche marquée paiement_annule, pas les fiches brutes telles quelles");
+});

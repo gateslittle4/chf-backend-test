@@ -822,7 +822,15 @@ app.get('/api/fiches/episode/:episodeId', async (req, res) => {
   const { data, error } = await supabase
     .from('fiches').select('*').eq('episode_id', req.params.episodeId).order('date_creation');
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // Même correctif que episodeVersFlat (24/08, audit financier) : marque chaque fiche dont le
+  // paiement associé a été annulé, pour que le Calculateur/Fiche Patient (qui consomme cette route
+  // pour rouvrir un dossier en cours de facturation) ne compte plus cette fiche dans ses totaux
+  // affichés — jusqu'ici seuls Statistiques/Direction/Archives (via episodeVersFlat) avaient ce
+  // filtre, cet écran-ci en était encore dépourvu.
+  const { data: paiementsAnnules } = await supabase
+    .from('paiements').select('fiche_id').eq('episode_id', req.params.episodeId).eq('annule', true).not('fiche_id', 'is', null);
+  const fichesAvecPaiementAnnule = new Set((paiementsAnnules || []).map(p => p.fiche_id));
+  res.json((data || []).map(f => ({ ...f, paiement_annule: fichesAvecPaiementAnnule.has(f.id) })));
 });
 
 // Retour d'Esdras (23/08, bug financier URGENT) : cette route N'EXISTAIT PAS — "🗑️ Supprimer" côté
