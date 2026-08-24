@@ -140,12 +140,17 @@ function flatVersTypePatient(typePatient) { return typePatient === 'ONG' ? 'part
 // accepte pour "pas de valeur".
 function dateOuNull(v) { return v ? v : null; }
 
-function ficheVersFlat(f) {
+function ficheVersFlat(f, fichesAvecPaiementAnnule) {
   return {
     id: f.id, numeroFiche: f.numero_fiche, dateCreation: f.date_creation,
     creePar: f.cree_par, probleme: f.probleme, noteProbleme: f.note_probleme,
     totalGlobal: f.total_global, breakdown: f.breakdown, modePaiement: f.mode_paiement,
     rawState: f.raw_state,
+    // Le paiement d'origine de cette fiche a été annulé (fraude/erreur) — la fiche reste visible
+    // pour l'historique/réimpression, mais son montant est déjà exclu de totalGlobal (voir
+    // episodeVersFlat) ; ce champ permet aux écrans qui ITÈRENT eux-mêmes episode.fiches (au lieu
+    // de se fier à totalGlobal) de faire le même choix, sans deviner.
+    paiementAnnule: !!(fichesAvecPaiementAnnule && fichesAvecPaiementAnnule.has(f.id)),
   };
 }
 function ficheVersColonnes(f) {
@@ -171,13 +176,22 @@ async function episodeVersFlat(ep) {
   // "sans nom" dans Archives/Analytics sans le moindre signal qu'une donnée manque vraiment.
   if (erreurDossier) console.error(`⚠️ episodeVersFlat: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id}) :`, erreurDossier.message);
   const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
+  // Audit financier (24/08, "on ne peut pas se permettre l'erreur") : un paiement ANNULÉ (fraude/
+  // erreur corrigée par la direction) laissait quand même sa fiche compter dans totalGlobal — les
+  // rapports de revenus (Statistiques/AnalyticsPanel, Direction, Archives...) restaient faussés
+  // par une transaction qui n'existe plus, alors que le registre de caisse, lui, avait déjà été
+  // corrigé (DashboardCaisse.js). fiche_id est NULL pour un dépôt/remboursement (jamais lié à une
+  // fiche précise), donc sans effet sur ce filtre.
+  const { data: paiementsAnnules } = await supabase
+    .from('paiements').select('fiche_id').eq('episode_id', ep.id).eq('annule', true).not('fiche_id', 'is', null);
+  const fichesAvecPaiementAnnule = new Set((paiementsAnnules || []).map(p => p.fiche_id));
   // episodes n'a pas de colonne total_global — ce total n'existait qu'en mémoire côté
   // navigateur, calculé une fois à l'archivage (executerArchivage) et jamais recalculé au
   // chargement suivant. Tout dossier rechargé depuis le serveur (nouvel onglet, F5, écran
   // Lots & Facturation qui lit ce total pour chaque dossier) affichait donc 0 Gdes malgré des
   // fiches réelles en base. Recalculé ici à chaque lecture, à partir des vraies fiches — source
   // unique de vérité, plutôt que de rapiécer chaque écran qui lit ce total un par un.
-  const totalGlobal = (fiches || []).reduce((s, f) => s + (Number(f.total_global) || 0), 0);
+  const totalGlobal = (fiches || []).reduce((s, f) => fichesAvecPaiementAnnule.has(f.id) ? s : s + (Number(f.total_global) || 0), 0);
   return {
     id: ep.id,
     nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
@@ -197,7 +211,7 @@ async function episodeVersFlat(ep) {
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
     totalGlobal,
-    fiches: (fiches || []).map(ficheVersFlat),
+    fiches: (fiches || []).map(f => ficheVersFlat(f, fichesAvecPaiementAnnule)),
   };
 }
 

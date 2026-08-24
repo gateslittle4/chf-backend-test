@@ -90,6 +90,22 @@ test("episodeVersFlat expose est_hospitalisation — sinon l'onglet Hospitalisat
   assert.match(blocFlat, /estHospitalisation:\s*ep\.est_hospitalisation/, "episodeVersFlat doit renvoyer estHospitalisation");
 });
 
+// Audit financier (24/08, Esdras : "on ne peut pas se permettre l'erreur") : episodeVersFlat
+// recalcule totalGlobal en sommant TOUTES les fiches — avant, une fiche dont le paiement a été
+// annulé (fraude/erreur corrigée par la direction) comptait quand même dedans, faussant les
+// rapports de revenus (AnalyticsPanel/Statistiques, Direction, Archives...) qui lisent ce champ,
+// alors que le registre de caisse, lui, avait déjà été corrigé (DashboardCaisse.js).
+test("episodeVersFlat exclut de totalGlobal toute fiche dont le paiement associé a été ANNULÉ (via paiements.fiche_id), et marque chaque fiche individuelle avec paiementAnnule pour les écrans qui itèrent episode.fiches eux-mêmes (ex. AnalyticsPanel)", () => {
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('async function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFlat, /\.from\('paiements'\)\.select\('fiche_id'\)\.eq\('episode_id', ep\.id\)\.eq\('annule', true\)\.not\('fiche_id', 'is', null\)/, "doit chercher les paiements annulés liés à une fiche de cet épisode");
+  assert.match(blocFlat, /const fichesAvecPaiementAnnule = new Set\(\(paiementsAnnules \|\| \[\]\)\.map\(p => p\.fiche_id\)\);/);
+  assert.match(blocFlat, /fichesAvecPaiementAnnule\.has\(f\.id\) \? s : s \+ \(Number\(f\.total_global\) \|\| 0\)/, "totalGlobal doit sauter une fiche dont le paiement a été annulé, pas juste continuer à l'additionner");
+  assert.match(blocFlat, /fiches: \(fiches \|\| \[\]\)\.map\(f => ficheVersFlat\(f, fichesAvecPaiementAnnule\)\),/, "doit transmettre l'ensemble des fiches annulées à ficheVersFlat pour chaque fiche");
+
+  const blocFicheVersFlat = serverSrc.slice(serverSrc.indexOf('function ficheVersFlat'), serverSrc.indexOf('function ficheVersColonnes'));
+  assert.match(blocFicheVersFlat, /paiementAnnule: !!\(fichesAvecPaiementAnnule && fichesAvecPaiementAnnule\.has\(f\.id\)\),/, "chaque fiche doit porter son propre statut paiementAnnule");
+});
+
 test("POST /api/admin/generer-lien-reinitialisation exige utilisateurs_gerer et utilise generatePasswordResetLink (jamais sendPasswordResetEmail, qui enverrait à une adresse @chf.com qui n'existe pas)", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/generer-lien-reinitialisation'"));
   assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
