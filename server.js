@@ -453,8 +453,15 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
     .from('episodes').select('*').eq('dossier_id', req.params.id).order('date_ouverture', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   const enrichis = await Promise.all((episodes || []).map(async (ep) => {
+    // Audit financier (24/08) : un paiement ANNULÉ (fraude/erreur corrigée par la direction) ne
+    // doit jamais être pris pour le "dernier paiement" — sinon le statut affiché (payé/solde
+    // restant) et le plafond de remboursement de crédit se basent sur une transaction qui n'existe
+    // plus. .or(...) plutôt que .eq('annule', false) : les paiements d'avant cette fonctionnalité
+    // ont annule=NULL, qu'une simple égalité à false exclurait à tort.
     const { data: paiements } = await supabase
-      .from('paiements').select('*').eq('episode_id', ep.id).order('date_paiement', { ascending: false }).limit(1);
+      .from('paiements').select('*').eq('episode_id', ep.id)
+      .or('annule.eq.false,annule.is.null')
+      .order('date_paiement', { ascending: false }).limit(1);
     return { ...ep, dernierPaiement: (paiements && paiements[0]) || null };
   }));
   res.json(enrichis);
@@ -969,8 +976,11 @@ app.post('/api/paiements', async (req, res) => {
   // sous zéro sans que personne ne le remarque. solde_restant envoyé par le client est ignoré.
   if (corps.mode === 'remboursement_credit') {
     if (!corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
+    // Un paiement ANNULÉ ne doit jamais servir de référence pour le solde — voir le même
+    // correctif sur GET /api/dossiers/:id/historique (24/08, audit financier).
     const { data: dernierPaiement, error: erreurLecture } = await supabase
       .from('paiements').select('solde_restant').eq('episode_id', corps.episode_id)
+      .or('annule.eq.false,annule.is.null')
       .order('date_paiement', { ascending: false }).limit(1).maybeSingle();
     if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
     const soldeActuel = (dernierPaiement && dernierPaiement.solde_restant) || 0;

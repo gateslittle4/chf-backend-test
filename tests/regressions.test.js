@@ -70,6 +70,21 @@ test("POST /api/paiements en mode remboursement_credit relit le solde en base �
   assert.match(blocPaiements, /corps\.solde_restant\s*=\s*soldeActuel\s*-\s*montant/, "le nouveau solde_restant doit être calculé côté serveur, pas repris de req.body");
 });
 
+// Audit financier (24/08, "on ne peut pas se permettre l'erreur") : "dernier paiement d'un
+// épisode" est utilisé à 2 endroits (historique patient, plafond de remboursement de crédit) —
+// aucun n'excluait un paiement ANNULÉ (mode PATCH /api/paiements/:id/annuler, réservé à la
+// direction pour corriger une fraude/erreur) de ce calcul. Si le paiement le plus RÉCENT d'un
+// épisode avait été annulé, le statut affiché (payé/solde restant) et le plafond de remboursement
+// se basaient sur une transaction qui n'existe plus — pouvant masquer une vraie dette ou bloquer
+// un remboursement légitime.
+test("GET /api/dossiers/:id/historique et le calcul du plafond de remboursement de crédit (POST /api/paiements) excluent tous les deux un paiement ANNULÉ du 'dernier paiement' — via .or('annule.eq.false,annule.is.null'), pas .eq('annule', false) qui exclurait à tort les paiements d'avant cette fonctionnalité (annule=NULL)", () => {
+  const blocHistorique = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  assert.match(blocHistorique, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "GET /api/dossiers/:id/historique doit exclure les paiements annulés du dernier paiement");
+
+  const blocPaiements = serverSrc.slice(serverSrc.indexOf("app.post('/api/paiements'"), serverSrc.indexOf("app.patch('/api/paiements/:id/annuler'"));
+  assert.match(blocPaiements, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "le calcul du solde de référence pour un remboursement de crédit doit aussi exclure les paiements annulés");
+});
+
 test("episodeVersFlat expose est_hospitalisation — sinon l'onglet Hospitalisation et le taux d'occupation Direction ne peuvent pas savoir qui est hospitalisé", () => {
   const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
   assert.match(blocFlat, /estHospitalisation:\s*ep\.est_hospitalisation/, "episodeVersFlat doit renvoyer estHospitalisation");
