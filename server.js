@@ -35,6 +35,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 const { validerCreationEpisode } = require('./utils/validationEpisode');
+const { motsDuNom } = require('./utils/portailPatient');
 
 // Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
@@ -67,6 +68,64 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));
+
+// ============================================================
+// Portail patient (retour d'Esdras, 24/08) : un patient qui a perdu/jeté sa prescription papier
+// peut retrouver la liste des médicaments/actes de sa dernière visite, SANS compte à créer. Route
+// VOLONTAIREMENT hors de /api (donc PAS protégée par `verifyToken`, appliqué juste plus bas via
+// `app.use('/api', verifyToken)`) — c'est le seul accès public de tout ce backend, à traiter avec
+// prudence : jamais de prix/solde/mode de paiement dans la réponse (décision explicite d'Esdras,
+// une donnée financière est plus sensible qu'une liste de médicaments), et 3 informations exigées
+// ensemble (numéro de dossier + date de naissance + nom) plutôt qu'une seule, pour qu'un tiers ne
+// puisse pas retrouver un patient avec une seule information devinée/connue.
+//
+// Limite de tentatives en mémoire (pas besoin de Redis pour ce volume) — 5 essais par 15 minutes,
+// par couple (adresse IP, numéro de dossier tenté), pour empêcher d'essayer toutes les dates de
+// naissance possibles sur un numéro de dossier connu/deviné.
+const tentativesPortailPatient = new Map(); // cle: "ip:numero_dossier" -> [timestamps]
+const FENETRE_LIMITE_PORTAIL_MS = 15 * 60 * 1000;
+const MAX_TENTATIVES_PORTAIL = 5;
+
+app.post('/portail-patient/recherche', async (req, res) => {
+  const { numero_dossier, date_naissance, nom } = req.body || {};
+  if (!numero_dossier || !date_naissance || !nom) {
+    return res.status(400).json({ error: "Numéro de dossier, date de naissance et nom complet sont requis." });
+  }
+  const cle = `${req.ip}:${numero_dossier}`;
+  const maintenant = Date.now();
+  const tentatives = (tentativesPortailPatient.get(cle) || []).filter(t => maintenant - t < FENETRE_LIMITE_PORTAIL_MS);
+  if (tentatives.length >= MAX_TENTATIVES_PORTAIL) {
+    return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
+  }
+  tentatives.push(maintenant);
+  tentativesPortailPatient.set(cle, tentatives);
+
+  // Même message d'erreur générique dans TOUS les cas de désaccord (dossier introuvable, date ou
+  // nom qui ne correspond pas) — ne jamais laisser deviner QUELLE information était fausse.
+  const echec = () => res.status(404).json({ error: "Aucun dossier ne correspond à ces informations." });
+
+  const { data: dossier } = await supabase.from('dossiers').select('*')
+    .eq('numero_dossier', numero_dossier).eq('date_naissance', date_naissance).maybeSingle();
+  if (!dossier || motsDuNom(dossier.nom) !== motsDuNom(nom)) return echec();
+
+  // Succès : la personne a bien prouvé qui elle est, on lui laisse le bénéfice du doute pour ses
+  // prochaines recherches (n'accumule plus contre le compteur ci-dessus).
+  tentativesPortailPatient.delete(cle);
+
+  const { data: episodes } = await supabase.from('episodes').select('id').eq('dossier_id', dossier.id);
+  const episodeIds = (episodes || []).map(e => e.id);
+  const { data: fiches } = episodeIds.length === 0 ? { data: [] } : await supabase
+    .from('fiches').select('date_creation, raw_state').in('episode_id', episodeIds)
+    .order('date_creation', { ascending: false }).limit(5);
+
+  const historique = (fiches || []).map(f => ({
+    date: f.date_creation,
+    // lignesCalcul (voir CalculateurPanel.js) porte nom/qte/prix par article — seuls nom et qte
+    // quittent ce backend, jamais le prix.
+    articles: (f.raw_state?.lignesCalcul || []).map(l => ({ nom: l.nom, quantite: l.qte })),
+  }));
+  res.json({ nomPatient: dossier.nom, historique });
+});
 
 // Vérification via Firebase Admin SDK — remplace la vérification Supabase.
 // req.user.id remplace l'ancien req.user.id Supabase ; c'est un UID Firebase (texte),

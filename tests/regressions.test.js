@@ -531,3 +531,42 @@ test("GET /api/admin/derniere-sauvegarde exige sauvegarde_gerer et renvoie la da
   assert.match(blocRoute, /fichiers\.sort\(\(a, b\) => b\.name\.localeCompare\(a\.name\)\)\[0\]/, "doit prendre le fichier le plus récent par tri du nom (backup-YYYY-MM-DD.json trie naturellement)");
   assert.match(blocRoute, /if \(!fichiers \|\| fichiers\.length === 0\) return res\.json\(\{ date: null \}\);/, "doit renvoyer date: null si le bucket est vide (jamais réussie), pas planter");
 });
+
+// Portail patient (retour d'Esdras, 24/08) : un patient qui a perdu sa prescription papier peut
+// retrouver la liste de ses médicaments/actes récents, sans compte à créer. Seul accès public de
+// tout ce backend — à vérifier avec un soin particulier.
+test("motsDuNom (utils/portailPatient.js) : compare 2 noms sans tenir compte de l'ordre des mots, des accents ni de la casse", () => {
+  const { motsDuNom } = require('../utils/portailPatient');
+  assert.strictEqual(motsDuNom('Jéan Baptiste Pierre'), motsDuNom('pierre JEAN baptiste'), "même mots, ordre différent, accent différent, casse différente : doit quand même correspondre");
+  assert.notStrictEqual(motsDuNom('Jean Pierre'), motsDuNom('Jean Paul'), "des mots réellement différents ne doivent jamais correspondre");
+  assert.strictEqual(motsDuNom(''), motsDuNom(null), "une valeur vide/absente ne doit jamais planter");
+});
+
+test("POST /portail-patient/recherche est déclarée HORS de /api (donc jamais protégée par verifyToken) — c'est le seul accès public voulu de ce backend", () => {
+  assert.match(serverSrc, /app\.post\('\/portail-patient\/recherche'/, "la route doit exister");
+  assert.doesNotMatch(serverSrc, /app\.post\('\/api\/portail-patient\/recherche'/, "ne doit JAMAIS être sous /api — sinon verifyToken l'exigerait, et un patient n'a pas de compte");
+});
+
+test("POST /portail-patient/recherche : limite les tentatives (5 par 15 minutes, par IP+numéro de dossier), exige les 3 informations ensemble, et ne renvoie jamais prix/solde/mode de paiement", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/portail-patient/recherche'"), serverSrc.indexOf("app.use('/api', verifyToken)", serverSrc.indexOf("app.post('/portail-patient/recherche'")));
+  assert.match(blocRoute, /if \(!numero_dossier \|\| !date_naissance \|\| !nom\)/, "les 3 informations (numéro de dossier, date de naissance, nom) doivent être exigées ensemble");
+  assert.match(blocRoute, /MAX_TENTATIVES_PORTAIL/, "doit limiter le nombre de tentatives");
+  assert.match(blocRoute, /res\.status\(429\)/, "doit renvoyer 429 (trop de tentatives) au-delà de la limite");
+  assert.match(blocRoute, /motsDuNom\(dossier\.nom\) !== motsDuNom\(nom\)/, "le nom doit être vérifié en plus du numéro de dossier et de la date de naissance");
+  // Ignore les commentaires explicatifs (qui MENTIONNENT "prix" pour dire qu'on l'exclut) —
+  // ne vérifie que le code réellement exécuté : les .select(...) et le res.json(...) final.
+  const selects = [...blocRoute.matchAll(/\.select\('([^']+)'\)/g)].map(m => m[1]);
+  for (const champs of selects) {
+    assert.doesNotMatch(champs, /prix|total_global|mode_paiement|solde/, `un .select() de cette route lit un champ financier : ${champs}`);
+  }
+  const blocReponse = blocRoute.slice(blocRoute.indexOf('const historique ='));
+  assert.doesNotMatch(blocReponse.split('\n').filter(l => !l.trim().startsWith('//')).join('\n'), /prix|total_global|mode_paiement|solde/, "la réponse construite (historique/res.json) ne doit jamais exposer de donnée financière");
+  assert.match(blocRoute, /articles: \(f\.raw_state\?\.lignesCalcul \|\| \[\]\)\.map\(l => \(\{ nom: l\.nom, quantite: l\.qte \}\)\)/, "seuls le nom et la quantité de chaque article doivent quitter ce backend");
+});
+
+test("POST /portail-patient/recherche : un dossier introuvable ET un nom/date qui ne correspond pas renvoient le MÊME message d'erreur générique — jamais de quoi deviner quelle information était fausse", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/portail-patient/recherche'"), serverSrc.indexOf("app.use('/api', verifyToken)", serverSrc.indexOf("app.post('/portail-patient/recherche'")));
+  const occurrences = (blocRoute.match(/Aucun dossier ne correspond à ces informations\./g) || []).length;
+  assert.strictEqual(occurrences, 1, "un seul message d'erreur générique doit exister, réutilisé pour tous les cas de désaccord (fonction echec())");
+  assert.match(blocRoute, /if \(!dossier \|\| motsDuNom\(dossier\.nom\) !== motsDuNom\(nom\)\) return echec\(\);/, "dossier introuvable ET nom incorrect doivent passer par le MÊME appel à echec()");
+});
