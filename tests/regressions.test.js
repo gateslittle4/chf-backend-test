@@ -59,7 +59,7 @@ test("Toutes les écritures (update/insert) vérifient une ligne réellement aff
 
 test("La route de catalogue utilise upsert (pas update seul) — sinon impossible de créer la toute première ligne", () => {
   const blocCatalog = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog"));
-  assert.match(blocCatalog.slice(0, 1800), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
+  assert.match(blocCatalog.slice(0, 2200), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
 });
 
 test("POST /api/paiements en mode remboursement_credit relit le solde en base — n'accepte jamais tel quel le solde_restant envoyé par le navigateur", () => {
@@ -569,4 +569,24 @@ test("POST /portail-patient/recherche : un dossier introuvable ET un nom/date qu
   const occurrences = (blocRoute.match(/Aucun dossier ne correspond à ces informations\./g) || []).length;
   assert.strictEqual(occurrences, 1, "un seul message d'erreur générique doit exister, réutilisé pour tous les cas de désaccord (fonction echec())");
   assert.match(blocRoute, /if \(!dossier \|\| motsDuNom\(dossier\.nom\) !== motsDuNom\(nom\)\) return echec\(\);/, "dossier introuvable ET nom incorrect doivent passer par le MÊME appel à echec()");
+});
+
+// Onglet Paramètres (retour d'Esdras, 24/08) : "je peux désactiver le portail patient sans tout
+// supprimer ?" — oui, via un réglage désactivable, vérifié CÔTÉ SERVEUR (pas seulement masqué à
+// l'écran, cette route étant publique) puisque parametres_gerer est réservé à l'administrateur.
+test("POST /portail-patient/recherche refuse (503) quand catalog('parametres').portailPatientActif est explicitement false, mais reste actif par défaut si jamais réglé", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf('async function portailPatientActif'), serverSrc.indexOf("app.post('/portail-patient/recherche'"));
+  assert.match(blocRoute, /return !parametres \|\| parametres\.portailPatientActif !== false;/, "doit rester actif par défaut (true) tant que personne n'a jamais réglé cette valeur");
+  const blocPost = serverSrc.slice(serverSrc.indexOf("app.post('/portail-patient/recherche'"), serverSrc.indexOf("app.use('/api', verifyToken)", serverSrc.indexOf("app.post('/portail-patient/recherche'")));
+  assert.match(blocPost, /if \(!\(await portailPatientActif\(\)\)\) \{\s*\n\s*return res\.status\(503\)/, "doit vérifier le réglage EN TOUT PREMIER, avant même la limite de tentatives");
+});
+
+test("PUT /api/catalog/parametres exige la permission parametres_gerer, distincte de catalogue_gerer (réglages d'infrastructure, pas des tarifs)", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog/:type'"), serverSrc.indexOf("app.post('/api/catalog/:type/item'"));
+  assert.match(blocRoute, /else if \(type === 'parametres'\) \{\s*\n\s*permissionOk = await aPermission\(req\.user\.id, 'parametres_gerer'\);/, "le type 'parametres' doit exiger parametres_gerer, pas catalogue_gerer");
+});
+
+test("parametres_gerer existe dans le miroir PERMISSIONS_PAR_DEFAUT du backend, accordé à administrateur", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('// Vérifie qu\'un utilisateur a une permission'));
+  assert.match(bloc, /role: 'administrateur', permissions: \[[^\]]*'parametres_gerer'/, "administrateur doit avoir parametres_gerer dans le miroir backend");
 });

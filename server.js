@@ -41,7 +41,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
 // encore vide (avant le premier enregistrement depuis l'écran "Rôles & permissions").
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer','sauvegarde_gerer'] },
+  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer','sauvegarde_gerer','parametres_gerer'] },
   { role: 'direction', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
   { role: 'comptable', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','facturation_exporter','rapport_chf_voir'] },
@@ -86,7 +86,21 @@ const tentativesPortailPatient = new Map(); // cle: "ip:numero_dossier" -> [time
 const FENETRE_LIMITE_PORTAIL_MS = 15 * 60 * 1000;
 const MAX_TENTATIVES_PORTAIL = 5;
 
+// Réglage désactivable depuis l'écran Paramètres (retour d'Esdras du 24/08 : "je peux désactiver
+// ça sans tout supprimer ?") — vérifié CÔTÉ SERVEUR, pas juste masqué côté écran : cette route est
+// publique, donc la couper uniquement dans l'interface n'empêcherait pas quelqu'un de continuer à
+// l'appeler directement. Activé par défaut (true) tant que personne n'a jamais touché à l'écran
+// Paramètres — cohérent avec le reste des catalogues (repli sur un comportement inchangé).
+async function portailPatientActif() {
+  const { data } = await supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle();
+  const parametres = data?.items;
+  return !parametres || parametres.portailPatientActif !== false;
+}
+
 app.post('/portail-patient/recherche', async (req, res) => {
+  if (!(await portailPatientActif())) {
+    return res.status(503).json({ error: "Ce service est temporairement désactivé." });
+  }
   const { numero_dossier, date_naissance, nom } = req.body || {};
   if (!numero_dossier || !date_naissance || !nom) {
     return res.status(400).json({ error: "Numéro de dossier, date de naissance et nom complet sont requis." });
@@ -942,10 +956,14 @@ app.put('/api/catalog/:type', async (req, res) => {
     });
   }
   // 'permissions' : réservé à permissions_gerer (écran Rôles & permissions).
+  // 'parametres' : réservé à parametres_gerer (écran Paramètres — retour d'Esdras du 24/08,
+  // "il me faut un onglet paramètres pour ce genre de truc").
   // Tout le reste (types_consultation, services_hospitalisation...) : catalogue_gerer.
   let permissionOk;
   if (type === 'permissions') {
     permissionOk = await aPermission(req.user.id, 'permissions_gerer');
+  } else if (type === 'parametres') {
+    permissionOk = await aPermission(req.user.id, 'parametres_gerer');
   } else {
     permissionOk = await aPermission(req.user.id, 'catalogue_gerer');
   }
