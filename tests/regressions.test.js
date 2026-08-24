@@ -519,3 +519,15 @@ test("GET /api/fiches/episode/:episodeId marque chaque fiche avec paiement_annul
   assert.match(blocRoute, /\.from\('paiements'\)\.select\('fiche_id'\)\.eq\('episode_id', req\.params\.episodeId\)\.eq\('annule', true\)\.not\('fiche_id', 'is', null\)/, "doit chercher les paiements annulés liés à une fiche de cet épisode, comme episodeVersFlat");
   assert.match(blocRoute, /res\.json\(\(data \|\| \[\]\)\.map\(f => \(\{ \.\.\.f, paiement_annule: fichesAvecPaiementAnnule\.has\(f\.id\) \}\)\)\);/, "doit renvoyer chaque fiche marquée paiement_annule, pas les fiches brutes telles quelles");
 });
+
+// Perfectionnement (24/08, "on fait le plus facile d'abord") : la sauvegarde automatique tourne
+// seule tous les jours (cron 6h UTC, voir sauvegarderVersStorage) mais rien ne permettait de
+// vérifier depuis l'appli que ça avait vraiment marché. Cette route lit juste le nom du fichier le
+// plus récent du bucket (backup-YYYY-MM-DD.json) — pas besoin de dépendre des métadonnées Storage.
+test("GET /api/admin/derniere-sauvegarde exige sauvegarde_gerer et renvoie la date déduite du nom du fichier le plus récent du bucket sauvegardes-automatiques", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.get('/api/admin/derniere-sauvegarde'"), serverSrc.indexOf('const PORT ='));
+  assert.match(blocRoute, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/, "doit exiger la permission sauvegarde_gerer, comme le déclenchement manuel");
+  assert.match(blocRoute, /supabase\.storage\.from\(BUCKET_SAUVEGARDES\)\.list\(\)/, "doit lister le même bucket que sauvegarderVersStorage");
+  assert.match(blocRoute, /fichiers\.sort\(\(a, b\) => b\.name\.localeCompare\(a\.name\)\)\[0\]/, "doit prendre le fichier le plus récent par tri du nom (backup-YYYY-MM-DD.json trie naturellement)");
+  assert.match(blocRoute, /if \(!fichiers \|\| fichiers\.length === 0\) return res\.json\(\{ date: null \}\);/, "doit renvoyer date: null si le bucket est vide (jamais réussie), pas planter");
+});

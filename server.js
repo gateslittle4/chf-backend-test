@@ -1364,6 +1364,26 @@ app.post('/api/admin/backup-manuel', async (req, res) => {
   }
 });
 
+// Indicateur "dernière sauvegarde réussie" (retour d'Esdras, perfectionnement du 24/08) — la
+// sauvegarde automatique tourne seule tous les jours à 6h UTC, mais rien n'affichait jusqu'ici
+// que ça avait vraiment marché. Le nom de fichier (backup-YYYY-MM-DD.json) suffit pour dater la
+// plus récente sans dépendre des métadonnées du Storage.
+app.get('/api/admin/derniere-sauvegarde', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
+    return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
+  }
+  try {
+    const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
+    if (error) throw new Error(error.message);
+    if (!fichiers || fichiers.length === 0) return res.json({ date: null });
+    const plusRecent = fichiers.sort((a, b) => b.name.localeCompare(a.name))[0];
+    const date = (plusRecent.name.match(/backup-(\d{4}-\d{2}-\d{2})/) || [])[1] || null;
+    res.json({ date });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend CHF demarré sur le port ${PORT}`);
