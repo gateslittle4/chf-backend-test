@@ -308,6 +308,33 @@ async function episodeVersFlat(ep) {
   };
 }
 
+// Retour d'Esdras (26/08) : un dépôt (paiement mode='depot', jamais lié à une fiche précise —
+// voir episodeVersFlat ci-dessus) n'était jusqu'ici JAMAIS décrémenté au fur et à mesure de sa
+// consommation. Chaque nouvelle fiche du même épisode calculait "reste à payer" en resoustrayant
+// le total BRUT de tous les dépôts jamais faits, sans tenir compte de ce qu'un achat précédent
+// avait déjà consommé — un dépôt de 5000 Gdes pouvait ainsi couvrir bien plus que 5000 Gdes
+// d'achats successifs sur le même dossier (cas réel signalé : dépôt initial pour un nouveau-né en
+// néonatalogie, consommé par plusieurs achats de médicaments étalés dans le temps).
+// Corrigé : chaque paiement qui consomme du dépôt enregistre combien dans
+// details.montant_depot_utilise (voir POST /api/paiements, appelé par CalculateurPanel.js) — le
+// solde réellement disponible est le total des dépôts moins la somme de ce qui a déjà été
+// consommé, jamais juste le total brut déposé.
+function calculerSoldeDepot(paiements) {
+  const totalDepots = (paiements || []).filter(p => p.mode === 'depot').reduce((s, p) => s + (Number(p.montant) || 0), 0);
+  const totalDepotUtilise = (paiements || []).reduce((s, p) => s + (Number(p.details?.montant_depot_utilise) || 0), 0);
+  return { totalDepots, totalDepotUtilise, soldeDepot: Math.max(0, totalDepots - totalDepotUtilise) };
+}
+
+// Utilisé par le Calculateur (CalculateurPanel.js) au moment de facturer, pour savoir combien de
+// dépôt reste réellement disponible sur cet épisode — jamais le total brut déposé.
+app.get('/api/episodes/:id/solde-depot', async (req, res) => {
+  const { data: paiements, error } = await supabase
+    .from('paiements').select('mode, montant, details').eq('episode_id', req.params.id)
+    .or('annule.eq.false,annule.is.null');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(calculerSoldeDepot(paiements));
+});
+
 app.get('/api/episodes', async (req, res) => {
   const { data: episodes, error } = await supabase.from('episodes').select('*').order('date_ouverture', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
@@ -565,11 +592,14 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
     // restant) et le plafond de remboursement de crédit se basent sur une transaction qui n'existe
     // plus. .or(...) plutôt que .eq('annule', false) : les paiements d'avant cette fonctionnalité
     // ont annule=NULL, qu'une simple égalité à false exclurait à tort.
+    // Récupère tout l'historique (pas juste le dernier, comme avant) : nécessaire pour calculer
+    // aussi soldeDepot (retour d'Esdras 26/08, voir calculerSoldeDepot ci-dessus) — affiché sur
+    // Fiche Patient (très consulté par l'archiviste).
     const { data: paiements } = await supabase
       .from('paiements').select('*').eq('episode_id', ep.id)
       .or('annule.eq.false,annule.is.null')
-      .order('date_paiement', { ascending: false }).limit(1);
-    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null };
+      .order('date_paiement', { ascending: false });
+    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, ...calculerSoldeDepot(paiements) };
   }));
   res.json(enrichis);
 });

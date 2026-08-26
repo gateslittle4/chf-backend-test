@@ -659,3 +659,28 @@ test("aPermission() accorde TOUJOURS tout à administrateur, avant même de lire
   assert.ok(indexCourtCircuit !== -1, "doit court-circuiter administrateur");
   assert.ok(indexCourtCircuit < indexLectureTable, "le court-circuit doit avoir lieu AVANT la lecture de catalog('permissions') — jamais après, sinon une table incomplète pourrait encore refuser l'accès avant que ce test ne s'applique");
 });
+
+// Retour d'Esdras (26/08) : un dépôt (paiement mode='depot') n'était jamais décrémenté au fur et
+// à mesure de sa consommation — chaque nouvelle fiche du même épisode resoustrayait le total BRUT
+// de tous les dépôts jamais faits, jamais net de ce qu'un achat précédent avait déjà consommé. Cas
+// réel signalé : dépôt initial pour un nouveau-né en néonatalogie, consommé par plusieurs achats
+// de médicaments étalés dans le temps — le même dépôt pouvait couvrir bien plus que son montant réel.
+test("calculerSoldeDepot() calcule le solde de dépôt RÉELLEMENT disponible (total des dépôts moins ce qui a déjà été consommé par des paiements antérieurs), jamais juste le total brut déposé", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('function calculerSoldeDepot'), serverSrc.indexOf('app.get(\'/api/episodes/:id/solde-depot\''));
+  assert.match(bloc, /p\.mode === 'depot'/, "doit isoler les paiements mode='depot' pour le total brut déposé");
+  assert.match(bloc, /details\?\.montant_depot_utilise/, "doit soustraire ce qui a déjà été consommé (details.montant_depot_utilise), jamais juste renvoyer le total brut");
+  assert.match(bloc, /Math\.max\(0, totalDepots - totalDepotUtilise\)/, "le solde disponible ne doit jamais descendre sous 0");
+});
+
+test("GET /api/episodes/:id/solde-depot expose le solde de dépôt réellement disponible pour un épisode — utilisé par CalculateurPanel.js au moment de facturer, jamais le total brut déposé", () => {
+  assert.match(serverSrc, /app\.get\('\/api\/episodes\/:id\/solde-depot', async \(req, res\) => \{/);
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/episodes/:id/solde-depot'"), serverSrc.indexOf("app.get('/api/episodes', async"));
+  assert.match(bloc, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "doit exclure les paiements annulés du calcul, comme partout ailleurs");
+  assert.match(bloc, /calculerSoldeDepot\(paiements\)/);
+});
+
+test("GET /api/dossiers/:id/historique inclut soldeDepot par épisode (affiché sur Fiche Patient, très consulté par l'archiviste) — recalculé à partir de tout l'historique des paiements, pas seulement le dernier", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  assert.doesNotMatch(bloc, /\.order\('date_paiement', \{ ascending: false \}\)\.limit\(1\)/, "ne doit plus se limiter au dernier paiement — calculerSoldeDepot a besoin de tout l'historique");
+  assert.match(bloc, /\.\.\.calculerSoldeDepot\(paiements\)/, "chaque épisode enrichi doit porter son soldeDepot");
+});
