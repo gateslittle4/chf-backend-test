@@ -39,9 +39,13 @@ const { motsDuNom } = require('./utils/portailPatient');
 
 // Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
-// encore vide (avant le premier enregistrement depuis l'écran "Rôles & permissions").
+// encore vide (avant le premier enregistrement depuis l'écran "Rôles & permissions"). Pas
+// d'entrée 'administrateur' ici volontairement (retour d'Esdras, 25/08) : administrateur a
+// TOUJOURS absolument tout, court-circuité avant même de lire cette table (voir aPermission()
+// juste en dessous) — une entrée ici avait justement fini par dériver du vrai catalogue
+// (fiche_patient_modifier et audit_voir manquaient), la preuve qu'une liste "tout" recopiée à la
+// main finit toujours par désynchroniser ; la retirer élimine le risque à la racine.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'administrateur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','utilisateurs_gerer','permissions_gerer','sauvegarde_gerer','parametres_gerer'] },
   { role: 'direction', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
   { role: 'comptable', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','facturation_exporter','rapport_chf_voir'] },
@@ -55,9 +59,25 @@ const PERMISSIONS_PAR_DEFAUT = [
 // table n'a jamais été enregistrée. Utilisé partout où une route exige un droit précis, pour que
 // le backend reste toujours d'accord avec ce qu'affiche/autorise le front (pas 2 systèmes qui
 // pourraient diverger).
+//
+// Bug trouvé le 25/08 (retour d'Esdras : "je suis administrateur, je ne vois pas Rôles et
+// permissions") : dès qu'un tableau de permissions personnalisé a été enregistré une seule fois
+// (pour n'importe quel rôle), il devient la SEULE source de vérité — le mirroir PERMISSIONS_
+// PAR_DEFAUT ci-dessus ne sert alors plus que de repli initial. Ce mirroir avait d'ailleurs déjà
+// dérivé du vrai catalogue (fiche_patient_modifier et audit_voir manquaient dans l'entrée
+// administrateur ci-dessus) — la preuve concrète que garder à la main une liste "administrateur =
+// tout" en double, ici ET côté front, finit toujours par désynchroniser. Si en plus le tableau
+// enregistré datait d'avant l'ajout d'une permission (ex. parametres_gerer, 24/08), même un vrai
+// administrateur ne l'aurait pas — et si la permission manquante est permissions_gerer
+// elle-même, plus personne ne peut rouvrir l'écran qui permettrait de la recocher : verrouillage
+// complet, sans solution possible depuis l'interface.
+// Correctif : administrateur a TOUJOURS absolument tout, sans exception, peu importe ce que
+// contient (ou pas) le tableau enregistré — un vrai superutilisateur, jamais soumis aux aléas
+// d'une sauvegarde ni d'un mirroir qui dérive.
 async function aPermission(userId, cle) {
   const { data: profil } = await supabase.from('users').select('role').eq('id', userId).maybeSingle();
   if (!profil) return false;
+  if (profil.role === 'administrateur') return true;
   const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'permissions').maybeSingle();
   const table = (catalogue && catalogue.items && catalogue.items.length > 0) ? catalogue.items : PERMISSIONS_PAR_DEFAUT;
   const entree = table.find(r => r.role === profil.role);

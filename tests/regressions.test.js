@@ -353,9 +353,15 @@ test("Sauvegarde automatique : planifiée tous les jours (cron), n'écrit jamais
   assert.match(blocManuel, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/, "le déclenchement manuel doit exiger la permission sauvegarde_gerer");
 });
 
-test("PERMISSIONS_PAR_DEFAUT (repli backend si le catalogue Supabase est vide) inclut sauvegarde_gerer pour administrateur — sinon ce repli divergeait silencieusement de utils/permissions.js (front), qui l'a déjà", () => {
+// Retour d'Esdras (25/08, "je suis administrateur, je ne vois pas Rôles et permissions") :
+// PERMISSIONS_PAR_DEFAUT.administrateur avait déjà dérivé du vrai catalogue (fiche_patient_
+// modifier et audit_voir manquaient) — la preuve qu'une liste "administrateur = tout" recopiée à
+// la main finit toujours par désynchroniser. Remplacé par un court-circuit dans aPermission() :
+// administrateur n'a plus d'entrée du tout dans ce repli, il n'en a pas besoin.
+test("PERMISSIONS_PAR_DEFAUT (repli backend si le catalogue Supabase est vide) n'a PLUS d'entrée 'administrateur' — aPermission() le court-circuite avant même de lire cette table, donc plus aucun risque de dérive/oubli d'une permission pour ce rôle", () => {
   const blocDefaut = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf("role: 'direction'"));
-  assert.match(blocDefaut, /'sauvegarde_gerer'/, "administrateur doit avoir sauvegarde_gerer dans le repli par défaut");
+  assert.doesNotMatch(blocDefaut, /role: 'administrateur'/, "ne doit plus y avoir d'entrée administrateur dans ce tableau — devenue inutile et source de dérive");
+  assert.match(serverSrc, /if \(profil\.role === 'administrateur'\) return true;/, "aPermission() doit court-circuiter administrateur avant de lire la table, jamais soumis à ce qu'elle contient");
 });
 
 test("POST /api/stock/ajouter-don et POST /api/stock/decrementer-dons appellent les fonctions Postgres atomiques dédiées au stock donné, séparées du stock acheté — sinon un don d'ONG risque de se mélanger avec le stock normal (catalog.items[].quantite), perdant la réservation au patient de cet ONG", () => {
@@ -586,9 +592,9 @@ test("PUT /api/catalog/parametres exige la permission parametres_gerer, distinct
   assert.match(blocRoute, /else if \(type === 'parametres'\) \{\s*\n\s*permissionOk = await aPermission\(req\.user\.id, 'parametres_gerer'\);/, "le type 'parametres' doit exiger parametres_gerer, pas catalogue_gerer");
 });
 
-test("parametres_gerer existe dans le miroir PERMISSIONS_PAR_DEFAUT du backend, accordé à administrateur", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('// Vérifie qu\'un utilisateur a une permission'));
-  assert.match(bloc, /role: 'administrateur', permissions: \[[^\]]*'parametres_gerer'/, "administrateur doit avoir parametres_gerer dans le miroir backend");
+test("parametres_gerer n'a pas besoin d'exister dans le miroir PERMISSIONS_PAR_DEFAUT pour administrateur — le court-circuit dans aPermission() le lui accorde de toute façon, sans dépendre de cette liste", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  assert.doesNotMatch(bloc, /role: 'administrateur'/, "toujours pas d'entrée administrateur ici — voir le test dédié plus haut");
 });
 
 // Retour d'Esdras (25/08, décision finale après 2 allers-retours) : "un ONG envoie quelqu'un à
@@ -639,4 +645,17 @@ test("POST /api/fiches/:id/rembourser-partenaire : un échec en cours de route (
   assert.match(bloc, /if \(erreurNouvelEpisode\) \{\s*\n\s*await supabase\.from\('paiements'\)\.delete\(\)\.eq\('id', paiementRemboursement\.id\); \/\/ annule l'étape 1/);
   assert.match(bloc, /if \(erreurNouvelleFiche\) \{\s*\n\s*await supabase\.from\('episodes'\)\.delete\(\)\.eq\('id', nouvelEpisode\.id\);\s*\n\s*await supabase\.from\('paiements'\)\.delete\(\)\.eq\('id', paiementRemboursement\.id\);/);
   assert.match(bloc, /if \(erreurPaiementOng\) \{\s*\n\s*await supabase\.from\('fiches'\)\.delete\(\)\.eq\('id', nouvelleFiche\.id\);/);
+});
+
+// Retour d'Esdras (25/08) : "je suis administrateur, je ne vois pas Rôles et permissions" —
+// dès qu'un tableau de permissions personnalisé a été enregistré une seule fois, il devient la
+// seule source de vérité, et une entrée 'administrateur' incomplète (ou datant d'avant l'ajout
+// d'une permission) prive même un vrai administrateur de l'accès — verrouillage complet si la
+// permission manquante est permissions_gerer elle-même (rien ne permet plus de la recocher).
+test("aPermission() accorde TOUJOURS tout à administrateur, avant même de lire catalog('permissions') — jamais soumis à ce qui y est enregistré (ou pas)", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function aPermission'), serverSrc.indexOf("app.use(cors())"));
+  const indexCourtCircuit = bloc.indexOf("if (profil.role === 'administrateur') return true;");
+  const indexLectureTable = bloc.indexOf("await supabase.from('catalog')");
+  assert.ok(indexCourtCircuit !== -1, "doit court-circuiter administrateur");
+  assert.ok(indexCourtCircuit < indexLectureTable, "le court-circuit doit avoir lieu AVANT la lecture de catalog('permissions') — jamais après, sinon une table incomplète pourrait encore refuser l'accès avant que ce test ne s'applique");
 });
