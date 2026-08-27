@@ -1133,7 +1133,20 @@ app.delete('/api/catalog/:type/item/:id', async (req, res) => {
 });
 
 // Route : récupération des paiements
+// Faille trouvée le 27/08 (audit avant mise en production) : cette route renvoyait TOUTE la
+// table paiements (montants, modes, motifs de transfert...) à n'importe quel utilisateur
+// authentifié, sans vérifier fiche_patient_voir_finances — un archiviste ou un infirmier
+// pouvait ainsi contourner, en appelant directement l'API, la même restriction déjà appliquée
+// correctement sur GET /api/dossiers/:id/historique ("ne peuvent pas voir si le patient a un
+// solde ou statut de paiement", retour d'Esdras du 26/08). caisse_travailler et
+// demandes_repondre ajoutés en plus de fiche_patient_voir_finances : Demandes.js (approbation
+// d'exonération) en a besoin sans que demandes_repondre implique nécessairement l'autre
+// permission. rapport_chf_voir volontairement EXCLU : infirmier l'a aussi, et ne doit
+// justement jamais voir les paiements.
 app.get('/api/paiements', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler' ou 'demandes_repondre' requise." });
+  }
   const { data, error } = await supabase
     .from('paiements')
     .select('*')

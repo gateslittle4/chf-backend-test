@@ -775,3 +775,18 @@ test("sql/ajoute_role_visiteur.sql documente bien 'visiteur' comme rôle autoris
   assert.doesNotMatch(ligne, /'dossier_creer'|'episode_creer'|'caisse_travailler'|'analytics_voir'/, "visiteur ne doit avoir aucune permission d'action, ni analytics_voir (salaires)");
   assert.doesNotMatch(ligne, /_gerer'|_annuler'|_supprimer'|_modifier'/, "visiteur ne doit avoir aucune permission de gestion/annulation/suppression/modification");
 });
+
+// Faille trouvée le 27/08 (audit de sécurité avant mise en production) : GET /api/paiements
+// renvoyait TOUTE la table (montants, modes, motifs de transfert...) à n'importe quel utilisateur
+// authentifié, sans vérifier fiche_patient_voir_finances — un archiviste ou infirmier pouvait
+// contourner, en appelant directement l'API, la même restriction déjà correctement appliquée sur
+// GET /api/dossiers/:id/historique. rapport_chf_voir ne doit JAMAIS suffire ici : infirmier l'a
+// aussi, et ne doit justement jamais voir les paiements (seulement son historique clinique).
+test("GET /api/paiements exige fiche_patient_voir_finances, caisse_travailler ou demandes_repondre (jamais rapport_chf_voir seul, qu'infirmier possède aussi)", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/, "doit vérifier fiche_patient_voir_finances");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit aussi autoriser caisse_travailler (la caisse doit pouvoir travailler)");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'demandes_repondre'\)/, "doit aussi autoriser demandes_repondre (Demandes.js en a besoin)");
+  assert.doesNotMatch(bloc, /'rapport_chf_voir'/, "rapport_chf_voir ne doit jamais suffire seul : infirmier l'a aussi et ne doit pas voir les paiements");
+  assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403 si aucune de ces permissions n'est présente");
+});
