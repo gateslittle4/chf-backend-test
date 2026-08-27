@@ -597,54 +597,72 @@ test("parametres_gerer n'a pas besoin d'exister dans le miroir PERMISSIONS_PAR_D
   assert.doesNotMatch(bloc, /role: 'administrateur'/, "toujours pas d'entrée administrateur ici — voir le test dédié plus haut");
 });
 
-// Retour d'Esdras (25/08, décision finale après 2 allers-retours) : "un ONG envoie quelqu'un à
-// l'hôpital, mais soit la personne ne l'a pas dit à l'infirmier, soit c'est après, la personne
-// paie normalement, ensuite l'ONG nous demande de rembourser la personne". Design confirmé (le
-// même, que la fiche date d'aujourd'hui ou d'un jour déjà clôturé — un seul chemin) : sortie de
-// cash pour l'épisode d'origine (jamais touché/supprimé) + nouvel épisode fermé, fiche "reconduite"
-// (mêmes articles, aucun décrément de stock) et paiement 'ong' pour le partenaire + l'épisode
-// d'origine explicitement refermé pour ne pas y "entrer sans le savoir" plus tard.
-test("POST /api/fiches/:id/rembourser-partenaire exige paiement_annuler, un partenaire et un motif, et refuse de traiter sa propre transaction", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  assert.match(bloc, /if \(!\(await aPermission\(req\.user\.id, 'paiement_annuler'\)\)\) \{/, "doit exiger paiement_annuler, la même permission que l'annulation d'un paiement");
-  assert.match(bloc, /if \(!ong_partenaire\) return res\.status\(400\)/, "le partenaire est requis");
-  assert.match(bloc, /if \(!motif \|\| !motif\.trim\(\)\) return res\.status\(400\)/, "un motif est requis");
-  assert.match(bloc, /if \(paiementOriginal\.traite_par_uid && paiementOriginal\.traite_par_uid === req\.user\.id\) \{\s*\n\s*return res\.status\(403\)/, "même règle anti-fraude que PATCH /api/paiements/:id/annuler : jamais sa propre transaction");
+// Retour d'Esdras (27/08, remplace l'ancienne route à une seule fiche du 25/08 après un long
+// brainstorming) : transformer un privé en partenaire distingue 2 cas.
+//
+// CAS 1 (/transferer-partenaire) : le partenaire prend en charge À PARTIR DE MAINTENANT — aucun
+// remboursement des services déjà rendus, seulement le solde de dépôt non dépensé.
+test("POST /api/episodes/:id/transferer-partenaire (Cas 1) exige paiement_annuler, un partenaire, un motif ET un nom d'autorisation — et seulement sur un épisode encore ouvert", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/transferer-partenaire'"), serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"));
+  assert.match(bloc, /if \(!\(await aPermission\(req\.user\.id, 'paiement_annuler'\)\)\) \{/);
+  assert.match(bloc, /if \(!ong_partenaire\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(!motif \|\| !motif\.trim\(\)\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(!autorise_par \|\| !autorise_par\.trim\(\)\) return res\.status\(400\)/, "le nom de la personne qui autorise ce changement doit être obligatoire");
+  assert.match(bloc, /if \(episode\.statut !== 'ouvert'\) return res\.status\(400\)/, "sans remboursement n'a de sens que pour un épisode encore ouvert");
 });
 
-test("POST /api/fiches/:id/rembourser-partenaire refuse de traiter 2 fois la même fiche (déjà un paiement remboursement_patient), et refuse une fiche sans paiement encaissable (déjà annulée / déjà partenaire / déjà exonérée / déjà remboursée)", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  assert.match(bloc, /if \(\(paiementsFiche \|\| \[\]\)\.some\(p => p\.mode === 'remboursement_patient'\)\) \{/, "doit vérifier qu'aucun paiement remboursement_patient n'existe déjà pour cette fiche");
-  assert.match(bloc, /!\['ong', 'exoneration', 'remboursement_patient', 'remboursement_credit'\]\.includes\(p\.mode\)/, "un paiement déjà partenaire/exonéré/remboursé n'est jamais un paiement 'encaissable' à rembourser-refacturer");
+test("POST /api/episodes/:id/transferer-partenaire (Cas 1) ne touche à AUCUNE fiche déjà facturée/payée — seul le solde de dépôt non dépensé est remboursé en cash, l'épisode se ferme et un nouvel épisode partenaire s'ouvre pour la suite", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/transferer-partenaire'"), serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"));
+  assert.doesNotMatch(bloc, /from\('fiches'\)/, "le Cas 1 ne doit jamais toucher aux fiches — c'est tout le sens de \"sans remboursement\"");
+  assert.match(bloc, /const \{ soldeDepot \} = calculerSoldeDepot\(paiements\);/);
+  assert.match(bloc, /mode: 'remboursement_patient',\s*\n\s*date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req\.user\.id,\s*\n\s*details: detailsAudit,/, "le remboursement du dépôt doit garder motif/autorise_par dans details");
+  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: episode\.voie_entree, service: episode\.service,\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: episode\.est_hospitalisation,/, "le nouvel épisode doit rester OUVERT (la visite continue, juste facturée au partenaire) et reprendre le service/type de soin de l'épisode d'origine");
+  assert.match(bloc, /await supabase\.from\('episodes'\)\.update\(\{ statut: 'ferme' \}\)\.eq\('id', episode\.id\)\.select\(\);/, "l'épisode d'origine doit se refermer");
 });
 
-test("POST /api/fiches/:id/rembourser-partenaire crée un NOUVEL épisode séparé (jamais une fiche de plus dans l'épisode d'origine, qui reste non-partenaire) — la fiche 'reconduite' a les mêmes raw_state/breakdown/total_global que l'originale, sans jamais toucher au stock (ni acheté, ni donné par un partenaire)", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  assert.match(bloc, /dossier_id: episodeOriginal\.dossier_id, voie_entree: 'consultation', service: episodeOriginal\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,/, "le nouvel épisode doit être créé déjà fermé, dans le même dossier patient, classé pour le bon partenaire");
-  assert.match(bloc, /raw_state: fiche\.raw_state, total_global: fiche\.total_global, breakdown: fiche\.breakdown, mode_paiement: 'ong',/, "la nouvelle fiche doit reprendre exactement les mêmes articles/montant que l'originale");
-  assert.doesNotMatch(bloc, /decrementerStock|stock\/decrementer|decrementerStockDons/, "aucun décrément de stock — ce sont les mêmes articles déjà distribués à la vente d'origine, pas une nouvelle dispensation");
+// CAS 2 (/rembourser-transferer-partenaire) : le partenaire couvrait DÉJÀ le patient (référence,
+// notification manquée) — tout ce qui a été payé (cash et/ou dépôt) est remboursé, un solde à
+// crédit (jamais réellement encaissé) est annulé plutôt que remboursé, et les fiches choisies sont
+// transférées vers un seul nouvel épisode partenaire.
+test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) exige paiement_annuler, un partenaire, un motif, un nom d'autorisation, et au moins une fiche sélectionnée", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"), serverSrc.length);
+  assert.match(bloc, /if \(!\(await aPermission\(req\.user\.id, 'paiement_annuler'\)\)\) \{/);
+  assert.match(bloc, /if \(!ong_partenaire\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(!motif \|\| !motif\.trim\(\)\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(!autorise_par \|\| !autorise_par\.trim\(\)\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(!Array\.isArray\(fiche_ids\) \|\| fiche_ids\.length === 0\) return res\.status\(400\)/);
+  assert.match(bloc, /if \(\(fiches \|\| \[\]\)\.length !== fiche_ids\.length\) return res\.status\(400\)/, "doit refuser une fiche qui n'appartient pas à cet épisode");
 });
 
-test("POST /api/fiches/:id/rembourser-partenaire : les 2 nouveaux paiements sont datés d'AUJOURD'HUI — l'ancien paiement/épisode d'origine, eux, ne sont jamais modifiés PAR LES ÉTAPES FINANCIÈRES (seul le statut de l'épisode d'origine change ensuite, en toute dernière étape, pour le refermer)", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  assert.match(bloc, /const maintenant = new Date\(\)\.toISOString\(\);/);
-  assert.match(bloc, /mode: 'remboursement_patient',\s*\n\s*date_paiement: maintenant/, "la sortie de cash doit être datée d'aujourd'hui, pas de la date de la fiche d'origine");
-  assert.doesNotMatch(bloc, /from\('paiements'\)\.update/, "l'ancien paiement cash ne doit JAMAIS être modifié");
+test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) valide TOUTES les fiches AVANT de toucher à la base — une seule fiche déjà transférée/annulée bloque tout le lot avant la moindre écriture", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"), serverSrc.length);
+  const indexValidation = bloc.indexOf('const paiementsOriginaux = new Map();');
+  const indexNouvelEpisode = bloc.indexOf("await supabase.from('episodes').insert({");
+  assert.ok(indexValidation !== -1 && indexNouvelEpisode !== -1 && indexValidation < indexNouvelEpisode, "la validation de toutes les fiches doit précéder la moindre écriture (le nouvel épisode)");
+  assert.match(bloc, /if \(!paiementOriginal\) \{\s*\n\s*return res\.status\(400\)/, "une fiche sans paiement encaissable/à crédit valide doit bloquer tout le lot");
 });
 
-test("POST /api/fiches/:id/rembourser-partenaire : referme explicitement l'épisode D'ORIGINE une fois la correction financière complète (jamais avant, jamais si ça échoue en cours de route) — best-effort, ne bloque jamais le résultat déjà acquis", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  const indexFermeture = bloc.indexOf("if (episodeOriginal.statut !== 'ferme')");
-  assert.ok(indexFermeture !== -1, "doit refermer l'épisode d'origine s'il n'est pas déjà fermé");
-  assert.ok(indexFermeture > bloc.indexOf('erreurPaiementOng'), "doit se faire APRÈS que les 3 écritures financières (sortie de cash + nouvel épisode + nouvelle fiche/paiement) aient toutes réussi");
-  assert.match(bloc.slice(indexFermeture, indexFermeture + 200), /await supabase\.from\('episodes'\)\.update\(\{ statut: 'ferme' \}\)\.eq\('id', fiche\.episode_id\)\.select\(\);/);
+test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) : une fiche payée à crédit est ANNULÉE (rien n'a jamais été encaissé), une fiche payée (cash et/ou dépôt) est REMBOURSÉE en cash pour son montant total — les deux sont transférées vers un seul nouvel épisode partenaire, jamais un par fiche", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"), serverSrc.length);
+  assert.match(bloc, /if \(paiementOriginal\.mode === 'credit'\) \{/, "une fiche à crédit doit être détectée séparément");
+  assert.match(bloc, /annule: true, annule_par: autoriseParTrim, annule_par_uid: req\.user\.id,\s*\n\s*annule_le: maintenant, motif_annulation: `Transféré à \$\{ong_partenaire\} : \$\{motifTrim\}`,/, "le crédit doit être annulé, jamais remboursé (rien n'a été réellement encaissé)");
+  assert.match(bloc, /montant: fiche\.total_global, mode: 'remboursement_patient',/, "une fiche payée doit être remboursée pour son montant TOTAL (cash et dépôt confondus)");
+  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: 'consultation', service: episode\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,/, "un seul nouvel épisode, déjà fermé (correction rétroactive, pas une nouvelle visite)");
+  assert.match(bloc, /let numeroFiche = 1;/, "chaque fiche transférée doit avoir son propre numéro dans le nouvel épisode");
 });
 
-test("POST /api/fiches/:id/rembourser-partenaire : un échec en cours de route (étapes 1-3, la correction financière) annule (rollback) ce qui a déjà été inséré, plutôt que de laisser une écriture orpheline", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches/:id/rembourser-partenaire'"), serverSrc.indexOf("app.post('/api/lots/prochain-numero'"));
-  assert.match(bloc, /if \(erreurNouvelEpisode\) \{\s*\n\s*await supabase\.from\('paiements'\)\.delete\(\)\.eq\('id', paiementRemboursement\.id\); \/\/ annule l'étape 1/);
-  assert.match(bloc, /if \(erreurNouvelleFiche\) \{\s*\n\s*await supabase\.from\('episodes'\)\.delete\(\)\.eq\('id', nouvelEpisode\.id\);\s*\n\s*await supabase\.from\('paiements'\)\.delete\(\)\.eq\('id', paiementRemboursement\.id\);/);
-  assert.match(bloc, /if \(erreurPaiementOng\) \{\s*\n\s*await supabase\.from\('fiches'\)\.delete\(\)\.eq\('id', nouvelleFiche\.id\);/);
+test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) rembourse aussi le solde de dépôt restant de l'épisode (une seule fois, jamais par fiche) et referme TOUJOURS l'épisode d'origine, même si certaines fiches ont été exclues du transfert", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"), serverSrc.length);
+  const indexSoldeDepot = bloc.indexOf("const { soldeDepot } = calculerSoldeDepot(paiementsEpisode);");
+  const indexFermeture = bloc.indexOf("await supabase.from('episodes').update({ statut: 'ferme' }).eq('id', episode.id).select();");
+  assert.ok(indexSoldeDepot !== -1, "doit calculer le solde de dépôt restant sur l'épisode entier");
+  assert.ok(indexFermeture !== -1 && indexFermeture > indexSoldeDepot, "la fermeture doit avoir lieu après le remboursement du dépôt, à la toute fin");
+});
+
+test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) : un échec en cours de route nettoie (rollback) tout ce qui a déjà été inséré — paiements, fiches, puis le nouvel épisode, dans l'ordre inverse", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'"), serverSrc.length);
+  assert.match(bloc, /const nettoyer = async \(\) => \{\s*\n\s*for \(const id of aNettoyer\.paiements\) await supabase\.from\('paiements'\)\.delete\(\)\.eq\('id', id\);\s*\n\s*for \(const id of aNettoyer\.fiches\) await supabase\.from\('fiches'\)\.delete\(\)\.eq\('id', id\);\s*\n\s*for \(const id of aNettoyer\.episodes\) await supabase\.from\('episodes'\)\.delete\(\)\.eq\('id', id\);/);
+  assert.match(bloc, /\} catch \(e\) \{\s*\n\s*await nettoyer\(\);\s*\n\s*res\.status\(500\)\.json\(\{ error: e\.message \}\);\s*\n\s*\}/);
 });
 
 // Retour d'Esdras (25/08) : "je suis administrateur, je ne vois pas Rôles et permissions" —

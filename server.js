@@ -1221,111 +1221,209 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
   res.json(data);
 });
 
-// Retour d'Esdras (25/08, décision finale après 2 allers-retours) : "un ONG envoie quelqu'un à
-// l'hôpital, mais soit la personne ne l'a pas dit à l'infirmier, soit c'est après, la personne
-// paie normalement, ensuite l'ONG nous demande de rembourser la personne". Design confirmé :
-//   1. Sortie de cash datée d'AUJOURD'HUI (mode remboursement_patient) pour le montant de la
-//      fiche — liée à la fiche/l'épisode D'ORIGINE, qui ne sont JAMAIS ni supprimés ni modifiés
-//      (l'ancien paiement cash reste tel quel, daté du jour où l'argent a VRAIMENT été reçu :
-//      jamais un écart rétroactif sur un jour de caisse déjà clôturé).
-//   2. Nouvel épisode (même dossier_id — même patient), déjà fermé à la création, classé pour le
-//      partenaire choisi — avec une fiche "reconduite" (mêmes raw_state/breakdown/total_global
-//      que l'originale) et un paiement 'ong'. Cette fiche ne décrémente RIEN (ni le stock acheté,
-//      ni le stock donné par un partenaire) : ce sont les MÊMES articles déjà distribués à la
-//      création de la fiche d'origine, pas une nouvelle dispensation.
-//   3. L'épisode D'ORIGINE est explicitement refermé (statut -> 'ferme') s'il ne l'était pas déjà,
-//      pour qu'il n'apparaisse plus comme une visite active — "pour ne pas y entrer sans le
-//      savoir" (retour d'Esdras) — mais reste visible, non-partenaire, dans l'historique du patient.
-// Même mécanisme, que la fiche d'origine date d'aujourd'hui ou d'un jour déjà clôturé (décision
-// explicite : un seul chemin, pas de cas particulier selon la date).
-// Réservé à paiement_annuler (jamais une caissière, jamais soi-même) — même logique que
-// PATCH /api/paiements/:id/annuler ci-dessus.
-app.post('/api/fiches/:id/rembourser-partenaire', async (req, res) => {
+// Retour d'Esdras (27/08, remplace l'ancienne route POST /api/fiches/:id/rembourser-partenaire du
+// 25/08 — même principe étendu à tout un épisode plutôt qu'une fiche à la fois, après un long
+// brainstorming) : transformer un patient privé en partenaire distingue 2 cas bien différents.
+//
+// CAS 1 (ci-dessous, /transferer-partenaire) : le partenaire prend en charge le patient À PARTIR
+// DE MAINTENANT (déjà à l'hôpital, payait normalement jusqu'ici) — AUCUN remboursement des
+// services déjà rendus (déjà payés, déjà consommés) : ils restent tels quels sur l'épisode
+// d'origine, qui se ferme simplement pour laisser place à un nouvel épisode partenaire pour la
+// suite. Seul le solde de dépôt NON DÉPENSÉ est remboursé (ce n'est pas un service déjà rendu,
+// juste de l'argent que le patient n'a plus besoin de laisser une fois le partenaire responsable).
+//
+// CAS 2 (plus bas, /rembourser-transferer-partenaire) : le partenaire couvrait DÉJÀ le patient
+// (référence, notification de groupe...) mais la notification n'a pas atteint la caisse à temps —
+// TOUT ce qui a été payé sur les fiches choisies est remboursé aujourd'hui (cash ET dépôt
+// confondus), un solde à crédit (jamais réellement encaissé) est simplement annulé plutôt que
+// remboursé, et les fiches choisies sont transférées vers UN SEUL nouvel épisode partenaire.
+//
+// Les 2 cas restent réservés à paiement_annuler (jamais une caissière, jamais l'auto-traitement
+// n'est un souci ici — retour d'Esdras : "la direction ne fait pas de décaissement").
+app.post('/api/episodes/:id/transferer-partenaire', async (req, res) => {
   if (!(await aPermission(req.user.id, 'paiement_annuler'))) {
-    return res.status(403).json({ error: "Permission 'paiement_annuler' requise pour rembourser une fiche déjà encaissée." });
+    return res.status(403).json({ error: "Permission 'paiement_annuler' requise." });
   }
-  const { ong_partenaire, motif } = req.body;
+  const { ong_partenaire, motif, autorise_par } = req.body;
   if (!ong_partenaire) return res.status(400).json({ error: "Le partenaire est requis." });
   if (!motif || !motif.trim()) return res.status(400).json({ error: "Un motif est requis." });
+  if (!autorise_par || !autorise_par.trim()) return res.status(400).json({ error: "Le nom de la personne qui autorise ce changement est requis." });
 
-  const { data: fiche, error: erreurFiche } = await supabase.from('fiches').select('*').eq('id', req.params.id).maybeSingle();
-  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
-  if (!fiche) return res.status(404).json({ error: "Fiche introuvable." });
-
-  const { data: paiementsFiche, error: erreurPaiements } = await supabase.from('paiements').select('*').eq('fiche_id', fiche.id);
-  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
-  if ((paiementsFiche || []).some(p => p.mode === 'remboursement_patient')) {
-    return res.status(400).json({ error: "Cette fiche a déjà été remboursée et refacturée à un partenaire." });
-  }
-  // Le paiement "encaissable" d'origine : pas déjà annulé, pas déjà un mode qui n'a pas de sens à
-  // rembourser-refacturer (déjà partenaire, déjà une exonération, déjà un remboursement).
-  const paiementOriginal = (paiementsFiche || []).find(p => !p.annule && !['ong', 'exoneration', 'remboursement_patient', 'remboursement_credit'].includes(p.mode));
-  if (!paiementOriginal) {
-    return res.status(400).json({ error: "Aucun paiement encaissable trouvé pour cette fiche (déjà annulée, déjà facturée à un partenaire, ou déjà remboursée)." });
-  }
-  if (paiementOriginal.traite_par_uid && paiementOriginal.traite_par_uid === req.user.id) {
-    return res.status(403).json({ error: "Impossible de traiter le remboursement d'une transaction que vous avez vous-même encaissée — demande à quelqu'un d'autre." });
-  }
-
-  const { data: episodeOriginal, error: erreurEpisode } = await supabase.from('episodes').select('dossier_id, service, statut').eq('id', fiche.episode_id).maybeSingle();
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').select('*').eq('id', req.params.id).maybeSingle();
   if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
-  if (!episodeOriginal) return res.status(404).json({ error: "Dossier d'origine introuvable." });
+  if (!episode) return res.status(404).json({ error: "Épisode introuvable." });
+  // Sans remboursement n'a de sens que pour un épisode encore ouvert (le patient est encore là,
+  // le partenaire prend le relais À PARTIR DE MAINTENANT) — un épisode déjà fermé n'a plus de
+  // "suite" à transférer, voir /rembourser-transferer-partenaire pour une correction rétroactive.
+  if (episode.statut !== 'ouvert') return res.status(400).json({ error: "Seul un épisode ouvert peut être transféré sans remboursement." });
 
+  const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
   const encaissePar = req.user.email || req.user.id;
   const maintenant = new Date().toISOString();
+  const detailsAudit = { motif: motif.trim(), autorise_par: autorise_par.trim(), ong_partenaire };
 
-  // 1. Sortie de cash — datée d'aujourd'hui, jamais une modification de la fiche/du jour d'origine.
-  const { data: paiementRemboursement, error: erreurRemboursement } = await supabase.from('paiements').insert({
-    episode_id: fiche.episode_id, fiche_id: fiche.id, patient_nom: paiementOriginal.patient_nom,
-    montant: fiche.total_global, mode: 'remboursement_patient',
-    date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
-  }).select().single();
-  if (erreurRemboursement) return res.status(500).json({ error: erreurRemboursement.message });
+  const { data: paiements, error: erreurPaiements } = await supabase
+    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null');
+  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+  const { soldeDepot } = calculerSoldeDepot(paiements);
 
-  // 2. Nouvel épisode, déjà fermé (une correction comptable, pas une nouvelle visite) — même
-  // dossier_id (même patient), séparé de l'épisode d'origine qui, lui, reste non-partenaire.
+  let paiementDepot = null;
+  if (soldeDepot > 0) {
+    const { data, error } = await supabase.from('paiements').insert({
+      episode_id: episode.id, fiche_id: null, patient_nom: dossier?.nom || null,
+      montant: soldeDepot, mode: 'remboursement_patient',
+      date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
+      details: detailsAudit,
+    }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    paiementDepot = data;
+  }
+
   const { data: nouvelEpisode, error: erreurNouvelEpisode } = await supabase.from('episodes').insert({
-    dossier_id: episodeOriginal.dossier_id, voie_entree: 'consultation', service: episodeOriginal.service || 'Général',
-    type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,
+    dossier_id: episode.dossier_id, voie_entree: episode.voie_entree, service: episode.service,
+    type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: episode.est_hospitalisation,
   }).select().single();
   if (erreurNouvelEpisode) {
-    await supabase.from('paiements').delete().eq('id', paiementRemboursement.id); // annule l'étape 1
+    if (paiementDepot) await supabase.from('paiements').delete().eq('id', paiementDepot.id);
     return res.status(500).json({ error: erreurNouvelEpisode.message });
   }
 
-  // 3. Fiche "reconduite" (mêmes articles/montant que l'originale) — aucun nouvel article, donc
-  // aucun décrément de stock (acheté ou donné) : les articles ont déjà été distribués à la vente
-  // cash d'origine.
-  const { data: nouvelleFiche, error: erreurNouvelleFiche } = await supabase.from('fiches').insert({
-    episode_id: nouvelEpisode.id, numero_fiche: 1, cree_par: encaissePar, cree_par_uid: req.user.id,
-    raw_state: fiche.raw_state, total_global: fiche.total_global, breakdown: fiche.breakdown, mode_paiement: 'ong',
+  // Referme l'épisode d'origine — best-effort, jamais bloquant (la correction ci-dessus est déjà
+  // complète et valide à ce stade), même philosophie que le Cas 2 plus bas.
+  await supabase.from('episodes').update({ statut: 'ferme' }).eq('id', episode.id).select();
+
+  res.status(201).json({ paiementDepot, nouvelEpisode: await episodeVersFlat(nouvelEpisode) });
+});
+
+app.post('/api/episodes/:id/rembourser-transferer-partenaire', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'paiement_annuler'))) {
+    return res.status(403).json({ error: "Permission 'paiement_annuler' requise." });
+  }
+  const { ong_partenaire, motif, autorise_par, fiche_ids } = req.body;
+  if (!ong_partenaire) return res.status(400).json({ error: "Le partenaire est requis." });
+  if (!motif || !motif.trim()) return res.status(400).json({ error: "Un motif est requis." });
+  if (!autorise_par || !autorise_par.trim()) return res.status(400).json({ error: "Le nom de la personne qui autorise ce changement est requis." });
+  if (!Array.isArray(fiche_ids) || fiche_ids.length === 0) return res.status(400).json({ error: "Au moins une fiche doit être sélectionnée." });
+
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').select('*').eq('id', req.params.id).maybeSingle();
+  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+  if (!episode) return res.status(404).json({ error: "Épisode introuvable." });
+
+  const { data: fiches, error: erreurFiches } = await supabase.from('fiches').select('*').eq('episode_id', episode.id).in('id', fiche_ids);
+  if (erreurFiches) return res.status(500).json({ error: erreurFiches.message });
+  if ((fiches || []).length !== fiche_ids.length) return res.status(400).json({ error: "Une ou plusieurs fiches sélectionnées n'appartiennent pas à cet épisode." });
+
+  const { data: paiementsEpisode, error: erreurPaiementsEpisode } = await supabase
+    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null');
+  if (erreurPaiementsEpisode) return res.status(500).json({ error: erreurPaiementsEpisode.message });
+
+  // Validé AVANT de toucher à quoi que ce soit : le paiement "encaissable ou à crédit" d'origine
+  // de chaque fiche (pas déjà annulé — donc pas déjà transféré via cette même route, qui annule ou
+  // rembourse toujours l'original — ni un mode qui n'a pas de sens ici).
+  const paiementsOriginaux = new Map();
+  for (const fiche of fiches) {
+    const paiementOriginal = paiementsEpisode.find(p => p.fiche_id === fiche.id && !['ong', 'exoneration', 'remboursement_patient', 'remboursement_credit'].includes(p.mode));
+    if (!paiementOriginal) {
+      return res.status(400).json({ error: `Aucun paiement encaissable ou à crédit trouvé pour la fiche N°${fiche.numero_fiche} (déjà transférée, déjà annulée, ou déjà facturée à un partenaire).` });
+    }
+    paiementsOriginaux.set(fiche.id, paiementOriginal);
+  }
+
+  const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
+  const encaissePar = req.user.email || req.user.id;
+  const maintenant = new Date().toISOString();
+  const motifTrim = motif.trim(); const autoriseParTrim = autorise_par.trim();
+  const detailsAudit = { motif: motifTrim, autorise_par: autoriseParTrim, ong_partenaire };
+
+  // Un seul nouvel épisode, déjà fermé (correction comptable rétroactive, pas une nouvelle
+  // visite) — reçoit TOUTES les fiches transférées, jamais un épisode par fiche.
+  const { data: nouvelEpisode, error: erreurNouvelEpisode } = await supabase.from('episodes').insert({
+    dossier_id: episode.dossier_id, voie_entree: 'consultation', service: episode.service || 'Général',
+    type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,
   }).select().single();
-  if (erreurNouvelleFiche) {
-    await supabase.from('episodes').delete().eq('id', nouvelEpisode.id);
-    await supabase.from('paiements').delete().eq('id', paiementRemboursement.id);
-    return res.status(500).json({ error: erreurNouvelleFiche.message });
-  }
+  if (erreurNouvelEpisode) return res.status(500).json({ error: erreurNouvelEpisode.message });
 
-  const { data: paiementOng, error: erreurPaiementOng } = await supabase.from('paiements').insert({
-    episode_id: nouvelEpisode.id, fiche_id: nouvelleFiche.id, patient_nom: paiementOriginal.patient_nom,
-    montant: fiche.total_global, mode: 'ong', ong_partenaire, solde_restant: 0,
-    date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
-  }).select().single();
-  if (erreurPaiementOng) {
-    await supabase.from('fiches').delete().eq('id', nouvelleFiche.id);
-    await supabase.from('episodes').delete().eq('id', nouvelEpisode.id);
-    await supabase.from('paiements').delete().eq('id', paiementRemboursement.id);
-    return res.status(500).json({ error: erreurPaiementOng.message });
-  }
+  // Nettoyage en cas d'échec en cours de route — tout ce qui a déjà été inséré est retiré, dans
+  // l'ordre inverse, pour ne jamais laisser une correction financière à moitié faite. Une fiche
+  // annulée (cas crédit) n'est PAS ré-activée par ce nettoyage — best-effort, comme partout
+  // ailleurs dans ce fichier, mais l'échec se produit avant ou après selon l'étape.
+  const aNettoyer = { paiements: [], fiches: [], episodes: [nouvelEpisode.id] };
+  const nettoyer = async () => {
+    for (const id of aNettoyer.paiements) await supabase.from('paiements').delete().eq('id', id);
+    for (const id of aNettoyer.fiches) await supabase.from('fiches').delete().eq('id', id);
+    for (const id of aNettoyer.episodes) await supabase.from('episodes').delete().eq('id', id);
+  };
 
-  // 4. Referme l'épisode D'ORIGINE (retour d'Esdras : "pour ne pas y entrer sans le savoir") —
-  // best-effort, jamais bloquant : la correction financière (étapes 1-3) est déjà complète et
-  // valide à ce stade, un problème ici ne doit jamais la faire échouer/annuler.
-  if (episodeOriginal.statut !== 'ferme') {
-    await supabase.from('episodes').update({ statut: 'ferme' }).eq('id', fiche.episode_id).select();
-  }
+  let numeroFiche = 1;
+  const resultats = [];
+  try {
+    for (const fiche of fiches) {
+      const paiementOriginal = paiementsOriginaux.get(fiche.id);
 
-  res.status(201).json({ paiementRemboursement, nouvelEpisode: await episodeVersFlat(nouvelEpisode), paiementOng });
+      if (paiementOriginal.mode === 'credit') {
+        // Rien n'a jamais été réellement encaissé pour cette fiche — pas de sortie de cash, le
+        // solde à crédit est simplement annulé (le patient ne le doit plus, transféré au partenaire).
+        const { error } = await supabase.from('paiements').update({
+          annule: true, annule_par: autoriseParTrim, annule_par_uid: req.user.id,
+          annule_le: maintenant, motif_annulation: `Transféré à ${ong_partenaire} : ${motifTrim}`,
+        }).eq('id', paiementOriginal.id).select().single();
+        if (error) throw new Error(error.message);
+      } else {
+        const { data: remb, error } = await supabase.from('paiements').insert({
+          episode_id: episode.id, fiche_id: fiche.id, patient_nom: paiementOriginal.patient_nom,
+          montant: fiche.total_global, mode: 'remboursement_patient',
+          date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
+          details: detailsAudit,
+        }).select().single();
+        if (error) throw new Error(error.message);
+        aNettoyer.paiements.push(remb.id);
+      }
+
+      // Fiche "reconduite" (mêmes articles/montant que l'originale) — aucun nouvel article, donc
+      // aucun décrément de stock : les articles ont déjà été distribués à la création d'origine.
+      const { data: nouvelleFiche, error: erreurNouvelleFiche } = await supabase.from('fiches').insert({
+        episode_id: nouvelEpisode.id, numero_fiche: numeroFiche++, cree_par: encaissePar, cree_par_uid: req.user.id,
+        raw_state: fiche.raw_state, total_global: fiche.total_global, breakdown: fiche.breakdown, mode_paiement: 'ong',
+      }).select().single();
+      if (erreurNouvelleFiche) throw new Error(erreurNouvelleFiche.message);
+      aNettoyer.fiches.push(nouvelleFiche.id);
+
+      const { data: paiementOng, error: erreurPaiementOng } = await supabase.from('paiements').insert({
+        episode_id: nouvelEpisode.id, fiche_id: nouvelleFiche.id, patient_nom: paiementOriginal.patient_nom,
+        montant: fiche.total_global, mode: 'ong', ong_partenaire, solde_restant: 0,
+        date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
+      }).select().single();
+      if (erreurPaiementOng) throw new Error(erreurPaiementOng.message);
+      aNettoyer.paiements.push(paiementOng.id);
+
+      resultats.push({ ficheOriginale: fiche.id, nouvelleFiche: nouvelleFiche.id });
+    }
+
+    // Solde de dépôt restant sur l'épisode — remboursé une seule fois pour tout l'épisode, jamais
+    // par fiche (un dépôt n'est jamais lié à une fiche précise).
+    const { soldeDepot } = calculerSoldeDepot(paiementsEpisode);
+    let paiementDepot = null;
+    if (soldeDepot > 0) {
+      const { data, error } = await supabase.from('paiements').insert({
+        episode_id: episode.id, fiche_id: null, patient_nom: dossier?.nom || null,
+        montant: soldeDepot, mode: 'remboursement_patient',
+        date_paiement: maintenant, encaisse_par: encaissePar, traite_par_uid: req.user.id,
+        details: detailsAudit,
+      }).select().single();
+      if (error) throw new Error(error.message);
+      paiementDepot = data;
+      aNettoyer.paiements.push(paiementDepot.id);
+    }
+
+    // Referme l'épisode d'origine — TOUJOURS, même si certaines fiches n'ont pas été incluses
+    // (retour d'Esdras, 27/08 : "oui, toujours fermé").
+    await supabase.from('episodes').update({ statut: 'ferme' }).eq('id', episode.id).select();
+
+    res.status(201).json({ resultats, paiementDepot, nouvelEpisode: await episodeVersFlat(nouvelEpisode) });
+  } catch (e) {
+    await nettoyer();
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Numéro de lot suivant, pour un partenaire — ATOMIQUE (une seule requête SQL qui lit et
