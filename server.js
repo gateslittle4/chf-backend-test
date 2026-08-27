@@ -94,7 +94,26 @@ async function aPermission(userId, cle) {
   return !!(entree && entree.permissions && entree.permissions.includes(cle));
 }
 
-app.use(cors());
+// Correctif sécurité (27/08, audit avant mise en production) : cors() sans options autorisait
+// N'IMPORTE QUEL site web à appeler cette API depuis le navigateur d'un utilisateur — restreint
+// à la seule origine du frontend. Réutilise FRONTEND_URL (déjà utilisé plus bas pour les liens de
+// réinitialisation de mot de passe) : changer cette variable sur Render suffira, le jour où
+// l'app passera sur un domaine personnalisé (ex. app.chffontaine.org), à mettre à jour les deux
+// à la fois. L'ancienne URL onrender.com reste acceptée en plus, pour ne pas casser l'accès
+// pendant la transition vers le nouveau domaine.
+const ORIGINE_FRONTEND = process.env.FRONTEND_URL || 'https://chf-app2.onrender.com';
+app.use(cors({
+  origin: (origin, callback) => {
+    // Pas d'en-tête Origin (curl, health check Render, appel serveur à serveur) : toujours
+    // autorisé — CORS ne protège que les requêtes envoyées par un NAVIGATEUR pour le compte d'un
+    // site tiers, jamais quelqu'un qui appelle directement l'API (celui-là devrait de toute façon
+    // déjà avoir un jeton Firebase valide, ce que CORS ne vérifie pas).
+    if (!origin || origin === ORIGINE_FRONTEND || origin === 'https://chf-app2.onrender.com') {
+      return callback(null, true);
+    }
+    callback(new Error('Origine non autorisée par CORS'));
+  },
+}));
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));

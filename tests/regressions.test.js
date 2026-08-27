@@ -790,3 +790,14 @@ test("GET /api/paiements exige fiche_patient_voir_finances, caisse_travailler ou
   assert.doesNotMatch(bloc, /'rapport_chf_voir'/, "rapport_chf_voir ne doit jamais suffire seul : infirmier l'a aussi et ne doit pas voir les paiements");
   assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403 si aucune de ces permissions n'est présente");
 });
+
+// Correctif sécurité (27/08, audit avant mise en production) : cors() sans options autorisait
+// n'importe quel site web à appeler cette API depuis le navigateur d'un utilisateur connecté.
+// Restreint à FRONTEND_URL (déjà utilisé pour les liens de réinitialisation de mot de passe) +
+// l'URL onrender.com actuelle, en gardant les requêtes sans Origin (curl, health check) autorisées.
+test("CORS restreint à l'origine du frontend (FRONTEND_URL), plus l'URL onrender.com actuelle pendant la transition — jamais cors() ouvert à tout le monde", () => {
+  assert.doesNotMatch(serverSrc, /app\.use\(cors\(\)\)/, "cors() sans options autorise n'importe quel site web à appeler l'API");
+  const bloc = serverSrc.slice(serverSrc.indexOf('const ORIGINE_FRONTEND'), serverSrc.indexOf("app.use(express.json"));
+  assert.match(bloc, /process\.env\.FRONTEND_URL \|\| 'https:\/\/chf-app2\.onrender\.com'/, "doit réutiliser FRONTEND_URL, avec repli sur l'URL onrender.com actuelle");
+  assert.match(bloc, /if \(!origin \|\|/, "une requête sans en-tête Origin (curl, health check, serveur à serveur) doit rester autorisée");
+});
