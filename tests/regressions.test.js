@@ -742,3 +742,16 @@ test("GET /api/dossiers/:id/historique inclut intervention par épisode, même s
   assert.match(bloc, /const intervention = extraireIntervention\(fiches\);/);
   assert.match(bloc, /return \{ \.\.\.ep, dernierPaiement: \(paiements && paiements\[0\]\) \|\| null, intervention, \.\.\.calculerSoldeDepot\(paiements\) \};/);
 });
+
+// BUG CRITIQUE trouvé le 27/08 en testant réellement le transfert privé→partenaire (dossier de
+// test créé en base, jamais détecté avant par ces tests — des regex sur le code source, jamais une
+// exécution réelle) : la contrainte paiements_mode_check n'a JAMAIS inclus 'remboursement_patient'
+// (créé le 25/08) — chaque tentative réelle d'utiliser cette fonctionnalité en production aurait
+// échoué avec une violation de contrainte. Déjà corrigé directement sur Supabase (apply_migration) ;
+// ce test s'assure que le fichier qui documente le correctif (à recoller si la base est recréée
+// depuis zéro) reste cohérent avec les modes que server.js utilise réellement.
+test("sql/correctif_mode_remboursement_patient.sql documente bien 'remboursement_patient' comme mode autorisé — sans ce correctif (déjà appliqué en base), rembourser-partenaire échoue avec une violation de contrainte", () => {
+  const sqlSrc = fs.readFileSync(path.join(__dirname, '..', 'sql', 'correctif_mode_remboursement_patient.sql'), 'utf8');
+  assert.match(sqlSrc, /'remboursement_patient'::text/, "le correctif doit ajouter remboursement_patient à la liste des modes autorisés");
+  assert.match(serverSrc, /mode: 'remboursement_patient',/, "server.js doit bien utiliser ce mode (sinon ce correctif serait sans objet)");
+});
