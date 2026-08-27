@@ -45,12 +45,18 @@ const { motsDuNom } = require('./utils/portailPatient');
 // juste en dessous) — une entrée ici avait justement fini par dériver du vrai catalogue
 // (fiche_patient_modifier et audit_voir manquaient), la preuve qu'une liste "tout" recopiée à la
 // main finit toujours par désynchroniser ; la retirer élimine le risque à la racine.
+// Retour d'Esdras (26/08) : "seul l'infirmier peut créer un dossier, la caisse crée l'épisode et
+// travaille au calculateur, archiviste et infirmier consultent le dossier" (mot pour mot) —
+// dossier_creer retiré de TOUS les rôles sauf infirmier. fiche_patient_voir_finances (statut
+// paiement + solde de dépôt) accordé à direction/comptable/auditeur, jamais à archiviste/infirmier,
+// qui consultent le dossier pour l'historique clinique, pas les montants — voir aussi le filtrage
+// dans GET /api/dossiers/:id/historique plus bas.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
-  { role: 'comptable', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
-  { role: 'auditeur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','facturation_exporter','rapport_chf_voir'] },
-  { role: 'lecteur', permissions: ['dossier_creer','episode_creer','fiche_patient_voir'] },
-  { role: 'archiviste', permissions: ['dossier_creer','fiche_patient_voir'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
+  { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
+  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir'] },
+  { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir'] },
+  { role: 'archiviste', permissions: ['fiche_patient_voir'] },
   { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
 ];
 
@@ -586,6 +592,12 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
   const { data: episodes, error } = await supabase
     .from('episodes').select('*').eq('dossier_id', req.params.id).order('date_ouverture', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
+  // Retour d'Esdras (26/08) : "les infirmiers et archivistes vont avoir accès à Fiche Patient, ils
+  // ne peuvent pas voir si le patient a un solde ou statut de paiement" — vérifié UNE fois pour
+  // tout le dossier, pas par épisode (même utilisateur, même permission). Filtré ici (pas
+  // seulement côté client, FichePatient.js) : une donnée financière ne doit jamais transiter vers
+  // un navigateur qui n'a pas le droit de la voir, même consultable via l'onglet réseau.
+  const peutVoirFinances = await aPermission(req.user.id, 'fiche_patient_voir_finances');
   const enrichis = await Promise.all((episodes || []).map(async (ep) => {
     // Audit financier (24/08) : un paiement ANNULÉ (fraude/erreur corrigée par la direction) ne
     // doit jamais être pris pour le "dernier paiement" — sinon le statut affiché (payé/solde
@@ -599,6 +611,7 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
       .from('paiements').select('*').eq('episode_id', ep.id)
       .or('annule.eq.false,annule.is.null')
       .order('date_paiement', { ascending: false });
+    if (!peutVoirFinances) return { ...ep, dernierPaiement: null };
     return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, ...calculerSoldeDepot(paiements) };
   }));
   res.json(enrichis);

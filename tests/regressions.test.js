@@ -684,3 +684,26 @@ test("GET /api/dossiers/:id/historique inclut soldeDepot par épisode (affiché 
   assert.doesNotMatch(bloc, /\.order\('date_paiement', \{ ascending: false \}\)\.limit\(1\)/, "ne doit plus se limiter au dernier paiement — calculerSoldeDepot a besoin de tout l'historique");
   assert.match(bloc, /\.\.\.calculerSoldeDepot\(paiements\)/, "chaque épisode enrichi doit porter son soldeDepot");
 });
+
+// Retour d'Esdras (26/08) : "les infirmiers et archivistes vont avoir accès à Fiche Patient, ils
+// ne peuvent pas voir si le patient a un solde ou statut de paiement". Filtré ici (pas seulement
+// côté client, FichePatient.js) : une donnée financière ne doit jamais transiter vers un navigateur
+// qui n'a pas le droit de la voir, même consultable via l'onglet réseau.
+test("GET /api/dossiers/:id/historique n'inclut dernierPaiement/soldeDepot que si l'appelant a fiche_patient_voir_finances — vérifié UNE fois pour tout le dossier, pas par épisode", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  assert.match(bloc, /const peutVoirFinances = await aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\);/);
+  assert.match(bloc, /if \(!peutVoirFinances\) return \{ \.\.\.ep, dernierPaiement: null \};/, "sans la permission, dernierPaiement et soldeDepot/totalDepots ne doivent jamais quitter le serveur");
+});
+
+test("PERMISSIONS_PAR_DEFAUT (miroir serveur) : dossier_creer retiré de tous les rôles sauf infirmier, fiche_patient_voir_finances accordée à direction/comptable/auditeur — reflète exactement le retour d'Esdras (\"seul l'infirmier peut créer un dossier, la caisse crée l'épisode et travaille au calculateur, archiviste et infirmier consultent le dossier\")", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  assert.match(bloc, /\{ role: 'infirmier', permissions: \['dossier_creer'/, "infirmier doit garder dossier_creer");
+  for (const role of ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste']) {
+    const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
+    assert.doesNotMatch(ligne, /'dossier_creer'/, `${role} ne doit plus avoir dossier_creer dans le miroir serveur`);
+  }
+  for (const role of ['direction', 'comptable', 'auditeur']) {
+    const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
+    assert.match(ligne, /'fiche_patient_voir_finances'/, `${role} doit avoir fiche_patient_voir_finances dans le miroir serveur`);
+  }
+});
