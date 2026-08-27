@@ -755,3 +755,23 @@ test("sql/correctif_mode_remboursement_patient.sql documente bien 'remboursement
   assert.match(sqlSrc, /'remboursement_patient'::text/, "le correctif doit ajouter remboursement_patient à la liste des modes autorisés");
   assert.match(serverSrc, /mode: 'remboursement_patient',/, "server.js doit bien utiliser ce mode (sinon ce correctif serait sans objet)");
 });
+
+// Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien modifier"
+// — ex. le PDG ou sa fille qui veut voir l'app sans avoir accès aux boutons qui annulent/
+// suppriment/modifient une vraie donnée. Cette fois-ci, sql/ajoute_role_visiteur.sql (contrainte
+// users_role_check) a été corrigé AVANT de coder la fonctionnalité, pas après comme pour
+// remboursement_patient — testé en base (insertion réelle) avant d'écrire ce test.
+test("sql/ajoute_role_visiteur.sql documente bien 'visiteur' comme rôle autorisé, et le miroir serveur PERMISSIONS_PAR_DEFAUT ne lui accorde que des permissions \"voir\" (jamais dossier_creer, episode_creer, caisse_travailler, ni aucun *_gerer/*_annuler/*_supprimer/*_modifier, ni analytics_voir qui inclut les salaires)", () => {
+  const sqlSrc = fs.readFileSync(path.join(__dirname, '..', 'sql', 'ajoute_role_visiteur.sql'), 'utf8');
+  assert.match(sqlSrc, /'visiteur'::text/, "le correctif doit ajouter visiteur à la liste des rôles autorisés");
+
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  const ligne = bloc.slice(bloc.indexOf("{ role: 'visiteur'"), bloc.indexOf('\n', bloc.indexOf("{ role: 'visiteur'")));
+  assert.match(ligne, /'fiche_patient_voir'/);
+  assert.match(ligne, /'fiche_patient_voir_finances'/);
+  assert.match(ligne, /'direction_voir'/);
+  assert.match(ligne, /'rapport_chf_voir'/);
+  assert.match(ligne, /'audit_voir'/);
+  assert.doesNotMatch(ligne, /'dossier_creer'|'episode_creer'|'caisse_travailler'|'analytics_voir'/, "visiteur ne doit avoir aucune permission d'action, ni analytics_voir (salaires)");
+  assert.doesNotMatch(ligne, /_gerer'|_annuler'|_supprimer'|_modifier'/, "visiteur ne doit avoir aucune permission de gestion/annulation/suppression/modification");
+});

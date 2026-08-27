@@ -58,6 +58,10 @@ const PERMISSIONS_PAR_DEFAUT = [
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir'] },
   { role: 'archiviste', permissions: ['fiche_patient_voir'] },
   { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
+  // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
+  // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
+  // analytics_voir (inclut les salaires du personnel) volontairement exclu.
+  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir'] },
 ];
 
 // Vérifie qu'un utilisateur a une permission donnée : lit son rôle, puis la table des
