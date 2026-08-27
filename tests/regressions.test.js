@@ -692,7 +692,7 @@ test("GET /api/dossiers/:id/historique inclut soldeDepot par épisode (affiché 
 test("GET /api/dossiers/:id/historique n'inclut dernierPaiement/soldeDepot que si l'appelant a fiche_patient_voir_finances — vérifié UNE fois pour tout le dossier, pas par épisode", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
   assert.match(bloc, /const peutVoirFinances = await aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\);/);
-  assert.match(bloc, /if \(!peutVoirFinances\) return \{ \.\.\.ep, dernierPaiement: null \};/, "sans la permission, dernierPaiement et soldeDepot/totalDepots ne doivent jamais quitter le serveur");
+  assert.match(bloc, /if \(!peutVoirFinances\) return \{ \.\.\.ep, dernierPaiement: null, intervention \};/, "sans la permission, dernierPaiement et soldeDepot/totalDepots ne doivent jamais quitter le serveur (intervention reste inclus, jamais une donnée financière)");
 });
 
 test("PERMISSIONS_PAR_DEFAUT (miroir serveur) : dossier_creer retiré de tous les rôles sauf infirmier, fiche_patient_voir_finances accordée à direction/comptable/auditeur — reflète exactement le retour d'Esdras (\"seul l'infirmier peut créer un dossier, la caisse crée l'épisode et travaille au calculateur, archiviste et infirmier consultent le dossier\")", () => {
@@ -706,4 +706,21 @@ test("PERMISSIONS_PAR_DEFAUT (miroir serveur) : dossier_creer retiré de tous le
     const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
     assert.match(ligne, /'fiche_patient_voir_finances'/, `${role} doit avoir fiche_patient_voir_finances dans le miroir serveur`);
   }
+});
+
+// Retour d'Esdras (27/08) : "seulement l'intervention, soit accouchement, soit césarienne, soit
+// chirurgie, pour savoir ce que la personne a fait en dernier" — jamais un prix, donc jamais
+// gardé par fiche_patient_voir_finances (voir le bloc historique juste au-dessus).
+test("extraireIntervention() détecte accouchement/césarienne/chirurgie dans les lignes facturées (via leur clé 'sub') et la chirurgie nommée en texte libre (hasChirSpec/nomChirSpec), jamais un prix", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const CLES_INTERVENTION'), serverSrc.indexOf('app.get(\'/api/episodes/:id/solde-depot\''));
+  assert.match(bloc, /const CLES_INTERVENTION = \['accouchement', 'cesarienne', 'chirurgie'\];/);
+  assert.match(bloc, /CLES_INTERVENTION\.includes\(l\.sub\)\)\.map\(l => l\.nom\)/, "doit prendre le nom de l'acte, jamais son prix");
+  assert.match(bloc, /state\.hasChirSpec && state\.nomChirSpec/, "doit aussi détecter une chirurgie nommée en texte libre");
+  assert.doesNotMatch(bloc, /\.prix\b/, "aucun prix ne doit être lu ici — cette info n'est jamais gardée par fiche_patient_voir_finances");
+});
+
+test("GET /api/dossiers/:id/historique inclut intervention par épisode, même sans fiche_patient_voir_finances (jamais une donnée financière)", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  assert.match(bloc, /const intervention = extraireIntervention\(fiches\);/);
+  assert.match(bloc, /return \{ \.\.\.ep, dernierPaiement: \(paiements && paiements\[0\]\) \|\| null, intervention, \.\.\.calculerSoldeDepot\(paiements\) \};/);
 });

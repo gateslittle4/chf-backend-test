@@ -331,6 +331,24 @@ function calculerSoldeDepot(paiements) {
   return { totalDepots, totalDepotUtilise, soldeDepot: Math.max(0, totalDepots - totalDepotUtilise) };
 }
 
+// Retour d'Esdras (27/08) : "seulement l'intervention, soit accouchement, soit césarienne, soit
+// chirurgie, pour savoir ce que la personne a fait en dernier" — visible sur Fiche Patient pour
+// l'archiviste/infirmier, jamais gardé par fiche_patient_voir_finances (aucun prix ici, juste un
+// nom d'acte). CLES_INTERVENTION reprend les clés 'sub' des catégories d'actes concernées (voir
+// CATEGORIES_LISTE, chf-app2/utils/constants.js — dupliqué ici, ces 2 repos ne partagent pas de
+// code). hasChirSpec/nomChirSpec (chirurgie nommée en texte libre, ex: CalculateurPanel.js) est
+// une 2e source distincte, en plus des lignesCalcul catégorisées.
+const CLES_INTERVENTION = ['accouchement', 'cesarienne', 'chirurgie'];
+function extraireIntervention(fiches) {
+  const noms = (fiches || []).flatMap(f => {
+    const state = f.raw_state || {};
+    const actes = (state.lignesCalcul || []).filter(l => CLES_INTERVENTION.includes(l.sub)).map(l => l.nom);
+    const chirSpec = (state.hasChirSpec && state.nomChirSpec) ? [state.nomChirSpec] : [];
+    return [...actes, ...chirSpec];
+  });
+  return noms.length > 0 ? [...new Set(noms)].join(', ') : null;
+}
+
 // Utilisé par le Calculateur (CalculateurPanel.js) au moment de facturer, pour savoir combien de
 // dépôt reste réellement disponible sur cet épisode — jamais le total brut déposé.
 app.get('/api/episodes/:id/solde-depot', async (req, res) => {
@@ -611,8 +629,12 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
       .from('paiements').select('*').eq('episode_id', ep.id)
       .or('annule.eq.false,annule.is.null')
       .order('date_paiement', { ascending: false });
-    if (!peutVoirFinances) return { ...ep, dernierPaiement: null };
-    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, ...calculerSoldeDepot(paiements) };
+    // Intervention (accouchement/césarienne/chirurgie) : jamais une donnée financière, toujours
+    // incluse même sans fiche_patient_voir_finances — voir extraireIntervention ci-dessus.
+    const { data: fiches } = await supabase.from('fiches').select('raw_state').eq('episode_id', ep.id);
+    const intervention = extraireIntervention(fiches);
+    if (!peutVoirFinances) return { ...ep, dernierPaiement: null, intervention };
+    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, intervention, ...calculerSoldeDepot(paiements) };
   }));
   res.json(enrichis);
 });
