@@ -54,14 +54,18 @@ const { motsDuNom } = require('./utils/portailPatient');
 const PERMISSIONS_PAR_DEFAUT = [
   { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
-  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir'] },
-  { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir'] },
-  { role: 'archiviste', permissions: ['fiche_patient_voir'] },
-  { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
+  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','facturation_voir'] },
+  { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
+  { role: 'archiviste', permissions: ['fiche_patient_voir','facturation_voir'] },
+  // Retour d'Esdras (28/08) : "l'infirmier ne peut voir que Dossier/Épisode et Fiche Patient" —
+  // rapport_chf_voir déplacé vers infirmier_chef (nouveau rôle, ci-dessous) ; facturation_voir
+  // jamais accordé ici (Calcul Facture/Facturation exclus, c'est justement ce qu'on retire).
+  { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir'] },
+  { role: 'infirmier_chef', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
-  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir','caisse_voir','hospitalisation_voir','stock_voir','catalogue_voir','requisitions_voir'] },
+  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir','caisse_voir','hospitalisation_voir','stock_voir','catalogue_voir','requisitions_voir','facturation_voir'] },
 ];
 
 // Vérifie qu'un utilisateur a une permission donnée : lit son rôle, puis la table des
@@ -1175,7 +1179,7 @@ app.delete('/api/catalog/:type/item/:id', async (req, res) => {
 // solde ou statut de paiement", retour d'Esdras du 26/08). caisse_travailler et
 // demandes_repondre ajoutés en plus de fiche_patient_voir_finances : Demandes.js (approbation
 // d'exonération) en a besoin sans que demandes_repondre implique nécessairement l'autre
-// permission. rapport_chf_voir volontairement EXCLU : infirmier l'a aussi, et ne doit
+// permission. rapport_chf_voir volontairement EXCLU : infirmier_chef l'a aussi, et ne doit
 // justement jamais voir les paiements.
 app.get('/api/paiements', async (req, res) => {
   // caisse_voir (28/08) ajouté : le tableau de bord Caisse en lecture seule (visiteur) a besoin
