@@ -61,7 +61,7 @@ const PERMISSIONS_PAR_DEFAUT = [
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
-  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir'] },
+  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir','caisse_voir','hospitalisation_voir','stock_voir','catalogue_voir','requisitions_voir'] },
 ];
 
 // Vérifie qu'un utilisateur a une permission donnée : lit son rôle, puis la table des
@@ -1163,8 +1163,10 @@ app.delete('/api/catalog/:type/item/:id', async (req, res) => {
 // permission. rapport_chf_voir volontairement EXCLU : infirmier l'a aussi, et ne doit
 // justement jamais voir les paiements.
 app.get('/api/paiements', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
-    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler' ou 'demandes_repondre' requise." });
+  // caisse_voir (28/08) ajouté : le tableau de bord Caisse en lecture seule (visiteur) a besoin
+  // des mêmes paiements que la version normale pour calculer sa ventilation/rapport partenaire.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre')) && !(await aPermission(req.user.id, 'caisse_voir'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler', 'demandes_repondre' ou 'caisse_voir' requise." });
   }
   const { data, error } = await supabase
     .from('paiements')
@@ -1556,8 +1558,10 @@ app.post('/api/requisitions', async (req, res) => {
 // analytics_voir en plus de stock_gerer : Direction/comptable doivent pouvoir consulter le
 // rapport "médicaments par service" sans avoir le droit de sortir du stock eux-mêmes.
 app.get('/api/requisitions', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'analytics_voir'))) {
-    return res.status(403).json({ error: "Permission 'stock_gerer' ou 'analytics_voir' requise." });
+  // requisitions_voir (28/08) ajouté : l'écran Réquisitions en lecture seule (visiteur) a besoin
+  // de pouvoir lister les réquisitions, sans le droit d'en créer une (stock_gerer, inchangé).
+  if (!(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'analytics_voir')) && !(await aPermission(req.user.id, 'requisitions_voir'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer', 'analytics_voir' ou 'requisitions_voir' requise." });
   }
   const { data, error } = await supabase.from('requisitions').select('*').order('date_requisition', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });

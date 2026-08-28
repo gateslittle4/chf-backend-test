@@ -782,13 +782,31 @@ test("sql/ajoute_role_visiteur.sql documente bien 'visiteur' comme rôle autoris
 // contourner, en appelant directement l'API, la même restriction déjà correctement appliquée sur
 // GET /api/dossiers/:id/historique. rapport_chf_voir ne doit JAMAIS suffire ici : infirmier l'a
 // aussi, et ne doit justement jamais voir les paiements (seulement son historique clinique).
-test("GET /api/paiements exige fiche_patient_voir_finances, caisse_travailler ou demandes_repondre (jamais rapport_chf_voir seul, qu'infirmier possède aussi)", () => {
+test("GET /api/paiements exige fiche_patient_voir_finances, caisse_travailler, demandes_repondre ou caisse_voir (jamais rapport_chf_voir seul, qu'infirmier possède aussi)", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
   assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/, "doit vérifier fiche_patient_voir_finances");
   assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "doit aussi autoriser caisse_travailler (la caisse doit pouvoir travailler)");
   assert.match(bloc, /aPermission\(req\.user\.id, 'demandes_repondre'\)/, "doit aussi autoriser demandes_repondre (Demandes.js en a besoin)");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_voir'\)/, "doit aussi autoriser caisse_voir (28/08 — Caisse en lecture seule pour visiteur)");
   assert.doesNotMatch(bloc, /'rapport_chf_voir'/, "rapport_chf_voir ne doit jamais suffire seul : infirmier l'a aussi et ne doit pas voir les paiements");
   assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403 si aucune de ces permissions n'est présente");
+});
+
+// Retour d'Esdras (28/08) : la fille du PDG (visiteur) doit pouvoir tout voir sauf modifier — 5
+// permissions "_voir" ajoutées (caisse/hospitalisation/stock/catalogue/requisitions), customisables
+// par rôle depuis "Rôles & permissions" comme n'importe quelle autre permission (pas un cas spécial
+// codé en dur pour visiteur). Ce test vérifie le côté serveur des deux endpoints GET concernés —
+// les 3 autres écrans (Hospitalisation, Tarifs Pharma/Actes) n'ont pas de garde serveur dédiée,
+// juste des colonnes déjà accessibles à tous les rôles authentifiés.
+test("GET /api/requisitions accepte aussi requisitions_voir en plus de stock_gerer/analytics_voir, mais POST /api/requisitions (qui décrémente le vrai stock) reste réservé à stock_gerer seul", () => {
+  const blocGet = serverSrc.slice(serverSrc.indexOf("app.get('/api/requisitions'"), serverSrc.indexOf("app.get('/api/requisitions'") + 600);
+  assert.match(blocGet, /aPermission\(req\.user\.id, 'stock_gerer'\)/);
+  assert.match(blocGet, /aPermission\(req\.user\.id, 'analytics_voir'\)/);
+  assert.match(blocGet, /aPermission\(req\.user\.id, 'requisitions_voir'\)/, "doit aussi autoriser requisitions_voir (28/08 — Réquisitions en lecture seule pour visiteur)");
+
+  const blocPost = serverSrc.slice(serverSrc.indexOf("app.post('/api/requisitions'"), serverSrc.indexOf("app.post('/api/requisitions'") + 400);
+  assert.match(blocPost, /aPermission\(req\.user\.id, 'stock_gerer'\)/);
+  assert.doesNotMatch(blocPost, /requisitions_voir/, "requisitions_voir est un droit de LECTURE seule — ne doit jamais suffire pour créer une réquisition (décrémente le stock réel)");
 });
 
 // Correctif sécurité (27/08, audit avant mise en production) : cors() sans options autorisait
