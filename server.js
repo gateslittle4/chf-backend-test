@@ -372,6 +372,20 @@ function extraireIntervention(fiches) {
   return noms.length > 0 ? [...new Set(noms)].join(', ') : null;
 }
 
+// Retour d'Esdras (28/08) : "on voit les actes sans prix" — détail de chaque fiche de l'épisode
+// (médicaments/actes achetés, avec quantité) pour l'infirmier/archiviste sur Fiche Patient, SANS
+// jamais inclure `prix` (donnée financière) — même philosophie qu'extraireIntervention ci-dessus :
+// toujours inclus, quel que soit fiche_patient_voir_finances, car aucun montant n'y transite.
+function extraireFichesDetail(fiches) {
+  return (fiches || [])
+    .map(f => ({
+      date: f.date_creation,
+      actes: (f.raw_state?.lignesCalcul || []).map(l => ({ nom: l.nom, qte: l.qte, type: l.type })),
+    }))
+    .filter(g => g.actes.length > 0)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
 // Utilisé par le Calculateur (CalculateurPanel.js) au moment de facturer, pour savoir combien de
 // dépôt reste réellement disponible sur cet épisode — jamais le total brut déposé.
 app.get('/api/episodes/:id/solde-depot', async (req, res) => {
@@ -654,10 +668,11 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
       .order('date_paiement', { ascending: false });
     // Intervention (accouchement/césarienne/chirurgie) : jamais une donnée financière, toujours
     // incluse même sans fiche_patient_voir_finances — voir extraireIntervention ci-dessus.
-    const { data: fiches } = await supabase.from('fiches').select('raw_state').eq('episode_id', ep.id);
+    const { data: fiches } = await supabase.from('fiches').select('raw_state, date_creation').eq('episode_id', ep.id);
     const intervention = extraireIntervention(fiches);
-    if (!peutVoirFinances) return { ...ep, dernierPaiement: null, intervention };
-    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, intervention, ...calculerSoldeDepot(paiements) };
+    const fichesDetail = extraireFichesDetail(fiches);
+    if (!peutVoirFinances) return { ...ep, dernierPaiement: null, intervention, fichesDetail };
+    return { ...ep, dernierPaiement: (paiements && paiements[0]) || null, intervention, fichesDetail, ...calculerSoldeDepot(paiements) };
   }));
   res.json(enrichis);
 });
