@@ -791,6 +791,24 @@ test("sql/ajoute_role_visiteur.sql documente bien 'visiteur' comme rôle autoris
   assert.doesNotMatch(ligne, /_gerer'|_annuler'|_supprimer'|_modifier'/, "visiteur ne doit avoir aucune permission de gestion/annulation/suppression/modification");
 });
 
+// Retour d'Esdras (28/08) : "j'ai essayé de mettre test3 comme infirmière en chef, c'est écrit
+// erreur" — même bug que visiteur le 27/08 (users_role_check n'autorisait pas le nouveau rôle),
+// mais trouvé APRÈS coup cette fois : infirmier_chef avait été ajouté au catalogue de permissions
+// sans mettre à jour cette contrainte. sql/ajoute_role_infirmier_chef.sql corrige ça.
+test("sql/ajoute_role_infirmier_chef.sql documente bien 'infirmier_chef' comme rôle autorisé, et le miroir serveur PERMISSIONS_PAR_DEFAUT lui accorde exactement les droits d'un infirmier normal plus rapport_chf_voir", () => {
+  const sqlSrc = fs.readFileSync(path.join(__dirname, '..', 'sql', 'ajoute_role_infirmier_chef.sql'), 'utf8');
+  assert.match(sqlSrc, /'infirmier_chef'::text/, "le correctif doit ajouter infirmier_chef à la liste des rôles autorisés");
+  assert.match(sqlSrc, /'infirmier'::text/, "infirmier doit rester dans la liste (pas remplacé par erreur)");
+
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  const ligneInfirmier = bloc.slice(bloc.indexOf("{ role: 'infirmier'"), bloc.indexOf('\n', bloc.indexOf("{ role: 'infirmier'")));
+  const ligneChef = bloc.slice(bloc.indexOf("{ role: 'infirmier_chef'"), bloc.indexOf('\n', bloc.indexOf("{ role: 'infirmier_chef'")));
+  assert.doesNotMatch(ligneInfirmier, /'rapport_chf_voir'/, "infirmier (de ligne) ne doit plus avoir rapport_chf_voir");
+  assert.match(ligneChef, /'dossier_creer'/);
+  assert.match(ligneChef, /'fiche_patient_voir'/);
+  assert.match(ligneChef, /'rapport_chf_voir'/, "infirmier_chef doit avoir rapport_chf_voir, c'est toute la raison de ce rôle");
+});
+
 // Faille trouvée le 27/08 (audit de sécurité avant mise en production) : GET /api/paiements
 // renvoyait TOUTE la table (montants, modes, motifs de transfert...) à n'importe quel utilisateur
 // authentifié, sans vérifier fiche_patient_voir_finances — un archiviste ou infirmier pouvait
