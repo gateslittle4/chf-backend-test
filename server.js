@@ -1392,11 +1392,17 @@ app.post('/api/episodes/:id/rembourser-transferer-partenaire', async (req, res) 
   const motifTrim = motif.trim(); const autoriseParTrim = autorise_par.trim();
   const detailsAudit = { motif: motifTrim, autorise_par: autoriseParTrim, ong_partenaire };
 
-  // Un seul nouvel épisode, déjà fermé (correction comptable rétroactive, pas une nouvelle
-  // visite) — reçoit TOUTES les fiches transférées, jamais un épisode par fiche.
+  // Un seul nouvel épisode, OUVERT (retour d'Esdras, 29/08 : "je vois que le nouvel épisode créé
+  // est aussi archivé, il devrait être actif avec les nouvelles fiches non ?") — reçoit TOUTES les
+  // fiches transférées, jamais un épisode par fiche. Créé fermé jusqu'ici (pensé comme une pure
+  // correction comptable rétroactive, "pas une nouvelle visite") : en pratique le patient est
+  // souvent encore à l'hôpital au moment du transfert, et la caisse doit pouvoir continuer à
+  // ajouter des fiches sur ce même épisode partenaire par la suite — un épisode 'ferme' l'en
+  // empêchait (voir PUT /api/episodes/:id, qui réserve la modif d'un épisode fermé à
+  // facturation_modifier). Reste à fermer normalement plus tard, via Archiver, comme tout épisode.
   const { data: nouvelEpisode, error: erreurNouvelEpisode } = await supabase.from('episodes').insert({
     dossier_id: episode.dossier_id, voie_entree: 'consultation', service: episode.service || 'Général',
-    type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,
+    type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: false,
   }).select().single();
   if (erreurNouvelEpisode) return res.status(500).json({ error: erreurNouvelEpisode.message });
 

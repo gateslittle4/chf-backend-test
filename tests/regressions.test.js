@@ -647,7 +647,7 @@ test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) : une fich
   assert.match(bloc, /if \(paiementOriginal\.mode === 'credit'\) \{/, "une fiche à crédit doit être détectée séparément");
   assert.match(bloc, /annule: true, annule_par: autoriseParTrim, annule_par_uid: req\.user\.id,\s*\n\s*annule_le: maintenant, motif_annulation: `Transféré à \$\{ong_partenaire\} : \$\{motifTrim\}`,/, "le crédit doit être annulé, jamais remboursé (rien n'a été réellement encaissé)");
   assert.match(bloc, /montant: fiche\.total_global, mode: 'remboursement_patient',/, "une fiche payée doit être remboursée pour son montant TOTAL (cash et dépôt confondus)");
-  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: 'consultation', service: episode\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,/, "un seul nouvel épisode, déjà fermé (correction rétroactive, pas une nouvelle visite)");
+  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: 'consultation', service: episode\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: false,/, "un seul nouvel épisode, OUVERT (retour d'Esdras 29/08 : le patient est souvent encore là, la caisse doit pouvoir continuer à ajouter des fiches dessus)");
   assert.match(bloc, /let numeroFiche = 1;/, "chaque fiche transférée doit avoir son propre numéro dans le nouvel épisode");
 });
 
