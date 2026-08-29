@@ -447,6 +447,17 @@ test("verifyToken rejette (403) un compte désactivé (active===false) ou dont d
   assert.match(bloc, /res\.status\(403\)/, "doit renvoyer 403, pas laisser passer");
 });
 
+// Retour d'Esdras (29/08) : "des paiements refusés par le serveur pour token manquant ou invalide"
+// — jusqu'ici ces rejets ne laissaient AUCUNE trace côté serveur (ni les logs Render, ni ailleurs),
+// impossible de savoir combien ça arrivait ni sur quelles routes. Juste assez pour repérer un pic
+// ou une route précise dans les logs, sans jamais loguer le jeton lui-même.
+test("verifyToken logue (console.warn) chacun de ses 2 rejets 401, avec la méthode et le chemin — sinon aucune trace de ces rejets ne survit nulle part", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function verifyToken'), serverSrc.indexOf('// Application du middleware'));
+  assert.match(bloc, /console\.warn\(`verifyToken: en-tête Authorization absent \(\$\{req\.method\} \$\{req\.path\}\)`\);\s*\n\s*return res\.status\(401\)\.json\(\{ error: 'Token manquant ou invalide' \}\);/, "doit loguer avant de rejeter faute d'en-tête Authorization");
+  assert.match(bloc, /console\.warn\(`verifyToken: jeton invalide ou expiré \(\$\{req\.method\} \$\{req\.path\}\):`, e\.message\);\s*\n\s*return res\.status\(401\)\.json\(\{ error: 'Token invalide ou expiré' \}\);/, "doit loguer avant de rejeter pour un jeton invalide/expiré");
+  assert.doesNotMatch(bloc, /console\.warn\([^\n]*\$\{token\}/, "ne doit jamais loguer le jeton lui-même, seulement la méthode/le chemin");
+});
+
 // Retour d'Esdras (23/08) : pièces jointes au dossier, en priorité les fiches de référence ONG.
 test("Pièces jointes : GET est ouvert (comme GET /api/dossiers/:id), POST/DELETE exigent fiche_patient_modifier (comme PUT /api/dossiers/:id)", () => {
   const blocGet = blocRoutePermission("app.get('/api/dossiers/:id/pieces-jointes'", "app.post('/api/dossiers/:id/pieces-jointes'");

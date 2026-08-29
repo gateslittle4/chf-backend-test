@@ -200,6 +200,11 @@ app.post('/portail-patient/recherche', async (req, res) => {
 async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // Retour d'Esdras (29/08) : "des paiements refusés par le serveur pour token manquant ou
+    // invalide" — jusqu'ici rien ne laissait de trace de ces rejets côté serveur, impossible de
+    // savoir combien ça arrivait ni sur quelles routes. Juste assez pour repérer un pic ou une
+    // route précise dans les logs Render, sans loguer le jeton lui-même.
+    console.warn(`verifyToken: en-tête Authorization absent (${req.method} ${req.path})`);
     return res.status(401).json({ error: 'Token manquant ou invalide' });
   }
   const token = authHeader.split('Bearer ')[1];
@@ -223,6 +228,7 @@ async function verifyToken(req, res, next) {
     req.user = { id: decoded.uid, email: decoded.email };
     next();
   } catch (e) {
+    console.warn(`verifyToken: jeton invalide ou expiré (${req.method} ${req.path}):`, e.message);
     return res.status(401).json({ error: 'Token invalide ou expiré' });
   }
 }
