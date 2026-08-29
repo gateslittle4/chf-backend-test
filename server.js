@@ -988,7 +988,7 @@ app.post('/api/fiches', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
   }
-  const { episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement } = req.body;
+  const { episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
@@ -999,23 +999,46 @@ app.post('/api/fiches', async (req, res) => {
     if (existante) return res.status(200).json(existante);
   }
 
-  // total_global/breakdown/mode_paiement sont écrits dès la création (pas seulement à
-  // l'archivage) — sinon un dossier encore actif affiche un total de 0 malgré des
-  // transactions déjà encaissées.
-  const { data, error } = await supabase
-    .from('fiches').insert({
-      episode_id, numero_fiche, cree_par, cree_par_uid: cree_par_uid || null,
-      raw_state: raw_state || {}, local_id: local_id || null,
-      total_global: total_global || 0, breakdown: breakdown || {}, mode_paiement: mode_paiement || null,
-    }).select().single();
-  if (error) {
-    if (error.code === '23505') { // violation de contrainte unique — quelqu'un d'autre l'a inséré entre-temps
-      const { data: existante } = await supabase.from('fiches').select('*').eq('local_id', local_id).maybeSingle();
-      if (existante) return res.status(200).json(existante);
+  // Bug financier découvert le 28/08 : numero_fiche venait du CLIENT (CalculateurPanel.js,
+  // Math.max(fichesDossier) + 1) — un état local qui peut rester en retard, notamment quand le
+  // paiement d'une fiche précédente échoue (la fiche existe déjà en base, mais l'app n'apprend
+  // jamais son numéro puisqu'elle ne l'ajoute à son état local qu'après un encaissement COMPLET).
+  // Résultat observé en production : 2 fiches distinctes portant le même numéro dans le même
+  // dossier. On calcule désormais toujours le vrai prochain numéro ICI, à partir de ce qui existe
+  // réellement en base au moment de l'insertion — la contrainte unique (episode_id, numero_fiche,
+  // voir sql/ajoute_contrainte_numero_fiche_unique.sql) sert de filet pour la course plus rare
+  // entre 2 requêtes vraiment simultanées (2 postes/onglets) : on relit et on retente.
+  for (let tentative = 0; tentative < 5; tentative++) {
+    const { data: derniere, error: erreurDerniere } = await supabase
+      .from('fiches').select('numero_fiche').eq('episode_id', episode_id)
+      .order('numero_fiche', { ascending: false }).limit(1).maybeSingle();
+    if (erreurDerniere) return res.status(500).json({ error: erreurDerniere.message });
+    const numero_fiche = (derniere?.numero_fiche || 0) + 1;
+
+    // total_global/breakdown/mode_paiement sont écrits dès la création (pas seulement à
+    // l'archivage) — sinon un dossier encore actif affiche un total de 0 malgré des
+    // transactions déjà encaissées.
+    const { data, error } = await supabase
+      .from('fiches').insert({
+        episode_id, numero_fiche, cree_par, cree_par_uid: cree_par_uid || null,
+        raw_state: raw_state || {}, local_id: local_id || null,
+        total_global: total_global || 0, breakdown: breakdown || {}, mode_paiement: mode_paiement || null,
+      }).select().single();
+    if (!error) return res.status(201).json(data);
+
+    if (error.code === '23505') {
+      if (local_id) {
+        const { data: existante } = await supabase.from('fiches').select('*').eq('local_id', local_id).maybeSingle();
+        if (existante) return res.status(200).json(existante);
+      }
+      // Conflit sur (episode_id, numero_fiche) : une autre requête vient d'insérer le même
+      // numéro entre notre lecture et notre écriture — on relit le vrai dernier numéro et on
+      // retente, plutôt que d'échouer ou de créer un doublon.
+      continue;
     }
     return res.status(500).json({ error: error.message });
   }
-  res.status(201).json(data);
+  return res.status(500).json({ error: "Impossible d'attribuer un numéro de fiche après plusieurs tentatives (forte contention)." });
 });
 
 app.get('/api/fiches/episode/:episodeId', async (req, res) => {

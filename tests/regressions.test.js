@@ -232,7 +232,7 @@ test("episodeVersFlat recalcule totalGlobal à partir des fiches — la table ep
 
 test("POST /api/fiches enregistre cree_par_uid — envoyé par CalculateurPanel.js mais silencieusement ignoré jusqu'ici (aucune colonne correspondante lue) : on ne savait pas QUI (par UID Firebase) avait créé une fiche, seulement son nom affiché", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
-  assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid,/, "doit lire cree_par_uid depuis req.body");
+  assert.match(blocRoute, /const \{ episode_id, cree_par, cree_par_uid,/, "doit lire cree_par_uid depuis req.body");
   assert.match(blocRoute, /cree_par_uid: cree_par_uid \|\| null/, "doit l'inclure dans l'insertion");
 });
 
@@ -273,10 +273,27 @@ test("POST /api/fiches et POST /api/paiements acceptent caisse_travailler OU dem
 
 test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès la création — avant, ces champs n'étaient écrits qu'à l'archivage (ficheVersColonnes, route PUT /api/episodes/:id), donc un dossier encore actif affichait un total de 0 malgré des transactions déjà encaissées", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
-  assert.match(blocRoute, /const \{ episode_id, numero_fiche, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement \}/, "doit lire total_global, breakdown et mode_paiement depuis req.body");
+  assert.match(blocRoute, /const \{ episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement \}/, "doit lire total_global, breakdown et mode_paiement depuis req.body");
   assert.match(blocRoute, /total_global: total_global \|\| 0/, "doit insérer total_global");
   assert.match(blocRoute, /breakdown: breakdown \|\| \{\}/, "doit insérer breakdown");
   assert.match(blocRoute, /mode_paiement: mode_paiement \|\| null/, "doit insérer mode_paiement");
+});
+
+// Bug financier découvert le 28/08 : numero_fiche venait du CLIENT (CalculateurPanel.js,
+// Math.max(fichesDossier) + 1), un état local qui peut rester en retard — notamment quand le
+// paiement d'une fiche précédente échoue pour de vrai (la fiche existe déjà en base, mais l'app
+// n'apprend jamais son numéro puisqu'elle ne l'ajoute à son état local qu'après un encaissement
+// COMPLET, fiche + paiement). Constaté en production : 2 fiches distinctes avec le même numéro
+// dans le même dossier ("esd"/ddtdtd, numero_fiche=2 en double). Le serveur doit désormais
+// toujours calculer lui-même le vrai prochain numéro à partir de ce qui existe en base, jamais
+// faire confiance à une valeur envoyée par le client.
+test("POST /api/fiches calcule numero_fiche lui-même (MAX+1 depuis la base, jamais depuis req.body) et retente sur un conflit (episode_id, numero_fiche) au lieu de faire confiance à l'état local du client", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
+  assert.doesNotMatch(blocRoute, /const \{ episode_id, [^}]*numero_fiche/, "numero_fiche ne doit plus être lu depuis req.body — sinon un état client en retard peut refaire un numéro déjà utilisé");
+  assert.match(blocRoute, /\.order\('numero_fiche', \{ ascending: false \}\)\.limit\(1\)\.maybeSingle\(\)/, "doit lire le vrai dernier numero_fiche en base avant chaque insertion");
+  assert.match(blocRoute, /const numero_fiche = \(derniere\?\.numero_fiche \|\| 0\) \+ 1;/, "doit calculer le prochain numéro depuis la base, pas depuis req.body");
+  assert.match(blocRoute, /if \(error\.code === '23505'\) \{/, "doit détecter un conflit de contrainte unique");
+  assert.match(blocRoute, /continue;/, "doit relire et retenter plutôt qu'échouer ou dupliquer sur un conflit (episode_id, numero_fiche)");
 });
 
 // Retour d'Esdras (23/08) : URGENT — cette route n'existait pas du tout. "🗑️ Supprimer" côté client

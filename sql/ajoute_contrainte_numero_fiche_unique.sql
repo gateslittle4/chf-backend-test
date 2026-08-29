@@ -1,0 +1,21 @@
+-- Bug financier découvert le 28/08 : un transfert vers un partenaire (ALIMA) était bloqué sur une
+-- "Fiche N°2" (dossier de test) — en réalité 2 fiches DISTINCTES du même dossier portaient toutes
+-- les deux le numéro 2. Cause racine : numero_fiche était calculé côté CLIENT
+-- (CalculateurPanel.js, Math.max(fichesDossier) + 1), un état local qui peut rester en retard —
+-- notamment quand le paiement d'une fiche précédente échoue pour de vrai : la fiche existe déjà
+-- en base, mais l'app n'apprend jamais son numéro tant que l'encaissement complet (fiche +
+-- paiement) n'a pas réussi. La fiche suivante recalculait alors le même "prochain numéro".
+--
+-- Corrigé à la source : POST /api/fiches (server.js) calcule désormais toujours lui-même le vrai
+-- prochain numero_fiche à partir de ce qui existe réellement en base au moment de l'insertion, et
+-- retente sur un conflit de cette contrainte (course plus rare entre 2 requêtes simultanées,
+-- 2 postes/onglets sur le même dossier).
+--
+-- Avant d'ajouter la contrainte, les doublons déjà présents (3 dossiers de test — "esd"/ddtdtd,
+-- "esdra"/Alima, "Test Audit" — aucun dossier réel) ont été renumérotés séquentiellement par
+-- date_creation au sein de chaque épisode concerné.
+--
+-- Déjà appliqué directement sur le projet Supabase (woghiwalsxusqtxvpzfo) via apply_migration —
+-- ce fichier documente le changement pour une future recréation de la base depuis zéro.
+
+ALTER TABLE fiches ADD CONSTRAINT fiches_episode_id_numero_fiche_key UNIQUE (episode_id, numero_fiche);
