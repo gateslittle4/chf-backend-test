@@ -631,15 +631,29 @@ app.get('/api/dossiers/:id', async (req, res) => {
 
 // Modifier les infos de base d'un patient (ex : nouveau numéro de téléphone) — n'importe qui de
 // connecté peut le faire (comme la création), pas une action sensible comme l'annulation d'un paiement.
+// Retour d'Esdras (29/08) : poids et conjoint ajoutés aux données personnelles, et un endroit pour
+// corriger le numéro de dossier "au cas où" (ex. faute de frappe à la création) — poids/conjoint
+// (nouvelles colonnes, voir sql/ajoute_poids_conjoint_dossiers.sql) toujours acceptés tels quels
+// (pas de contrainte d'unicité), numero_dossier réutilise le même traitement du conflit 23505 que
+// POST /api/dossiers ci-dessus (déjà utilisé par un AUTRE patient).
 app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse } = req.body;
+  const { nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
-  const { data, error } = await supabase
-    .from('dossiers').update({ nom, date_naissance: dateOuNull(date_naissance), telephone, adresse }).eq('id', req.params.id).select();
-  if (error) return res.status(500).json({ error: error.message });
+  const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint };
+  if (numero_dossier !== undefined) {
+    if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
+    maj.numero_dossier = numero_dossier;
+  }
+  const { data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select();
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
+    }
+    return res.status(500).json({ error: error.message });
+  }
   if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
   res.json(data[0]);
 });

@@ -258,6 +258,19 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
   assert.match(blocRoutePermission("app.put('/api/dossiers/:id'"), /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/);
 });
 
+// Retour d'Esdras (29/08) : poids + conjoint ajoutés aux données personnelles, et un endroit pour
+// corriger le numéro de dossier "au cas où" — voir sql/ajoute_poids_conjoint_dossiers.sql pour les
+// 2 nouvelles colonnes. numero_dossier reste optionnel dans le corps (un appel qui ne l'envoie pas
+// — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
+test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
+  const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
+  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier \} = req\.body;/);
+  assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint \};/, "poids/conjoint doivent toujours être écrits, sans condition");
+  assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
+  assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
+  assert.match(bloc, /if \(error\.code === '23505'\) \{\s*\n\s*return res\.status\(409\)\.json\(\{ error: `Le numéro de dossier "\$\{numero_dossier\}" est déjà utilisé par un autre patient\.` \}\);/, "même message de conflit que POST /api/dossiers");
+});
+
 test("hospitaliser / fermer / attente-resultats exigent caisse_travailler", () => {
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/hospitaliser'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/fermer'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
