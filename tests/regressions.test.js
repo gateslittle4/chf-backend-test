@@ -893,3 +893,39 @@ test("CORS restreint à l'origine du frontend (FRONTEND_URL), plus l'URL onrende
   assert.match(bloc, /process\.env\.FRONTEND_URL \|\| 'https:\/\/chf-app2\.onrender\.com'/, "doit réutiliser FRONTEND_URL, avec repli sur l'URL onrender.com actuelle");
   assert.match(bloc, /if \(!origin \|\|/, "une requête sans en-tête Origin (curl, health check, serveur à serveur) doit rester autorisée");
 });
+
+// Retour d'Esdras (29/08) : "call me bot, on va l'activer" — alertes WhatsApp pour 3 événements
+// (stock bas franchi, demande d'exonération en attente, sauvegarde automatique échouée). La clé
+// API vit UNIQUEMENT dans les variables d'environnement (jamais codée en dur, jamais envoyée au
+// navigateur) — l'appel à CallMeBot passe toujours par le serveur.
+test("envoyerCallMeBot lit CALLMEBOT_PHONE/CALLMEBOT_APIKEY depuis les variables d'environnement (jamais codées en dur), n'envoie rien si absentes, et ne fait jamais planter l'appelant si l'envoi échoue", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCallMeBot'), serverSrc.indexOf('// ============================================================\n// SAUVEGARDE AUTOMATIQUE'));
+  assert.match(bloc, /const phone = process\.env\.CALLMEBOT_PHONE;/);
+  assert.match(bloc, /const apikey = process\.env\.CALLMEBOT_APIKEY;/);
+  assert.match(bloc, /if \(!phone \|\| !apikey\) \{/, "doit se taire proprement si pas configuré, pas planter");
+  assert.match(bloc, /catch \(e\) \{\s*\n\s*console\.warn\('CallMeBot : envoi échoué —', e\.message\);\s*\n\s*\}/, "une erreur réseau/API ne doit jamais remonter à l'appelant");
+});
+
+test("cron de sauvegarde automatique envoie une alerte CallMeBot en cas d'échec, en plus du log console existant", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'"), serverSrc.indexOf("app.post('/api/admin/backup-manuel'"));
+  assert.match(bloc, /console\.error\('❌ Échec de la sauvegarde automatique :', e\.message\);/, "le log existant doit rester (logs Render toujours utiles)");
+  assert.match(bloc, /await envoyerCallMeBot\(`⚠️ CHF : la sauvegarde automatique a échoué/);
+});
+
+test("POST /api/stock/decrementer envoie une alerte CallMeBot SEULEMENT quand un article FRANCHIT son seuil (avant > seuil, après <= seuil) — jamais à chaque vente d'un article déjà bas", () => {
+  const debut = serverSrc.indexOf("app.post('/api/stock/decrementer'");
+  const bloc = serverSrc.slice(debut, debut + 3500);
+  assert.match(bloc, /const \{ data: avantData \} = await supabase\.from\('catalog'\)\.select\('items'\)\.eq\('type', 'medicaments'\)\.single\(\);/, "doit lire l'état AVANT le décrément, pas seulement après");
+  assert.match(bloc, /\(avant\.seuilAlerte \?\? seuilParDefaut\) < avant\.quantite && apres\.quantite <= \(avant\.seuilAlerte \?\? seuilParDefaut\)/, "doit détecter un franchissement (avant au-dessus, après en-dessous), pas juste 'être bas'");
+  assert.match(bloc, /envoyerCallMeBot\(`📦 CHF : stock bas/);
+  assert.doesNotMatch(bloc, /await envoyerCallMeBot\(`📦/, "l'alerte stock ne doit pas bloquer la réponse à la caisse (fire-and-forget, pas de await)");
+});
+
+test("POST /api/notifications/exoneration-demandee existe, protégée par verifyToken (déclarée après app.use('/api', verifyToken)), et reste best-effort (toujours 200 même si CallMeBot échoue)", () => {
+  const indexVerifyToken = serverSrc.indexOf("app.use('/api', verifyToken);");
+  const indexRoute = serverSrc.indexOf("app.post('/api/notifications/exoneration-demandee'");
+  assert.ok(indexVerifyToken !== -1 && indexRoute !== -1 && indexRoute > indexVerifyToken, "la route doit être déclarée APRÈS app.use('/api', verifyToken) pour être protégée");
+  const bloc = serverSrc.slice(indexRoute, indexRoute + 700);
+  assert.match(bloc, /envoyerCallMeBot\(`🎯 CHF : demande d'exonération/);
+  assert.match(bloc, /res\.json\(\{ success: true \}\); \/\/ best-effort/, "doit toujours répondre 200, ne jamais faire échouer la demande côté écran si l'alerte échoue");
+});

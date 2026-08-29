@@ -1561,6 +1561,12 @@ app.post('/api/stock/decrementer', async (req, res) => {
   if (!Array.isArray(decrements) || decrements.length === 0) {
     return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
   }
+  // Retour d'Esdras (29/08) : alerte WhatsApp quand un médicament FRANCHIT son seuil critique —
+  // lu AVANT le décrément pour ne comparer qu'à ce moment précis (avant > seuil, après <= seuil),
+  // sinon chaque vente suivante d'un article déjà bas redéclencherait une alerte à chaque fois.
+  const { data: avantData } = await supabase.from('catalog').select('items').eq('type', 'medicaments').single();
+  const avantParId = new Map((avantData?.items || []).map(m => [m.id, m]));
+
   const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements });
   if (error) {
     if (error.code === '42883') {
@@ -1572,6 +1578,19 @@ app.post('/api/stock/decrementer', async (req, res) => {
     const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant)`).join(', ');
     return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
   }
+
+  const { data: parametresData } = await supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle();
+  const seuilParDefaut = parametresData?.items?.seuilStockBas ?? 5;
+  const franchissements = decrements
+    .map(d => avantParId.get(d.id))
+    .filter(Boolean)
+    .map(avant => ({ avant, apres: (data.items || []).find(m => m.id === avant.id) }))
+    .filter(({ avant, apres }) => apres && (avant.seuilAlerte ?? seuilParDefaut) < avant.quantite && apres.quantite <= (avant.seuilAlerte ?? seuilParDefaut));
+  if (franchissements.length > 0) {
+    const detail = franchissements.map(({ avant, apres }) => `${avant.nom} (reste ${apres.quantite})`).join(', ');
+    envoyerCallMeBot(`📦 CHF : stock bas — ${detail}`); // best-effort, ne bloque jamais la réponse à la caisse
+  }
+
   res.json({ success: true, items: data.items });
 });
 
@@ -1771,6 +1790,43 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
 });
 
 // ============================================================
+// CALLMEBOT — retour d'Esdras (29/08) : alertes WhatsApp pour 3 événements (stock bas franchi,
+// demande d'exonération en attente, sauvegarde automatique échouée). CALLMEBOT_PHONE/APIKEY dans
+// les variables d'environnement (Render), jamais codés en dur ni envoyés au navigateur — l'appel à
+// l'API CallMeBot passe toujours par ICI (le serveur), jamais depuis le front, pour ne jamais
+// exposer la clé dans bundle.js. Best-effort partout où c'est appelé : une alerte WhatsApp qui
+// échoue (clé absente, CallMeBot en pause, pas de réseau...) ne doit jamais faire échouer l'action
+// réelle (vente, demande, sauvegarde) qui l'a déclenchée.
+// ============================================================
+async function envoyerCallMeBot(message) {
+  const phone = process.env.CALLMEBOT_PHONE;
+  const apikey = process.env.CALLMEBOT_APIKEY;
+  if (!phone || !apikey) {
+    console.warn('CallMeBot non configuré (CALLMEBOT_PHONE/CALLMEBOT_APIKEY manquants) — alerte non envoyée :', message);
+    return;
+  }
+  try {
+    const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(message)}&apikey=${encodeURIComponent(apikey)}`;
+    const reponse = await fetch(url);
+    if (!reponse.ok) console.warn('CallMeBot : réponse HTTP', reponse.status, await reponse.text().catch(() => ''));
+  } catch (e) {
+    console.warn('CallMeBot : envoi échoué —', e.message);
+  }
+}
+
+// Alerte WhatsApp quand une demande d'exonération est créée (retour d'Esdras, 29/08) — appelée
+// par CalculateurPanel.js juste après avoir créé la demande dans Firestore (demandes_exoneration,
+// collection HORS de ce backend Supabase — c'est pour ça que ceci est un appel séparé, pas
+// déclenché depuis une route existante). N'importe quel utilisateur authentifié peut l'appeler
+// (verifyToken, ligne ~237, s'applique déjà à toute route /api) : ça ne fait que déclencher une
+// notification best-effort, aucune donnée sensible exposée ni modifiée.
+app.post('/api/notifications/exoneration-demandee', async (req, res) => {
+  const { patientNom, montantExonere, pourcentage, demandeur } = req.body || {};
+  envoyerCallMeBot(`🎯 CHF : demande d'exonération de ${demandeur || 'inconnu'} pour ${patientNom || 'un patient'} — ${pourcentage || '?'}% (${Math.round(montantExonere) || '?'} Gdes). À approuver dans l'app.`);
+  res.json({ success: true }); // best-effort : jamais d'erreur même si CallMeBot est down
+});
+
+// ============================================================
 // SAUVEGARDE AUTOMATIQUE — Backup/Restore (AppHospitaliere.js) reste manuel, dépend de
 // quelqu'un qui pense à cliquer. Ceci tourne tout seul, tous les jours, sans dépendre de
 // personne. Exporte les tables essentielles vers un bucket Supabase Storage dédié, jamais vers
@@ -1822,6 +1878,9 @@ cron.schedule('0 6 * * *', async () => {
     console.log(`✅ Sauvegarde automatique : ${resultat.fichier}`, resultat.nombreLignes);
   } catch (e) {
     console.error('❌ Échec de la sauvegarde automatique :', e.message);
+    // Retour d'Esdras (29/08) : seul moyen de savoir qu'une sauvegarde a échoué jusqu'ici était de
+    // lire les logs Render, que personne ne regarde — une alerte WhatsApp directe comble ce trou.
+    await envoyerCallMeBot(`⚠️ CHF : la sauvegarde automatique a échoué (${e.message}). Vérifie les logs Render.`);
   }
 });
 
