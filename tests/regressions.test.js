@@ -258,6 +258,19 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
   assert.match(blocRoutePermission("app.put('/api/dossiers/:id'"), /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/);
 });
 
+// Retour d'Esdras (29/08) : poids + conjoint ajoutés aux données personnelles, et un endroit pour
+// corriger le numéro de dossier "au cas où" — voir sql/ajoute_poids_conjoint_dossiers.sql pour les
+// 2 nouvelles colonnes. numero_dossier reste optionnel dans le corps (un appel qui ne l'envoie pas
+// — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
+test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
+  const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
+  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier \} = req\.body;/);
+  assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint \};/, "poids/conjoint doivent toujours être écrits, sans condition");
+  assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
+  assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
+  assert.match(bloc, /if \(error\.code === '23505'\) \{\s*\n\s*return res\.status\(409\)\.json\(\{ error: `Le numéro de dossier "\$\{numero_dossier\}" est déjà utilisé par un autre patient\.` \}\);/, "même message de conflit que POST /api/dossiers");
+});
+
 test("hospitaliser / fermer / attente-resultats exigent caisse_travailler", () => {
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/hospitaliser'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/fermer'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
@@ -664,7 +677,7 @@ test("POST /api/episodes/:id/rembourser-transferer-partenaire (Cas 2) : une fich
   assert.match(bloc, /if \(paiementOriginal\.mode === 'credit'\) \{/, "une fiche à crédit doit être détectée séparément");
   assert.match(bloc, /annule: true, annule_par: autoriseParTrim, annule_par_uid: req\.user\.id,\s*\n\s*annule_le: maintenant, motif_annulation: `Transféré à \$\{ong_partenaire\} : \$\{motifTrim\}`,/, "le crédit doit être annulé, jamais remboursé (rien n'a été réellement encaissé)");
   assert.match(bloc, /montant: fiche\.total_global, mode: 'remboursement_patient',/, "une fiche payée doit être remboursée pour son montant TOTAL (cash et dépôt confondus)");
-  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: 'consultation', service: episode\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,/, "un seul nouvel épisode, déjà fermé (correction rétroactive, pas une nouvelle visite)");
+  assert.match(bloc, /dossier_id: episode\.dossier_id, voie_entree: 'consultation', service: episode\.service \|\| 'Général',\s*\n\s*type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: false,/, "un seul nouvel épisode, OUVERT (retour d'Esdras 29/08 : le patient est souvent encore là, la caisse doit pouvoir continuer à ajouter des fiches dessus)");
   assert.match(bloc, /let numeroFiche = 1;/, "chaque fiche transférée doit avoir son propre numéro dans le nouvel épisode");
 });
 

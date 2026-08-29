@@ -631,15 +631,29 @@ app.get('/api/dossiers/:id', async (req, res) => {
 
 // Modifier les infos de base d'un patient (ex : nouveau numéro de téléphone) — n'importe qui de
 // connecté peut le faire (comme la création), pas une action sensible comme l'annulation d'un paiement.
+// Retour d'Esdras (29/08) : poids et conjoint ajoutés aux données personnelles, et un endroit pour
+// corriger le numéro de dossier "au cas où" (ex. faute de frappe à la création) — poids/conjoint
+// (nouvelles colonnes, voir sql/ajoute_poids_conjoint_dossiers.sql) toujours acceptés tels quels
+// (pas de contrainte d'unicité), numero_dossier réutilise le même traitement du conflit 23505 que
+// POST /api/dossiers ci-dessus (déjà utilisé par un AUTRE patient).
 app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse } = req.body;
+  const { nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
-  const { data, error } = await supabase
-    .from('dossiers').update({ nom, date_naissance: dateOuNull(date_naissance), telephone, adresse }).eq('id', req.params.id).select();
-  if (error) return res.status(500).json({ error: error.message });
+  const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint };
+  if (numero_dossier !== undefined) {
+    if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
+    maj.numero_dossier = numero_dossier;
+  }
+  const { data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select();
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
+    }
+    return res.status(500).json({ error: error.message });
+  }
   if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
   res.json(data[0]);
 });
@@ -1415,11 +1429,17 @@ app.post('/api/episodes/:id/rembourser-transferer-partenaire', async (req, res) 
   const motifTrim = motif.trim(); const autoriseParTrim = autorise_par.trim();
   const detailsAudit = { motif: motifTrim, autorise_par: autoriseParTrim, ong_partenaire };
 
-  // Un seul nouvel épisode, déjà fermé (correction comptable rétroactive, pas une nouvelle
-  // visite) — reçoit TOUTES les fiches transférées, jamais un épisode par fiche.
+  // Un seul nouvel épisode, OUVERT (retour d'Esdras, 29/08 : "je vois que le nouvel épisode créé
+  // est aussi archivé, il devrait être actif avec les nouvelles fiches non ?") — reçoit TOUTES les
+  // fiches transférées, jamais un épisode par fiche. Créé fermé jusqu'ici (pensé comme une pure
+  // correction comptable rétroactive, "pas une nouvelle visite") : en pratique le patient est
+  // souvent encore à l'hôpital au moment du transfert, et la caisse doit pouvoir continuer à
+  // ajouter des fiches sur ce même épisode partenaire par la suite — un épisode 'ferme' l'en
+  // empêchait (voir PUT /api/episodes/:id, qui réserve la modif d'un épisode fermé à
+  // facturation_modifier). Reste à fermer normalement plus tard, via Archiver, comme tout épisode.
   const { data: nouvelEpisode, error: erreurNouvelEpisode } = await supabase.from('episodes').insert({
     dossier_id: episode.dossier_id, voie_entree: 'consultation', service: episode.service || 'Général',
-    type_patient: 'partenaire', ong_partenaire, statut: 'ferme', est_hospitalisation: false,
+    type_patient: 'partenaire', ong_partenaire, statut: 'ouvert', est_hospitalisation: false,
   }).select().single();
   if (erreurNouvelEpisode) return res.status(500).json({ error: erreurNouvelEpisode.message });
 
