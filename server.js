@@ -110,7 +110,16 @@ async function aPermission(userId, cle) {
   if (profil.role === 'administrateur') return true;
   const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'permissions').maybeSingle();
   const table = (catalogue && catalogue.items && catalogue.items.length > 0) ? catalogue.items : PERMISSIONS_PAR_DEFAUT;
-  const entree = table.find(r => r.role === profil.role);
+  // Correctif (audit du 31/08) : même famille que le verrouillage administrateur du 25/08, mais
+  // pour un RÔLE entier. Dès qu'une table de permissions personnalisée a été enregistrée une fois,
+  // elle devient la seule source de vérité. Un rôle créé APRÈS cet enregistrement (infirmier_chef
+  // et visiteur, tous deux ajoutés les 27–28/08) n'y figure tout simplement pas : la personne à qui
+  // on l'attribue se retrouvait alors sans AUCUNE permission — pas même consulter une fiche — sans
+  // que rien ne l'explique, ni dans l'app ni dans l'écran Rôles & permissions.
+  // Un rôle volontairement privé de tout garde, lui, une entrée avec une liste VIDE : ce repli ne
+  // peut donc jamais contredire une décision explicite de la direction.
+  const entree = table.find(r => r.role === profil.role)
+    || PERMISSIONS_PAR_DEFAUT.find(r => r.role === profil.role);
   return !!(entree && entree.permissions && entree.permissions.includes(cle));
 }
 
