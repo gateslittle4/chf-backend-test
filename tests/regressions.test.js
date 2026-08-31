@@ -1294,38 +1294,53 @@ test("aPermission refuse un compte désactivé ou expiré, à chaque requête et
 });
 
 // ============================================================================================
-// Sorties de caisse (31/08) — retour d'Esdras : "on a l'habitude de retirer de l'argent à la
-// caisse pour faire des achats". La table depenses_caisse existait déjà mais n'était branchée à
-// AUCUNE route ni AUCUN écran (confirmé par recherche dans les 2 dépôts avant de commencer).
-// Fonctionnalité pensée comme TEMPORAIRE (le comptable de la firme dit que cette pratique ne va
-// pas durer) — voir le paramètre 'sortiesCaisseActivees' côté chf-app2.
+// Sorties de caisse (31/08, corrigé le même soir) — retour d'Esdras : "on a l'habitude de
+// retirer de l'argent à la caisse pour faire des achats", puis correction : "c'est la direction
+// qui fait la demande à la caisse, et la caisse, si elle a l'argent, le donne". La table
+// depenses_caisse existait déjà mais n'était branchée à AUCUNE route ni AUCUN écran (confirmé
+// par recherche dans les 2 dépôts avant de commencer). Demande/réponse comme demandes_exoneration
+// (Demandes.js) : la direction (sortie_caisse_demander) crée la demande, le caissier
+// (caisse_travailler) l'accorde ou la refuse. Fonctionnalité pensée comme TEMPORAIRE (le
+// comptable de la firme dit que cette pratique ne va pas durer) — voir le paramètre
+// 'sortiesCaisseActivees' côté chf-app2.
 // ============================================================================================
 
-test("GET /api/depenses-caisse exige les mêmes permissions que GET /api/paiements (même écran, même fiche de caisse journalière)", () => {
+test("GET /api/depenses-caisse s'ouvre à la direction (qui demande) comme au caissier (qui répond) et au reporting caisse habituel", () => {
   const bloc = blocRoutePermission("app.get('/api/depenses-caisse'", "app.post('/api/depenses-caisse'");
-  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'sortie_caisse_demander'\)/);
   assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
   assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_voir'\)/);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
 });
 
-test("GET /api/depenses-caisse est paginée (même piège que /api/episodes et /api/paiements : un plafond de lignes tronquerait les dépenses les plus anciennes en silence)", () => {
+test("GET /api/depenses-caisse est paginée (même piège que /api/episodes et /api/paiements : un plafond de lignes tronquerait les demandes les plus anciennes en silence)", () => {
   const bloc = blocRoutePermission("app.get('/api/depenses-caisse'", "app.post('/api/depenses-caisse'");
   assert.match(bloc, /lireToutesLesPages\(/);
-  assert.match(bloc, /\.order\('date', \{ ascending: false \}\)\.order\('id'\)/, "tri total obligatoire dès qu'on pagine");
+  assert.match(bloc, /\.order\('date_demande', \{ ascending: false \}\)\.order\('id'\)/, "tri total obligatoire dès qu'on pagine");
 });
 
-test("POST /api/depenses-caisse exige caisse_travailler, valide motif/montant/validepar, et rattache la dépense au caissier qui l'enregistre", () => {
-  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "// Annulation d'un paiement");
-  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "manier de l'argent hors caisse reste une action de caisse");
-  assert.match(bloc, /if \(!motif \|\| typeof motif !== 'string' \|\| !motif\.trim\(\)\) return res\.status\(400\)/, "un motif est requis, jamais une sortie silencieuse");
+test("POST /api/depenses-caisse (créer la demande) exige sortie_caisse_demander — jamais caisse_travailler, ce n'est pas au caissier de l'initier", () => {
+  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "app.patch('/api/depenses-caisse/:id/repondre'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'sortie_caisse_demander'\)/, "seule la direction initie une demande de sortie de caisse");
+  assert.doesNotMatch(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "le caissier répond, il ne crée pas la demande");
+  assert.match(bloc, /if \(!motif \|\| typeof motif !== 'string' \|\| !motif\.trim\(\)\) return res\.status\(400\)/, "un motif est requis, jamais une demande silencieuse");
   assert.match(bloc, /if \(!\(montantNombre > 0\)\) return res\.status\(400\)/, "un montant à 0 ou négatif n'a aucun sens pour une sortie de caisse");
-  assert.match(bloc, /if \(!validepar \|\| typeof validepar !== 'string' \|\| !validepar\.trim\(\)\) return res\.status\(400\)/, "qui autorise la sortie doit être tracé, comme partout ailleurs dans l'app");
-  assert.match(bloc, /caissier_uid: req\.user\.id/, "doit rattacher la dépense au caissier qui clôture, sinon la fiche journalière ne peut pas la retrouver");
+  assert.match(bloc, /demandeur: req\.user\.email \|\| req\.user\.id, demandeur_uid: req\.user\.id/, "doit tracer qui a demandé — la direction, jamais le caissier");
+  assert.match(bloc, /statut: 'en_attente'/, "une demande fraîchement créée attend toujours une réponse du caissier");
 });
 
-test("POST /api/depenses-caisse est idempotente via local_id, même principe que /api/paiements — sinon une confirmation perdue en file hors ligne dupliquerait la sortie d'argent", () => {
-  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "// Annulation d'un paiement");
+test("POST /api/depenses-caisse est idempotente via local_id, même principe que /api/paiements — sinon une confirmation perdue en file hors ligne dupliquerait la demande", () => {
+  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "app.patch('/api/depenses-caisse/:id/repondre'");
   assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId;/);
   assert.match(bloc, /if \(existant\) return res\.status\(200\)\.json\(existant\);/);
   assert.match(bloc, /if \(error\.code === '23505' && local_id\)/, "un conflit sur la contrainte unique local_id doit renvoyer la ligne déjà créée, pas une erreur 500");
+});
+
+test("PATCH /api/depenses-caisse/:id/repondre exige caisse_travailler et verrouille atomiquement la demande (même principe que claimerDemande pour l'exonération)", () => {
+  const bloc = blocRoutePermission("app.patch('/api/depenses-caisse/:id/repondre'", "// Annulation d'un paiement");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "seul le caissier décide s'il a l'argent à donner");
+  assert.match(bloc, /if \(typeof accorde !== 'boolean'\) return res\.status\(400\)/, "accorde/refuse doit être explicite, jamais déduit");
+  assert.match(bloc, /caissier: req\.user\.email \|\| req\.user\.id, caissier_uid: req\.user\.id/, "doit tracer quel caissier a répondu");
+  assert.match(bloc, /\.eq\('id', req\.params\.id\)\.eq\('statut', 'en_attente'\)/, "l'UPDATE doit rester conditionné à 'en_attente', sinon 2 caissiers pourraient traiter 2 fois la même demande");
+  assert.match(bloc, /if \(!data \|\| data\.length === 0\) return res\.status\(409\)/, "0 ligne modifiée = déjà traitée entre-temps, jamais un faux succès");
 });

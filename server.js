@@ -52,7 +52,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 // qui consultent le dossier pour l'historique clinique, pas les montants — voir aussi le filtrage
 // dans GET /api/dossiers/:id/historique plus bas.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','sortie_caisse_demander'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','facturation_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
@@ -1496,36 +1496,42 @@ app.post('/api/paiements', async (req, res) => {
 // Retour d'Esdras (31/08) : "on a l'habitude de retirer de l'argent à la caisse pour faire des
 // achats" — une pratique réelle jamais tracée nulle part jusqu'ici (table depenses_caisse déjà
 // créée, mais aucune route ni aucun écran ne la touchait — confirmé par recherche dans les 2
-// dépôts). Passé par le backend (comme paiements), pas par le shim db, pour appliquer une vraie
-// permission plutôt que la clé anon libre. Fonctionnalité pensée comme TEMPORAIRE : le comptable
-// venu pour la firme a dit que ce retrait direct ne durera pas une fois leur propre système en
-// place — d'où le paramètre 'sortiesCaisseActivees' (GestionParametres.js) qui masque tout l'écran
-// d'un coup côté navigateur le jour où ce n'est plus utile, sans qu'il faille retoucher au code ni
-// perdre l'historique déjà enregistré.
+// dépôts). Corrigé le même soir : Esdras a précisé que ce n'est PAS le caissier qui décide de
+// sortir de l'argent — c'est LA DIRECTION qui le lui demande, et LUI qui accorde ou refuse selon
+// ce qu'il a en caisse. Même schéma de verrouillage que demandes_exoneration (Demandes.js) :
+// 'en_attente' -> 'accorde'/'refuse' via un UPDATE conditionnel, pour qu'un seul caissier puisse
+// traiter une demande donnée même si 2 postes l'ont ouverte en même temps. Passé par le backend
+// (comme paiements), pas par le shim db, pour appliquer une vraie permission plutôt que la clé
+// anon libre. Fonctionnalité pensée comme TEMPORAIRE : le comptable venu pour la firme a dit que
+// ce retrait direct ne durera pas une fois leur propre système en place — d'où le paramètre
+// 'sortiesCaisseActivees' (GestionParametres.js) qui masque tout l'écran d'un coup côté navigateur
+// le jour où ce n'est plus utile, sans qu'il faille retoucher au code ni perdre l'historique déjà
+// enregistré.
 app.get('/api/depenses-caisse', async (req, res) => {
-  // Même jeu de permissions que GET /api/paiements : cet écran (DashboardCaisse.js) affiche les
-  // deux ensemble pour la même fiche de caisse journalière.
-  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'caisse_voir'))) {
-    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler' ou 'caisse_voir' requise." });
+  // sortie_caisse_demander (direction, qui veut voir le statut de ses demandes) + caisse_travailler
+  // (le caissier, qui doit voir ce qui est en attente) + caisse_voir/fiche_patient_voir_finances
+  // (même écran que GET /api/paiements, pour le rapprochement).
+  if (!(await aPermission(req.user.id, 'sortie_caisse_demander')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'caisse_voir')) && !(await aPermission(req.user.id, 'fiche_patient_voir_finances'))) {
+    return res.status(403).json({ error: "Permission 'sortie_caisse_demander', 'caisse_travailler', 'caisse_voir' ou 'fiche_patient_voir_finances' requise." });
   }
   try {
     res.json(await lireToutesLesPages(
-      () => supabase.from('depenses_caisse').select('*').order('date', { ascending: false }).order('id')));
+      () => supabase.from('depenses_caisse').select('*').order('date_demande', { ascending: false }).order('id')));
   } catch (e) {
     console.error('GET /api/depenses-caisse: lecture paginée échouée :', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
+// Crée la DEMANDE (statut 'en_attente') — c'est la direction qui l'initie, jamais le caissier.
 app.post('/api/depenses-caisse', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
-    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  if (!(await aPermission(req.user.id, 'sortie_caisse_demander'))) {
+    return res.status(403).json({ error: "Permission 'sortie_caisse_demander' requise." });
   }
-  const { motif, montant, validepar } = req.body;
+  const { motif, montant } = req.body;
   if (!motif || typeof motif !== 'string' || !motif.trim()) return res.status(400).json({ error: 'motif requis.' });
   const montantNombre = parseFloat(montant);
   if (!(montantNombre > 0)) return res.status(400).json({ error: 'montant doit être un nombre supérieur à 0.' });
-  if (!validepar || typeof validepar !== 'string' || !validepar.trim()) return res.status(400).json({ error: 'validepar (qui autorise la sortie) requis.' });
 
   // Idempotence via local_id, même principe que /api/paiements et /api/fiches — nécessaire pour
   // que la file hors ligne (api/supabase.js) puisse rejouer cette création sans risquer de la
@@ -1538,7 +1544,11 @@ app.post('/api/depenses-caisse', async (req, res) => {
 
   const { data, error } = await supabase
     .from('depenses_caisse')
-    .insert({ motif: motif.trim(), montant: montantNombre, validepar: validepar.trim(), caissier_uid: req.user.id, local_id: local_id || null })
+    .insert({
+      motif: motif.trim(), montant: montantNombre,
+      demandeur: req.user.email || req.user.id, demandeur_uid: req.user.id,
+      statut: 'en_attente', local_id: local_id || null,
+    })
     .select()
     .single();
   if (error) {
@@ -1549,6 +1559,32 @@ app.post('/api/depenses-caisse', async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
   res.status(201).json(data);
+});
+
+// Le caissier accorde (il a l'argent, il le donne) ou refuse (il ne l'a pas) une demande en
+// attente. Verrouillage atomique identique à claimerDemande() dans Demandes.js : la clause
+// .eq('statut', 'en_attente') sur l'UPDATE garantit que si 2 caissiers répondent à la même
+// demande à quelques instants d'écart, un seul des deux modifie réellement une ligne — l'autre
+// reçoit 0 ligne modifiée (409) plutôt qu'une double sortie d'argent.
+app.patch('/api/depenses-caisse/:id/repondre', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
+  const { accorde } = req.body;
+  if (typeof accorde !== 'boolean') return res.status(400).json({ error: 'accorde (booléen) requis.' });
+
+  const { data, error } = await supabase
+    .from('depenses_caisse')
+    .update({
+      statut: accorde ? 'accorde' : 'refuse',
+      caissier: req.user.email || req.user.id, caissier_uid: req.user.id,
+      date_reponse: new Date().toISOString(),
+    })
+    .eq('id', req.params.id).eq('statut', 'en_attente')
+    .select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) return res.status(409).json({ error: "Cette demande a déjà été traitée entre-temps." });
+  res.json(data[0]);
 });
 
 // Annulation d'un paiement — réservée à direction/administrateur (jamais celui qui a
