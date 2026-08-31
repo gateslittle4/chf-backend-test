@@ -1368,3 +1368,21 @@ test("Transfert partenaire : refuse d'annuler un crédit déjà partiellement re
   assert.ok(route.indexOf('auMoinsUneFicheACredit') < route.indexOf("from('episodes').insert("),
     "le refus doit tomber avant la première insertion");
 });
+
+// Audit du 01/09 — /portail-patient/recherche est la SEULE route publique de l'app, atteignable
+// par n'importe quel scanner d'internet. Son compteur anti-force-brute vit dans une Map en
+// mémoire dont une entrée n'était supprimée qu'en cas de SUCCÈS : chaque tentative ratée depuis
+// une IP ou sur un numéro de dossier nouveau laissait une clé pour toujours. La mémoire du serveur
+// montait sans jamais redescendre, jusqu'au redémarrage de Render — qui remet au passage le
+// compteur à zéro.
+test("Portail patient : le compteur anti-force-brute ne garde pas ses clés pour toujours", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.post('/portail-patient/recherche'"), src.indexOf('async function verifyToken'));
+  assert.match(route, /if \(tentativesPortailPatient\.size > 5000\) \{/, "un balayage doit exister");
+  assert.match(route, /if \(!ts\.some\(t => maintenant - t < FENETRE_LIMITE_PORTAIL_MS\)\) tentativesPortailPatient\.delete\(k\);/,
+    "ne supprimer QUE les clés dont toutes les tentatives sont hors fenêtre — sinon le balayage effacerait un blocage en cours");
+  // Les protections existantes ne doivent pas bouger.
+  assert.match(route, /tentatives\.length >= MAX_TENTATIVES_PORTAIL/);
+  assert.match(route, /res\.status\(429\)/);
+  assert.match(route, /Aucun dossier ne correspond à ces informations\./, "message générique : ne jamais dire QUELLE information est fausse");
+});

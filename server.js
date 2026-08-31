@@ -191,6 +191,17 @@ app.post('/portail-patient/recherche', async (req, res) => {
   }
   tentatives.push(maintenant);
   tentativesPortailPatient.set(cle, tentatives);
+  // Audit du 01/09 : une entrée n'était supprimée qu'en cas de SUCCÈS (plus bas). Chaque tentative
+  // ratée depuis une IP nouvelle, ou sur un numéro de dossier nouveau, laissait donc une clé pour
+  // toujours — sur la seule route publique de l'app, atteignable par n'importe quel scanner
+  // d'internet. La mémoire du serveur montait sans jamais redescendre, jusqu'au redémarrage de
+  // Render (qui remet au passage le compteur anti-force-brute à zéro). On balaie les clés
+  // périmées quand la table devient grande : rien ne change tant que le trafic est normal.
+  if (tentativesPortailPatient.size > 5000) {
+    for (const [k, ts] of tentativesPortailPatient) {
+      if (!ts.some(t => maintenant - t < FENETRE_LIMITE_PORTAIL_MS)) tentativesPortailPatient.delete(k);
+    }
+  }
 
   // Même message d'erreur générique dans TOUS les cas de désaccord (dossier introuvable, date ou
   // nom qui ne correspond pas) — ne jamais laisser deviner QUELLE information était fausse.
