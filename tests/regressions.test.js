@@ -1257,3 +1257,21 @@ test("Une seule implémentation de la pagination (lireToutesLesPages), réutilis
   assert.match(blocLots, /lireToutesLesPages\(\(\) => construireRequete\(lot\)\)/, "la lecture par lots doit réutiliser lireToutesLesPages, jamais recopier sa boucle");
   assert.doesNotMatch(blocLots, /\.range\(/, "plus aucune boucle de pagination dupliquée dans lireParLotsDIds");
 });
+
+// Audit du 31/08 : /api/episodes/:id/solde-depot renvoie un solde de dépôt — une donnée
+// FINANCIÈRE. La même information servie par /api/dossiers/:id/historique est filtrée sur
+// 'fiche_patient_voir_finances', permission volontairement refusée à archiviste et infirmier (ils
+// consultent le dossier pour son historique clinique, pas ses montants). Cette route-ci n'avait
+// aucun contrôle : la donnée restait accessible par un autre chemin, ce qui vide le filtrage de
+// l'autre route de son sens. Aucun appelant côté navigateur (chf.getSoldeDepot n'est utilisé
+// nulle part), donc le correctif ne peut rien casser.
+// NB : les autres routes GET sans aPermission (dossiers, pièces jointes, fiches...) sont un choix
+// ASSUMÉ et testé plus haut — lecture ouverte à tout compte connecté, écriture protégée. Ne pas
+// les "corriger" : seules les données financières sont filtrées, et c'est cohérent.
+test("GET /api/episodes/:id/solde-depot exige fiche_patient_voir_finances — même règle que l'historique, qui sert la même donnée", () => {
+  const bloc = blocRoutePermission("app.get('/api/episodes/:id/solde-depot'", "app.get('/api/dossiers/recherche'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/, "un solde de dépôt est une donnée financière, filtrée comme telle ailleurs");
+  // La route financière voisine doit garder le même filtrage, sinon l'incohérence revient.
+  const blocHisto = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"));
+  assert.match(blocHisto.slice(0, 2500), /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/, "l'historique doit continuer de filtrer les montants côté serveur");
+});

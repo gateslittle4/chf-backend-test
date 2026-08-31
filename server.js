@@ -550,7 +550,16 @@ function extraireFichesDetail(fiches) {
 
 // Utilisé par le Calculateur (CalculateurPanel.js) au moment de facturer, pour savoir combien de
 // dépôt reste réellement disponible sur cet épisode — jamais le total brut déposé.
+// Audit du 31/08 : cette route renvoie un solde de dépôt — une donnée financière. La même donnée
+// servie par /api/dossiers/:id/historique est, elle, filtrée sur 'fiche_patient_voir_finances'
+// (permission volontairement refusée à archiviste et infirmier, qui consultent le dossier pour son
+// historique clinique, pas ses montants). Ici, aucun contrôle : la même information restait
+// accessible par un autre chemin. Aligné. Aucun appelant côté navigateur aujourd'hui
+// (chf.getSoldeDepot n'est utilisé nulle part), donc aucun risque de régression.
 app.get('/api/episodes/:id/solde-depot', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances' requise." });
+  }
   const { data: paiements, error } = await supabase
     .from('paiements').select('mode, montant, details').eq('episode_id', req.params.id)
     .or('annule.eq.false,annule.is.null');
