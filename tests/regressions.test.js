@@ -1448,8 +1448,8 @@ test("Sessions de caisse : un caissier (caisse_travailler) peut ouvrir et fermer
   assert.match(routePost, /const permissionOk = type === 'sessions_caisse'\s*\n\s*\? await aPermission\(req\.user\.id, 'caisse_travailler'\)/,
     "POST item (ouverture d'une session, la voie normale — atomique) doit accepter caisse_travailler pour ce type");
 
-  // La fermeture (PATCH champs) n'a besoin d'AUCUN changement : elle accepte déjà
-  // catalogue_gerer OU caisse_travailler, pour tous les types, depuis le début.
+  // La fermeture (PATCH champs) accepte déjà catalogue_gerer OU caisse_travailler, pour tous les
+  // types, depuis le début.
   const routePatch = src.slice(src.indexOf("app.patch('/api/catalog/:type/champs'"), src.indexOf("app.delete('/api/catalog/:type/item/:id'"));
   assert.match(routePatch, /aPermission\(req\.user\.id, 'catalogue_gerer'\)\) && !\(await aPermission\(req\.user\.id, 'caisse_travailler'\)\)/);
 
@@ -1457,4 +1457,30 @@ test("Sessions de caisse : un caissier (caisse_travailler) peut ouvrir et fermer
   // accident — seul 'sessions_caisse' bénéficie de cette exception.
   assert.match(routePut, /permissionOk = await aPermission\(req\.user\.id, 'catalogue_gerer'\);\s*\n\s*\}\s*$/m,
     "le cas générique (tout le reste) doit rester réservé à catalogue_gerer");
+});
+
+// Audit de vérification globale (01/09, veille du lancement) : PATCH /api/catalog/:type/champs
+// est générique et ignore d'ordinaire QUI possède l'article visé — correct pour un tarif
+// (n'importe quel caissier incrémente un compteur d'usage sur un médicament qui n'est à personne),
+// mais dangereux pour 'sessions_caisse' : sans contrôle, un simple caisse_travailler (sans
+// catalogue_gerer) pouvait fermer la session ouverte d'un AUTRE caissier via un appel API brut
+// (jamais possible depuis l'écran, qui ne cible que sessionActive.id), avec un comptant/écart
+// fabriqués — sans laisser de trace autre que le journal d'audit tenu côté navigateur, lui-même
+// contournable de la même façon.
+test("Sessions de caisse : un caissier ne peut fermer/modifier que SA PROPRE session (pas celle d'un collègue)", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const routePatch = src.slice(src.indexOf("app.patch('/api/catalog/:type/champs'"), src.indexOf("app.delete('/api/catalog/:type/item/:id'"));
+
+  assert.match(routePatch, /if \(type === 'sessions_caisse' && !\(await aPermission\(req\.user\.id, 'catalogue_gerer'\)\)\) \{/,
+    "un garde-fou dédié doit exister pour ce type, sauf pour catalogue_gerer (direction/administrateur peuvent corriger)");
+  assert.match(routePatch, /session\.uid !== req\.user\.id/, "la comparaison doit se faire sur le propriétaire réel de la session");
+  assert.match(routePatch, /Tu ne peux modifier que ta propre session de caisse/, "refus explicite, pas un échec muet");
+
+  // Le garde-fou doit tomber AVANT l'appel à la fonction Postgres qui fait l'écriture réelle.
+  assert.ok(routePatch.indexOf("type === 'sessions_caisse'") < routePatch.indexOf("supabase.rpc('definir_champs_catalogue_lot'"),
+    "le refus doit précéder l'écriture");
+
+  // Les VRAIS catalogues (tarifs, médicaments) ne doivent pas hériter de cette restriction par
+  // accident : n'importe quel caisse_travailler doit toujours pouvoir y incrémenter un compteur.
+  assert.match(routePatch, /if \(type === 'sessions_caisse'/, "la restriction doit être scopée au seul type sessions_caisse");
 });

@@ -1404,6 +1404,25 @@ app.patch('/api/catalog/:type/champs', async (req, res) => {
   }
   const { maj } = req.body; // [{ id, champs }, ...]
   if (!Array.isArray(maj) || maj.length === 0) return res.status(400).json({ error: 'maj (tableau non vide) requis.' });
+  // 'sessions_caisse' (01/09) : cette route est générique et ignore d'ordinaire QUI possède
+  // l'article visé — correct pour un tarif (n'importe quel caissier peut incrémenter un compteur
+  // d'usage), mais dangereux ici : sans ce contrôle, un simple caisse_travailler (sans
+  // catalogue_gerer) pourrait fermer la session ouverte d'un AUTRE caissier par un appel API brut
+  // (hors interface), avec un comptant/écart fabriqués — jamais possible depuis l'écran, qui ne
+  // cible que sessionActive.id. direction/administrateur (catalogue_gerer) gardent le droit de
+  // corriger la session de n'importe qui, comme pour toute autre correction comptable.
+  if (type === 'sessions_caisse' && !(await aPermission(req.user.id, 'catalogue_gerer'))) {
+    const { data: ligne, error: erreurLecture } = await supabase.from('catalog').select('items').eq('type', 'sessions_caisse').single();
+    if (erreurLecture && erreurLecture.code !== 'PGRST116') return res.status(500).json({ error: erreurLecture.message });
+    const sessions = ligne?.items || [];
+    const idsEtrangers = maj.filter(m => {
+      const session = sessions.find(s => s.id === m.id);
+      return session && session.uid !== req.user.id;
+    });
+    if (idsEtrangers.length > 0) {
+      return res.status(403).json({ error: "Tu ne peux modifier que ta propre session de caisse." });
+    }
+  }
   const { data, error } = await supabase.rpc('definir_champs_catalogue_lot', { p_type: type, p_maj: maj });
   if (error) {
     if (error.code === '42883') {
