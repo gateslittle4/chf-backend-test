@@ -1386,3 +1386,41 @@ test("Portail patient : le compteur anti-force-brute ne garde pas ses clés pour
   assert.match(route, /res\.status\(429\)/);
   assert.match(route, /Aucun dossier ne correspond à ces informations\./, "message générique : ne jamais dire QUELLE information est fausse");
 });
+
+// ⚠️ Audit du 01/09 — LE plus grave trouvé sur le chemin de l'argent : une dette pouvait
+// DISPARAÎTRE toute seule. Le solde de crédit d'un épisode se lit sur le solde_restant de son
+// DERNIER paiement non annulé (définition partagée par Créances, Direction, Fiche Patient, le
+// Calculateur et le remboursement). Or le navigateur envoie solde_restant = 0 pour tout paiement
+// qui n'est pas à crédit, et rien du tout pour un dépôt : n'importe quel paiement postérieur
+// remettait donc la dette à zéro. Un patient hospitalisé dont la fiche du lendemain est réglée en
+// cash, ou qui laisse un dépôt pour une prochaine visite, voyait sa créance s'effacer partout — et
+// le serveur refusait ensuite tout remboursement ("Aucun solde de crédit à rembourser").
+test("Paiements : le solde de crédit d'un épisode est REPORTÉ, une dette ne peut plus s'effacer toute seule", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.post('/api/paiements'"), src.indexOf("app.patch('/api/paiements/:id/annuler'"));
+
+  // Une seule lecture du solde, partagée — pas deux définitions qui pourraient diverger.
+  assert.match(route, /const lireSoldeEpisode = async \(episodeId\) => \{/);
+  assert.match(route, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "un paiement annulé ne doit jamais servir de référence");
+  assert.match(route, /\.order\('date_paiement', \{ ascending: false \}\)\.limit\(1\)/);
+
+  // Le report lui-même : un crédit s'ajoute à ce qui était déjà dû, tout autre mode le laisse tel quel.
+  assert.match(route, /const soldeDeCePaiement = corps\.mode === 'credit' \? \(parseFloat\(corps\.solde_restant\) \|\| 0\) : 0;/);
+  assert.match(route, /corps\.solde_restant = soldeAnterieur \+ soldeDeCePaiement;/);
+  assert.match(route, /\} else if \(corps\.episode_id\) \{/, "le report s'applique à TOUS les autres modes (cash, dépôt, exonération, partenaire...)");
+
+  // Le remboursement de crédit garde ses garde-fous, inchangés.
+  assert.match(route, /if \(soldeActuel <= 0\) return res\.status\(400\)/);
+  assert.match(route, /if \(montant > soldeActuel\) return res\.status\(400\)/);
+  assert.match(route, /corps\.solde_restant = soldeActuel - montant;/);
+
+  // La règle, vérifiée sur les cas réels.
+  const nouveauSolde = (soldeAnterieur, mode, soldeEnvoye) =>
+    soldeAnterieur + (mode === 'credit' ? (parseFloat(soldeEnvoye) || 0) : 0);
+  assert.strictEqual(nouveauSolde(0, 'cash', 0), 0, "épisode sans dette + paiement cash : identique à avant");
+  assert.strictEqual(nouveauSolde(0, 'credit', 5000), 5000, "premier crédit : identique à avant");
+  assert.strictEqual(nouveauSolde(5000, 'cash', 0), 5000, "la fiche du lendemain payée cash n'efface plus la dette");
+  assert.strictEqual(nouveauSolde(5000, 'depot', undefined), 5000, "un dépôt non plus");
+  assert.strictEqual(nouveauSolde(5000, 'exoneration', 0), 5000, "une exonération sur une autre fiche non plus");
+  assert.strictEqual(nouveauSolde(5000, 'credit', 3000), 8000, "deux fiches à crédit s'additionnent");
+});

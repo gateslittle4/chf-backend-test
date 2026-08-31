@@ -1468,25 +1468,48 @@ app.post('/api/paiements', async (req, res) => {
 
   const corps = { ...req.body };
 
-  // Remboursement de crédit : le solde de référence vient TOUJOURS du dernier paiement connu
-  // en base, jamais de ce que le navigateur affichait au moment du clic — sinon une donnée
-  // locale périmée (ou 2 remboursements lancés au même instant) pourrait faire passer le solde
-  // sous zéro sans que personne ne le remarque. solde_restant envoyé par le client est ignoré.
-  if (corps.mode === 'remboursement_credit') {
-    if (!corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
-    // Un paiement ANNULÉ ne doit jamais servir de référence pour le solde — voir le même
-    // correctif sur GET /api/dossiers/:id/historique (24/08, audit financier).
-    const { data: dernierPaiement, error: erreurLecture } = await supabase
-      .from('paiements').select('solde_restant').eq('episode_id', corps.episode_id)
+  // Le solde de crédit d'un épisode = le solde_restant de son DERNIER paiement non annulé. C'est
+  // la définition utilisée partout : Créances (DashboardCaisse), statut et plafond de
+  // remboursement (Fiche Patient), solde affiché au Calculateur, et le remboursement ci-dessous.
+  // Un paiement ANNULÉ ne doit jamais servir de référence (24/08, audit financier).
+  const lireSoldeEpisode = async (episodeId) => {
+    const { data, error } = await supabase
+      .from('paiements').select('solde_restant').eq('episode_id', episodeId)
       .or('annule.eq.false,annule.is.null')
       .order('date_paiement', { ascending: false }).limit(1).maybeSingle();
-    if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
-    const soldeActuel = (dernierPaiement && dernierPaiement.solde_restant) || 0;
+    if (error) throw new Error(error.message);
+    return (data && data.solde_restant) || 0;
+  };
+
+  // ⚠️ Correctif majeur (audit du 01/09) — une dette pouvait DISPARAÎTRE toute seule.
+  // Le navigateur envoie solde_restant = 0 pour tout paiement qui n'est pas à crédit (voir
+  // CalculateurPanel.js), et n'en envoie aucun pour un dépôt. Comme le solde de l'épisode se lit
+  // sur le DERNIER paiement, n'importe quel paiement postérieur remettait la dette à zéro :
+  //   - un patient hospitalisé dont la fiche du lendemain est réglée en cash ;
+  //   - un patient qui doit encore de l'argent et qui laisse un dépôt pour une prochaine visite.
+  // Dans les deux cas la créance disparaissait de la liste des Créances, du tableau de bord
+  // Direction et de la Fiche Patient — et le serveur refusait ensuite tout remboursement
+  // ("Aucun solde de crédit à rembourser"). L'hôpital cessait purement et simplement de réclamer
+  // cet argent, sans que rien ne le signale.
+  // Le solde est donc REPORTÉ sur chaque nouveau paiement de l'épisode : un crédit s'ajoute à ce
+  // qui était déjà dû, tout autre mode le laisse inchangé. Sur un épisode sans dette (le cas de
+  // loin le plus fréquent), le report vaut 0 : comportement rigoureusement identique à avant.
+  if (corps.mode === 'remboursement_credit') {
+    if (!corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
+    let soldeActuel;
+    try { soldeActuel = await lireSoldeEpisode(corps.episode_id); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
     const montant = parseFloat(corps.montant) || 0;
     if (soldeActuel <= 0) return res.status(400).json({ error: 'Aucun solde de crédit à rembourser pour cet épisode.' });
     if (montant <= 0) return res.status(400).json({ error: 'Le montant du remboursement doit être supérieur à 0.' });
     if (montant > soldeActuel) return res.status(400).json({ error: `Le remboursement (${montant}) dépasse le solde restant (${soldeActuel}).` });
     corps.solde_restant = soldeActuel - montant;
+  } else if (corps.episode_id) {
+    let soldeAnterieur;
+    try { soldeAnterieur = await lireSoldeEpisode(corps.episode_id); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+    const soldeDeCePaiement = corps.mode === 'credit' ? (parseFloat(corps.solde_restant) || 0) : 0;
+    corps.solde_restant = soldeAnterieur + soldeDeCePaiement;
   }
 
   const { data, error } = await supabase
