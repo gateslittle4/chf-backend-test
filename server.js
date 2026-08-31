@@ -307,7 +307,9 @@ async function episodeVersFlat(ep) {
   // pas être lu (ligne orpheline, incident Supabase transitoire) apparaissait comme un patient
   // "sans nom" dans Archives/Analytics sans le moindre signal qu'une donnée manque vraiment.
   if (erreurDossier) console.error(`⚠️ episodeVersFlat: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id}) :`, erreurDossier.message);
-  const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation');
+  // .order('id') en second : départage deux fiches créées à la même seconde, pour que cette
+  // version unitaire et la version groupée (episodesVersFlatEnLot) donnent le MÊME ordre.
+  const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation').order('id');
   // Audit financier (24/08, "on ne peut pas se permettre l'erreur") : un paiement ANNULÉ (fraude/
   // erreur corrigée par la direction) laissait quand même sa fiche compter dans totalGlobal — les
   // rapports de revenus (Statistiques/AnalyticsPanel, Direction, Archives...) restaient faussés
@@ -413,22 +415,34 @@ function enLots(tableau, taille) {
 // et renvoie toutes les lignes concaténées. Lève l'erreur Supabase telle quelle : une lecture
 // partielle silencieuse serait pire qu'un échec visible (des dossiers manquants dans un rapport
 // financier ne se remarquent pas).
+// Lit TOUTES les lignes d'une requête, page par page. Avance du nombre de lignes RÉELLEMENT
+// reçues, et ne s'arrête que sur une page VIDE — jamais sur une page "plus petite que demandé".
+// C'est ce qui rend la lecture correcte quel que soit le plafond configuré côté Supabase : si le
+// serveur plafonne à 100 lignes alors qu'on en demande 500, s'arrêter sur "page incomplète"
+// perdrait tout le reste EN SILENCE (le piège signalé par l'audit du 31/08). Coût : une requête
+// de confirmation par lecture, négligeable.
+//
+// ⚠️ La requête passée ici doit avoir un tri TOTAL (un `.order()` sur une colonne unique en
+// dernier, en pratique 'id') : avec un tri ambigu, Postgres peut ordonner deux lignes de même
+// valeur différemment d'une page à l'autre, ce qui ferait apparaître une ligne deux fois et en
+// sauterait une autre, sans la moindre erreur.
+async function lireToutesLesPages(construireRequete) {
+  const lignes = [];
+  for (let debut = 0; ; ) {
+    const { data, error } = await construireRequete().range(debut, debut + TAILLE_PAGE_LECTURE - 1);
+    if (error) throw error;
+    const page = data || [];
+    if (page.length === 0) break;
+    lignes.push(...page);
+    debut += page.length;
+  }
+  return lignes;
+}
+
 async function lireParLotsDIds(ids, construireRequete) {
   const lignes = [];
   for (const lot of enLots(ids, TAILLE_LOT_IDS)) {
-    // Avance du nombre de lignes RÉELLEMENT reçues, et ne s'arrête que sur une page VIDE — jamais
-    // sur une page "plus petite que demandé". C'est ce qui rend cette lecture correcte quel que
-    // soit le plafond configuré côté Supabase : si le serveur plafonne à 100 lignes alors qu'on
-    // en demande 500, s'arrêter sur "page incomplète" perdrait tout le reste EN SILENCE (le piège
-    // signalé par l'audit du 31/08). Coût : une requête supplémentaire par lot, négligeable.
-    for (let debut = 0; ; ) {
-      const { data, error } = await construireRequete(lot).range(debut, debut + TAILLE_PAGE_LECTURE - 1);
-      if (error) throw error;
-      const page = data || [];
-      if (page.length === 0) break;
-      lignes.push(...page);
-      debut += page.length;
-    }
+    lignes.push(...await lireToutesLesPages(() => construireRequete(lot)));
   }
   return lignes;
 }
@@ -441,16 +455,20 @@ async function episodesVersFlatEnLot(episodes) {
   const idsEpisodes = episodes.map(ep => ep.id);
   const idsDossiers = [...new Set(episodes.map(ep => ep.dossier_id).filter(Boolean))];
 
+  // Chaque lecture est paginée (voir lireToutesLesPages) : elle DOIT donc avoir un tri total,
+  // d'où le `.order('id')` final partout — sans lui, deux lignes de même valeur pourraient
+  // changer de place d'une page à l'autre, et une ligne serait dupliquée pendant qu'une autre
+  // serait sautée, sans erreur.
   const [dossiers, fiches, paiementsAnnules] = await Promise.all([
-    lireParLotsDIds(idsDossiers, lot => supabase.from('dossiers').select('*').in('id', lot)),
-    // Même tri que la version unitaire (.order('date_creation')) : le tri est global ici, mais
-    // regrouper en préservant l'ordre de parcours laisse chaque épisode avec SES fiches dans ce
-    // même ordre.
-    lireParLotsDIds(idsEpisodes, lot => supabase.from('fiches').select('*').in('episode_id', lot).order('date_creation')),
+    lireParLotsDIds(idsDossiers, lot => supabase.from('dossiers').select('*').in('id', lot).order('id')),
+    // Même tri que la version unitaire (date_creation, départagé par id) : le tri est global ici,
+    // mais regrouper en préservant l'ordre de parcours laisse chaque épisode avec SES fiches dans
+    // ce même ordre.
+    lireParLotsDIds(idsEpisodes, lot => supabase.from('fiches').select('*').in('episode_id', lot).order('date_creation').order('id')),
     // episode_id est sélectionné en plus de fiche_id (la version unitaire n'en a pas besoin,
     // elle filtre déjà sur un seul épisode) — c'est lui qui permet de reconstituer, en mémoire,
     // le même Set par épisode.
-    lireParLotsDIds(idsEpisodes, lot => supabase.from('paiements').select('fiche_id, episode_id').in('episode_id', lot).eq('annule', true).not('fiche_id', 'is', null)),
+    lireParLotsDIds(idsEpisodes, lot => supabase.from('paiements').select('fiche_id, episode_id').in('episode_id', lot).eq('annule', true).not('fiche_id', 'is', null).order('id')),
   ]);
 
   const dossierParId = new Map(dossiers.map(d => [d.id, d]));
@@ -541,12 +559,15 @@ app.get('/api/episodes/:id/solde-depot', async (req, res) => {
 });
 
 app.get('/api/episodes', async (req, res) => {
-  const { data: episodes, error } = await supabase.from('episodes').select('*').order('date_ouverture', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
   // Lecture groupée (voir episodesVersFlatEnLot) : un nombre constant de requêtes par lot au lieu
   // de 3 par épisode. Résultat strictement identique — les deux chemins partagent le même
   // assemblage (assemblerEpisodeFlat).
   try {
+    // Paginée elle aussi : sans ça, un plafond de lignes côté Supabase aurait tronqué la liste
+    // des épisodes EN SILENCE (les plus anciens auraient simplement disparu des rapports, sans
+    // erreur) — le reste du correctif n'y aurait rien changé, puisque tout part de cette lecture.
+    const episodes = await lireToutesLesPages(
+      () => supabase.from('episodes').select('*').order('date_ouverture', { ascending: false }).order('id'));
     res.json(await episodesVersFlatEnLot(episodes));
   } catch (e) {
     // lireParLotsDIds relaie l'erreur Supabase plutôt que de renvoyer une liste incomplète en
@@ -1373,12 +1394,17 @@ app.get('/api/paiements', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre')) && !(await aPermission(req.user.id, 'caisse_voir'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler', 'demandes_repondre' ou 'caisse_voir' requise." });
   }
-  const { data, error } = await supabase
-    .from('paiements')
-    .select('*')
-    .order('date_paiement', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // Paginée (voir lireToutesLesPages) : cette route alimente la fiche de caisse, le rapprochement
+  // et les rapports partenaires. Un plafond de lignes côté Supabase aurait fait disparaître les
+  // paiements les plus ANCIENS sans la moindre erreur — un manque d'argent invisible dans les
+  // comptes. `.order('id')` en second rend le tri total, obligatoire dès qu'on pagine.
+  try {
+    res.json(await lireToutesLesPages(
+      () => supabase.from('paiements').select('*').order('date_paiement', { ascending: false }).order('id')));
+  } catch (e) {
+    console.error('GET /api/paiements: lecture paginée échouée :', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Route : création d'un paiement — idempotente via local_id, même principe que /api/fiches.

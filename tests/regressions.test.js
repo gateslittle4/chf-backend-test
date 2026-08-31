@@ -1218,3 +1218,42 @@ test("Lecture groupée : aucune ligne perdue même si le serveur plafonne les r�
   assert.ok(obtenu.every(e => e.fiches.length === 1), "toutes les fiches doivent être lues, malgré le plafond serveur");
   assert.ok(obtenu.every(e => e.totalGlobal === 70), "un total à 0 signalerait des fiches perdues par une pagination arrêtée trop tôt");
 });
+
+// Suite du 31/08 : les DEUX requêtes d'entrée des routes de liste (episodes, paiements) n'étaient
+// pas paginées. Un plafond de lignes côté Supabase les aurait tronquées SANS erreur — les épisodes
+// et paiements les plus anciens auraient disparu des rapports, un manque d'argent invisible.
+// Le reste du correctif n'y changeait rien : tout part de ces deux lectures.
+test("Routes de liste : /api/episodes et /api/paiements lisent TOUTES les pages (jamais une seule réponse potentiellement tronquée)", () => {
+  const blocEpisodes = serverSrc.slice(serverSrc.indexOf("app.get('/api/episodes'"), serverSrc.indexOf("app.post('/api/episodes'"));
+  assert.match(blocEpisodes, /lireToutesLesPages\(/, "la liste des épisodes doit être lue page par page");
+  assert.doesNotMatch(blocEpisodes, /await supabase\.from\('episodes'\)\.select\('\*'\)\.order\([^)]*\);/,
+    "l'ancienne lecture en une seule requête non paginée ne doit plus exister");
+
+  const blocPaiements = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
+  assert.match(blocPaiements, /lireToutesLesPages\(/, "la liste des paiements doit être lue page par page");
+});
+
+// Une lecture paginée sans tri TOTAL est un piège classique : deux lignes de même valeur peuvent
+// changer de place d'une page à l'autre, ce qui duplique une ligne et en saute une autre, sans
+// erreur. D'où le `.order('id')` final sur chaque requête paginée.
+test("Toute lecture paginée a un tri total (.order('id') en dernier) — sinon une ligne peut être dupliquée et une autre sautée entre deux pages", () => {
+  const blocLot = serverSrc.slice(serverSrc.indexOf('async function episodesVersFlatEnLot'), serverSrc.indexOf('const dossierParId'));
+  for (const table of ['dossiers', 'fiches', 'paiements']) {
+    const ligne = blocLot.split('\n').find(l => l.includes(`.from('${table}')`));
+    assert.ok(ligne, `requête sur ${table} introuvable dans la lecture groupée`);
+    assert.match(ligne, /\.order\('id'\)\s*\)?,?\s*$/, `la lecture de ${table} doit se terminer par .order('id') : elle est paginée, son tri doit être total`);
+  }
+  const blocEpisodes = serverSrc.slice(serverSrc.indexOf("app.get('/api/episodes'"), serverSrc.indexOf("app.post('/api/episodes'"));
+  assert.match(blocEpisodes, /\.order\('date_ouverture', \{ ascending: false \}\)\.order\('id'\)/, "la liste des épisodes est paginée : son tri doit être total");
+  const blocPaiements = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
+  assert.match(blocPaiements, /\.order\('date_paiement', \{ ascending: false \}\)\.order\('id'\)/, "la liste des paiements est paginée : son tri doit être total");
+});
+
+// Une seule implémentation de la pagination, appelée partout : c'est ce qui garantit qu'on ne
+// corrigera pas un jour la lecture des épisodes en oubliant celle des paiements (ou l'inverse).
+test("Une seule implémentation de la pagination (lireToutesLesPages), réutilisée par la lecture par lots d'ids", () => {
+  assert.strictEqual((serverSrc.match(/async function lireToutesLesPages/g) || []).length, 1, "la pagination ne doit exister qu'à un seul endroit");
+  const blocLots = serverSrc.slice(serverSrc.indexOf('async function lireParLotsDIds'), serverSrc.indexOf('async function episodesVersFlatEnLot'));
+  assert.match(blocLots, /lireToutesLesPages\(\(\) => construireRequete\(lot\)\)/, "la lecture par lots doit réutiliser lireToutesLesPages, jamais recopier sa boucle");
+  assert.doesNotMatch(blocLots, /\.range\(/, "plus aucune boucle de pagination dupliquée dans lireParLotsDIds");
+});
