@@ -1726,6 +1726,28 @@ app.post('/api/episodes/:id/rembourser-transferer-partenaire', async (req, res) 
     paiementsOriginaux.set(fiche.id, paiementOriginal);
   }
 
+  // Audit du 01/09 : une fiche à crédit voit son solde simplement ANNULÉ (rien n'a été encaissé,
+  // donc rien à rendre). Sauf si le patient avait déjà remboursé une partie de ce crédit en
+  // espèces : cet argent-là est bien sorti de sa poche et bien entré dans le tiroir. L'annulation
+  // ne le lui rend pas, et le partenaire est facturé pour la fiche entière — l'hôpital serait payé
+  // deux fois pour la même somme, et le patient perdrait ce qu'il a versé, sans que rien ne
+  // l'affiche nulle part.
+  // On ne peut pas rembourser automatiquement : un remboursement de crédit est rattaché à
+  // l'ÉPISODE, jamais à une fiche précise (voir toPaiementApi côté navigateur, aucun fiche_id) —
+  // impossible donc de savoir quelle part revient à quelle fiche. On refuse plutôt que de faire
+  // disparaître de l'argent en silence, en disant le montant exact et quoi faire.
+  const auMoinsUneFicheACredit = [...paiementsOriginaux.values()].some(p => p.mode === 'credit');
+  if (auMoinsUneFicheACredit) {
+    const dejaRembourse = paiementsEpisode
+      .filter(p => p.mode === 'remboursement_credit')
+      .reduce((s, p) => s + (parseFloat(p.montant) || 0), 0);
+    if (dejaRembourse > 0) {
+      return res.status(409).json({
+        error: `Ce patient a déjà remboursé ${dejaRembourse} Gdes de son crédit sur cet épisode. Annuler le crédit ne lui rendrait PAS cet argent, alors que le partenaire serait facturé pour la totalité — l'hôpital serait payé deux fois. Rends-lui d'abord ces ${dejaRembourse} Gdes à la caisse, puis recommence ce transfert. (Ou décoche les fiches payées à crédit.)`,
+      });
+    }
+  }
+
   const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
   const encaissePar = req.user.email || req.user.id;
   const maintenant = new Date().toISOString();

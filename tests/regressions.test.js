@@ -1344,3 +1344,27 @@ test("PATCH /api/depenses-caisse/:id/repondre exige caisse_travailler et verroui
   assert.match(bloc, /\.eq\('id', req\.params\.id\)\.eq\('statut', 'en_attente'\)/, "l'UPDATE doit rester conditionné à 'en_attente', sinon 2 caissiers pourraient traiter 2 fois la même demande");
   assert.match(bloc, /if \(!data \|\| data\.length === 0\) return res\.status\(409\)/, "0 ligne modifiée = déjà traitée entre-temps, jamais un faux succès");
 });
+
+// Audit du 01/09 — transfert rétroactif vers un partenaire (CAS 2). Une fiche à crédit voit son
+// solde simplement ANNULÉ : rien n'a été encaissé, donc rien à rendre. Sauf si le patient avait
+// déjà remboursé une partie de ce crédit en espèces — cet argent est bien sorti de sa poche et
+// entré dans le tiroir. L'annulation ne le lui rend pas, et le partenaire est facturé pour la
+// fiche entière : l'hôpital encaisse deux fois la même somme et le patient perd ce qu'il a versé,
+// sans que rien ne l'affiche nulle part.
+test("Transfert partenaire : refuse d'annuler un crédit déjà partiellement remboursé en espèces", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const debut = src.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'");
+  assert.notStrictEqual(debut, -1, 'la route doit exister');
+  const route = src.slice(debut, src.indexOf('\napp.', debut + 10));
+
+  assert.match(route, /const auMoinsUneFicheACredit = \[\.\.\.paiementsOriginaux\.values\(\)\]\.some\(p => p\.mode === 'credit'\);/);
+  assert.match(route, /\.filter\(p => p\.mode === 'remboursement_credit'\)/, "doit regarder ce que le patient a déjà remboursé");
+  assert.match(route, /res\.status\(409\)/, "refus explicite, jamais une annulation silencieuse");
+  assert.match(route, /l'hôpital serait payé deux fois/, "le message doit dire le vrai risque");
+  assert.match(route, /Rends-lui d'abord ces \$\{dejaRembourse\} Gdes/, "et quoi faire pour débloquer");
+
+  // Le contrôle doit précéder TOUTE écriture : un refus après la création du nouvel épisode
+  // laisserait une correction financière à moitié faite.
+  assert.ok(route.indexOf('auMoinsUneFicheACredit') < route.indexOf("from('episodes').insert("),
+    "le refus doit tomber avant la première insertion");
+});
