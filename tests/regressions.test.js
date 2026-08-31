@@ -971,3 +971,42 @@ test("episodeVersFlat : le calcul du séjour, exécuté réellement, reproduit l
   const sansSortie = executer([{ raw_state: { dateEntree1: '2026-09-01' } }]);
   assert.strictEqual(sansSortie.periodeSejourString, '01/09');
 });
+
+// Audit du 31/08 : 5 tables réellement utilisées par l'application ne figuraient pas dans
+// TABLES_A_SAUVEGARDER et n'étaient donc sauvegardées NULLE PART — dont demandes_exoneration,
+// la trace de qui a accordé quelle remise et pour quel montant. Personne n'aurait pu s'en rendre
+// compte avant d'avoir besoin d'une restauration. Ce test se maintient tout seul : toute nouvelle
+// table utilisée par le serveur OU par le navigateur doit être ajoutée à la liste, sinon il casse.
+test("Sauvegarde automatique : toute table utilisée par l'app (serveur ou navigateur) figure dans TABLES_A_SAUVEGARDER", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const TABLES_A_SAUVEGARDER'), serverSrc.indexOf('async function sauvegarderVersStorage'));
+  const sauvegardees = new Set([...bloc.matchAll(/'([a-z_]+)'/g)].map(m => m[1]));
+
+  const utilisees = new Set([...serverSrc.matchAll(/\.from\('([a-z_]+)'\)/g)].map(m => m[1]));
+  // Le navigateur parle à certaines tables directement (shim db / client supabase), sans passer
+  // par le serveur : elles n'apparaissent donc jamais dans server.js et se faisaient oublier.
+  const dossierApp = path.join(__dirname, '..', '..', 'chf-app2');
+  for (const sousDossier of ['components', 'app', 'api', 'utils']) {
+    const chemin = path.join(dossierApp, sousDossier);
+    if (!fs.existsSync(chemin)) continue;
+    for (const f of fs.readdirSync(chemin).filter(x => x.endsWith('.js'))) {
+      const src = fs.readFileSync(path.join(chemin, f), 'utf8');
+      for (const m of src.matchAll(/(?:db\.collection\('|supabase\.from\(')([a-z_]+)'/g)) utilisees.add(m[1]);
+    }
+  }
+  // 'storage' n'est pas une table (API Storage de Supabase), 'catalog' couvre médicaments/actes/paramètres.
+  utilisees.delete('storage');
+
+  const oubliees = [...utilisees].filter(t => !sauvegardees.has(t)).sort();
+  assert.deepStrictEqual(oubliees, [], `Table(s) utilisée(s) par l'app mais JAMAIS sauvegardée(s) : ${oubliees.join(', ')} — ajoute-les à TABLES_A_SAUVEGARDER`);
+});
+
+test("Sauvegarde automatique : une table illisible ne fait plus échouer la sauvegarde entière, et le trou est signalé", () => {
+  const debut = serverSrc.indexOf('async function sauvegarderVersStorage');
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', serverSrc.indexOf('return { fichier: nomFichier', debut)));
+  assert.match(bloc, /tablesEnEchec\.push\(/, "une table illisible doit être collectée, pas interrompre tout le reste");
+  assert.doesNotMatch(bloc, /if \(error\) throw new Error\(`Lecture de/, "l'ancien comportement tout-ou-rien ne doit plus exister : une seule table en défaut privait de TOUTE sauvegarde");
+  assert.match(bloc, /contenu\._tables_en_echec = tablesEnEchec/, "le trou doit être inscrit dans le fichier de sauvegarde lui-même");
+  assert.match(bloc, /throw new Error\(`Aucune table n'a pu être lue/, "si RIEN n'est lisible, il faut quand même échouer franchement");
+  const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'"), serverSrc.indexOf('// Déclenchement manuel'));
+  assert.match(blocCron, /resultat\.tablesEnEchec && resultat\.tablesEnEchec\.length > 0/, "une sauvegarde partielle doit déclencher une alerte WhatsApp, sinon le trou reste invisible des mois");
+});

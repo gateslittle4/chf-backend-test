@@ -1861,14 +1861,37 @@ app.post('/api/notifications/exoneration-demandee', async (req, res) => {
 // le disque du serveur Render (éphémère — perdu à chaque redéploiement).
 // ============================================================
 const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
-const TABLES_A_SAUVEGARDER = ['dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires', 'users', 'audit_log'];
+// Audit du 31/08 : 5 tables réellement utilisées par l'app manquaient à cette liste et n'étaient
+// donc sauvegardées NULLE PART — dont demandes_exoneration, qui est la trace de qui a accordé
+// quelle remise et pour quel montant (donnée financière sensible). Les 4 autres :
+// pieces_jointes (documents des patients), requisitions, transferts_service (mouvements des
+// patients entre services) et salaires_service (base du calcul de rentabilité dans Analytics).
+const TABLES_A_SAUVEGARDER = [
+  'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
+  'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
+  'transferts_service', 'salaires_service',
+];
 
 async function sauvegarderVersStorage() {
   const contenu = { genere_le: new Date().toISOString() };
+  // Une table illisible (pas encore créée, renommée, RLS trop stricte) faisait échouer la
+  // sauvegarde ENTIÈRE : plus aucune donnée protégée, pour une seule table en défaut. On continue
+  // désormais table par table et on remonte la liste des échecs — une sauvegarde partielle vaut
+  // infiniment mieux que pas de sauvegarde du tout, à condition que le trou soit annoncé (il
+  // l'est : dans le fichier lui-même, dans les logs, et dans l'alerte WhatsApp quotidienne).
+  const tablesEnEchec = [];
   for (const table of TABLES_A_SAUVEGARDER) {
     const { data, error } = await supabase.from(table).select('*');
-    if (error) throw new Error(`Lecture de "${table}" : ${error.message}`);
+    if (error) {
+      console.error(`⚠️ Sauvegarde : table "${table}" illisible — ${error.message}`);
+      tablesEnEchec.push(`${table} (${error.message})`);
+      continue;
+    }
     contenu[table] = data;
+  }
+  if (tablesEnEchec.length > 0) contenu._tables_en_echec = tablesEnEchec;
+  if (Object.keys(contenu).filter(k => !k.startsWith('_') && k !== 'genere_le').length === 0) {
+    throw new Error(`Aucune table n'a pu être lue : ${tablesEnEchec.join(' ; ')}`);
   }
 
   const { data: buckets, error: erreurListeBuckets } = await supabase.storage.listBuckets();
@@ -1893,8 +1916,10 @@ async function sauvegarderVersStorage() {
     await supabase.storage.from(BUCKET_SAUVEGARDES).remove(aSupprimer);
   }
 
-  const nombreLignes = Object.fromEntries(TABLES_A_SAUVEGARDER.map(t => [t, contenu[t].length]));
-  return { fichier: nomFichier, nombreLignes };
+  const nombreLignes = Object.fromEntries(
+    TABLES_A_SAUVEGARDER.filter(t => contenu[t]).map(t => [t, contenu[t].length])
+  );
+  return { fichier: nomFichier, nombreLignes, tablesEnEchec };
 }
 
 // Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le
@@ -1904,6 +1929,11 @@ cron.schedule('0 6 * * *', async () => {
   try {
     const resultat = await sauvegarderVersStorage();
     console.log(`✅ Sauvegarde automatique : ${resultat.fichier}`, resultat.nombreLignes);
+    // Une sauvegarde PARTIELLE réussit techniquement mais laisse un trou : sans alerte, personne
+    // ne saurait qu'une table n'est plus protégée, parfois pendant des mois.
+    if (resultat.tablesEnEchec && resultat.tablesEnEchec.length > 0) {
+      await envoyerCallMeBot(`⚠️ CHF : sauvegarde faite, mais ${resultat.tablesEnEchec.length} table(s) n'ont PAS pu être sauvegardées — ${resultat.tablesEnEchec.join(' ; ')}`);
+    }
   } catch (e) {
     console.error('❌ Échec de la sauvegarde automatique :', e.message);
     // Retour d'Esdras (29/08) : seul moyen de savoir qu'une sauvegarde a échoué jusqu'ici était de
