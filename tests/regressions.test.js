@@ -929,3 +929,45 @@ test("POST /api/notifications/exoneration-demandee existe, protégée par verify
   assert.match(bloc, /envoyerCallMeBot\(`🎯 CHF : demande d'exonération/);
   assert.match(bloc, /res\.json\(\{ success: true \}\); \/\/ best-effort/, "doit toujours répondre 200, ne jamais faire échouer la demande côté écran si l'alerte échoue");
 });
+
+// Audit du 31/08 (veille du lancement) : dateEntreePourTri et periodeSejourString sont des
+// vestiges de l'époque Firestore — le navigateur les calculait à l'archivage et les envoyait,
+// mais aucune colonne d'episodes ne les stocke, ni POST ni PUT ne les écrit, et episodeVersFlat
+// ne les renvoyait pas. Tout dossier relu depuis le serveur les recevait donc `undefined`.
+// Le plus grave : ArchivesPanel filtre par date via `new Date(v.dateEntreePourTri)` et écarte la
+// ligne si la date est invalide → AUCUN dossier ne ressortait dès qu'un filtre de date était posé,
+// sur l'écran même qui sert à préparer les factures partenaires.
+test("episodeVersFlat renvoie dateEntreePourTri et periodeSejourString, recalculés depuis le raw_state des fiches (aucune colonne ne les stocke)", () => {
+  const debut = serverSrc.indexOf('async function episodeVersFlat(ep) {');
+  assert.ok(debut !== -1, "episodeVersFlat introuvable");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', debut));
+  assert.match(bloc, /dateEntreePourTri: datesSejour\.length > 0 \? datesSejour\[0\]\.in : '9999-12-31'/, "sans exeat, la valeur doit rester une date VALIDE (convention 9999-12-31 du navigateur) — sinon le filtre de date fait à nouveau disparaître la ligne");
+  assert.match(bloc, /periodeSejourString,/, "la colonne 'période de séjour' de l'export Excel partenaire en dépend");
+  assert.match(bloc, /const rs = f\.raw_state \|\| \{\};/, "doit lire le raw_state des fiches, seul endroit où les dates de séjour sont réellement persistées");
+});
+
+test("episodeVersFlat : le calcul du séjour, exécuté réellement, reproduit la mise en forme du navigateur (une date seule, une période, deux périodes, aucun séjour)", () => {
+  const debut = serverSrc.indexOf('const datesSejour = [];');
+  const fin = serverSrc.indexOf("\n\n  return {", debut);
+  assert.ok(debut !== -1 && fin > debut, "bloc de calcul du séjour introuvable");
+  const calcul = serverSrc.slice(debut, fin);
+  const executer = new Function('fiches', `${calcul}; return { datesSejour, periodeSejourString };`);
+
+  const aucun = executer([{ raw_state: {} }]);
+  assert.strictEqual(aucun.periodeSejourString, '—', "une consultation sans séjour n'affiche pas de période");
+  assert.strictEqual(aucun.datesSejour.length, 0);
+
+  const memeJour = executer([{ raw_state: { dateEntree1: '2026-09-01', dateSortie1: '2026-09-01' } }]);
+  assert.strictEqual(memeJour.periodeSejourString, '01/09', "entrée et sortie le même jour : une seule date, pas 'du X au X'");
+
+  const periode = executer([{ raw_state: { dateEntree1: '2026-09-01', dateSortie1: '2026-09-04' } }]);
+  assert.strictEqual(periode.periodeSejourString, 'du 01/09 au 04/09');
+  assert.strictEqual(periode.datesSejour[0].in, '2026-09-01', "dateEntreePourTri doit être la date d'ENTRÉE, au format triable AAAA-MM-JJ");
+
+  const deux = executer([{ raw_state: { dateEntree1: '2026-09-01', dateSortie1: '2026-09-04', multiPeriode: true, dateEntree2: '2026-09-10', dateSortie2: '2026-09-12' } }]);
+  assert.strictEqual(deux.periodeSejourString, 'du 01/09 au 04/09 et du 10/09 au 12/09', "un séjour en deux périodes doit apparaître en entier sur la facture partenaire");
+
+  // Une sortie manquante (hospitalisation encore en cours) ne doit pas produire "du 01/09 au undefined".
+  const sansSortie = executer([{ raw_state: { dateEntree1: '2026-09-01' } }]);
+  assert.strictEqual(sansSortie.periodeSejourString, '01/09');
+});

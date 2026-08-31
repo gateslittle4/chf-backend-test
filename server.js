@@ -324,6 +324,30 @@ async function episodeVersFlat(ep) {
   // fiches réelles en base. Recalculé ici à chaque lecture, à partir des vraies fiches — source
   // unique de vérité, plutôt que de rapiécer chaque écran qui lit ce total un par un.
   const totalGlobal = (fiches || []).reduce((s, f) => fichesAvecPaiementAnnule.has(f.id) ? s : s + (Number(f.total_global) || 0), 0);
+
+  // Même raison que totalGlobal juste au-dessus : dateEntreePourTri et periodeSejourString
+  // n'existent sur AUCUNE colonne d'episodes — le navigateur les calculait à l'archivage
+  // (executerArchivage) et les envoyait, mais ni POST ni PUT /api/episodes ne les écrit, et cette
+  // fonction ne les renvoyait pas. Tout dossier relu depuis le serveur (F5, autre poste, écran
+  // Archives) les recevait donc `undefined`, avec deux conséquences concrètes :
+  //   - ArchivesPanel filtre par date via `new Date(v.dateEntreePourTri)` puis écarte la ligne si
+  //     la date est invalide → AUCUN dossier ne ressortait dès qu'un filtre de date était posé,
+  //     précisément l'écran qui sert à préparer les factures partenaires ;
+  //   - la colonne "période de séjour" de l'export Excel partenaire retombait sur la date
+  //     d'ouverture du dossier, et Archives affichait "sans exeat" en rouge sur des
+  //     hospitalisations pourtant correctement datées.
+  // Recalculés ici depuis le raw_state des fiches (lui bien persisté), avec exactement la même
+  // logique que le navigateur — le serveur redevient la source unique de vérité.
+  const datesSejour = [];
+  for (const f of (fiches || [])) {
+    const rs = f.raw_state || {};
+    if (rs.dateEntree1) datesSejour.push({ in: rs.dateEntree1, out: rs.dateSortie1 || rs.dateEntree1 });
+    if (rs.multiPeriode && rs.dateEntree2) datesSejour.push({ in: rs.dateEntree2, out: rs.dateSortie2 || rs.dateEntree2 });
+  }
+  const jourMois = (d) => String(d).split('-').reverse().slice(0, 2).join('/');
+  const periodeSejourString = datesSejour.length === 0 ? '—'
+    : datesSejour.map(d => d.in === d.out ? jourMois(d.in) : `du ${jourMois(d.in)} au ${jourMois(d.out)}`).join(' et ');
+
   return {
     id: ep.id,
     nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
@@ -343,6 +367,10 @@ async function episodeVersFlat(ep) {
     dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
     timestamp: new Date(ep.date_ouverture).getTime(),
     totalGlobal,
+    // '9999-12-31' = la même convention "sans exeat" que le navigateur : trie ces dossiers en fin
+    // de liste tout en restant une date VALIDE, pour ne pas refaire disparaître la ligne du filtre.
+    dateEntreePourTri: datesSejour.length > 0 ? datesSejour[0].in : '9999-12-31',
+    periodeSejourString,
     fiches: (fiches || []).map(f => ficheVersFlat(f, fichesAvecPaiementAnnule)),
   };
 }
