@@ -89,8 +89,24 @@ const PERMISSIONS_PAR_DEFAUT = [
 // contient (ou pas) le tableau enregistré — un vrai superutilisateur, jamais soumis aux aléas
 // d'une sauvegarde ni d'un mirroir qui dérive.
 async function aPermission(userId, cle) {
-  const { data: profil } = await supabase.from('users').select('role').eq('id', userId).maybeSingle();
+  const { data: profil } = await supabase.from('users').select('role, active, date_expiration').eq('id', userId).maybeSingle();
   if (!profil) return false;
+  // Correctif sécurité (audit du 31/08) : un compte DÉSACTIVÉ ou dont l'accès a EXPIRÉ était
+  // refusé uniquement côté navigateur (chargerProfil, api/firebase.js, qui déconnecte au
+  // chargement du profil). Le serveur, lui, ne regardait que le rôle : verifyToken valide le jeton
+  // Firebase — donc l'identité — mais jamais le statut du compte. Conséquences réelles :
+  //   - une personne renvoyée dont on vient de désactiver le compte continuait de travailler
+  //     normalement tant qu'elle ne rechargeait pas sa page (chargerProfil ne tourne qu'au
+  //     changement d'état d'authentification) ;
+  //   - un jeton Firebase encore valide (il se renouvelle tout seul) permettait d'appeler l'API
+  //     directement, sans jamais repasser par l'écran qui déconnecte.
+  // Or c'est exactement le mécanisme utilisé pour couper l'accès à quelqu'un. Vérifié ici, à
+  // CHAQUE requête, et AVANT le raccourci administrateur (un administrateur désactivé doit
+  // l'être aussi). Mêmes règles que côté navigateur : active absent/NULL = actif (on ne bloque
+  // jamais un compte qui n'a simplement pas encore ce champ), date d'expiration absente = pas
+  // d'expiration.
+  if (profil.active === false) return false;
+  if (profil.date_expiration && new Date(profil.date_expiration) < new Date()) return false;
   if (profil.role === 'administrateur') return true;
   const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'permissions').maybeSingle();
   const table = (catalogue && catalogue.items && catalogue.items.length > 0) ? catalogue.items : PERMISSIONS_PAR_DEFAUT;

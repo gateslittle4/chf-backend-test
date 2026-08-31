@@ -1275,3 +1275,20 @@ test("GET /api/episodes/:id/solde-depot exige fiche_patient_voir_finances — m�
   const blocHisto = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"));
   assert.match(blocHisto.slice(0, 2500), /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/, "l'historique doit continuer de filtrer les montants côté serveur");
 });
+
+// ⚠️ Correctif sécurité (audit du 31/08). Un compte DÉSACTIVÉ ou dont l'accès a EXPIRÉ n'était
+// refusé que côté navigateur (chargerProfil, api/firebase.js). Le serveur ne regardait que le
+// rôle : verifyToken valide le jeton Firebase — donc l'identité — jamais le statut du compte.
+// Donc une personne renvoyée dont on venait de désactiver le compte continuait de travailler tant
+// qu'elle ne rechargeait pas sa page, et un jeton encore valide (il se renouvelle seul) permettait
+// d'appeler l'API directement. C'est pourtant LE mécanisme utilisé pour couper un accès.
+test("aPermission refuse un compte désactivé ou expiré, à chaque requête et avant le raccourci administrateur", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function aPermission'), serverSrc.indexOf('// Correctif sécurité (27/08'));
+  assert.match(bloc, /\.select\('role, active, date_expiration'\)/, "les 3 champs doivent être lus, pas seulement le rôle");
+  assert.match(bloc, /if \(profil\.active === false\) return false;/, "un compte désactivé doit être refusé");
+  assert.match(bloc, /if \(profil\.date_expiration && new Date\(profil\.date_expiration\) < new Date\(\)\) return false;/, "un accès expiré doit être refusé");
+  // Doit passer AVANT le raccourci administrateur, sinon un administrateur désactivé reste tout-puissant.
+  assert.ok(bloc.indexOf('profil.active === false') < bloc.indexOf("profil.role === 'administrateur'"), "le contrôle doit précéder le raccourci administrateur");
+  // active NULL/absent = actif : ne jamais bloquer un compte qui n'a pas encore ce champ.
+  assert.doesNotMatch(bloc, /if \(!profil\.active\) return false;/, "active absent/NULL doit rester ACTIF (mêmes règles que le navigateur), sinon on verrouille tout le monde");
+});
