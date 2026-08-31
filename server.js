@@ -317,6 +317,15 @@ async function episodeVersFlat(ep) {
   const { data: paiementsAnnules } = await supabase
     .from('paiements').select('fiche_id').eq('episode_id', ep.id).eq('annule', true).not('fiche_id', 'is', null);
   const fichesAvecPaiementAnnule = new Set((paiementsAnnules || []).map(p => p.fiche_id));
+  return assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule);
+}
+
+// Assemblage PUR (aucune requête) d'un épisode + ses données liées vers la forme "flat" attendue
+// par le navigateur. Extrait d'episodeVersFlat le 31/08 sans en changer une ligne, pour que le
+// chemin UNITAIRE (episodeVersFlat, 3 requêtes) et le chemin GROUPÉ (episodesVersFlatEnLot, plus
+// bas) produisent forcément le MÊME objet : c'est le seul moyen sûr de garantir qu'ils ne
+// divergeront jamais. Ne jamais dupliquer cette logique ailleurs — l'appeler.
+function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
   // episodes n'a pas de colonne total_global — ce total n'existait qu'en mémoire côté
   // navigateur, calculé une fois à l'archivage (executerArchivage) et jamais recalculé au
   // chargement suivant. Tout dossier rechargé depuis le serveur (nouvel onglet, F5, écran
@@ -374,6 +383,103 @@ async function episodeVersFlat(ep) {
     fiches: (fiches || []).map(f => ficheVersFlat(f, fichesAvecPaiementAnnule)),
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Lecture GROUPÉE des épisodes (audit du 31/08 — "priorité n°1 après le lancement", faite avant)
+//
+// Avant : GET /api/episodes appelait episodeVersFlat sur CHAQUE épisode, soit 3 requêtes Supabase
+// par épisode (dossier, fiches, paiements annulés). À 50 dossiers/jour, après 2 mois (~3000
+// épisodes) cela faisait ~9000 requêtes à chaque ouverture du tableau de bord — lent, puis
+// inutilisable. Ici : un nombre CONSTANT de requêtes par tranche d'ids, quel que soit le nombre
+// d'épisodes, en assemblant les correspondances en mémoire.
+//
+// Deux plafonds à ne jamais oublier en lisant en gros volume — les ignorer ferait échouer ce
+// correctif exactement à l'échelle qu'il vise à corriger :
+//   1. Longueur d'URL : un `.in('id', [...])` met tous les ids DANS l'URL. 3000 UUID = ~111 ko,
+//      très au-dessus de ce qu'accepte PostgREST/nginx → ids découpés en lots (TAILLE_LOT_IDS).
+//   2. Plafond de lignes par réponse : PostgREST tronque SANS ERREUR au-delà d'un maximum
+//      (souvent 1000 chez Supabase) — les lignes en trop disparaîtraient silencieusement des
+//      rapports. Chaque lecture est donc paginée explicitement par .range() jusqu'à épuisement.
+const TAILLE_LOT_IDS = 200;      // ids par requête `.in()` — garde l'URL très en dessous des limites
+const TAILLE_PAGE_LECTURE = 500; // lignes par page `.range()` — sous tout plafond PostgREST courant
+
+function enLots(tableau, taille) {
+  const lots = [];
+  for (let i = 0; i < tableau.length; i += taille) lots.push(tableau.slice(i, i + taille));
+  return lots;
+}
+
+// Exécute construireRequete(ids) pour chaque lot d'ids, en paginant chaque lot jusqu'à épuisement,
+// et renvoie toutes les lignes concaténées. Lève l'erreur Supabase telle quelle : une lecture
+// partielle silencieuse serait pire qu'un échec visible (des dossiers manquants dans un rapport
+// financier ne se remarquent pas).
+async function lireParLotsDIds(ids, construireRequete) {
+  const lignes = [];
+  for (const lot of enLots(ids, TAILLE_LOT_IDS)) {
+    // Avance du nombre de lignes RÉELLEMENT reçues, et ne s'arrête que sur une page VIDE — jamais
+    // sur une page "plus petite que demandé". C'est ce qui rend cette lecture correcte quel que
+    // soit le plafond configuré côté Supabase : si le serveur plafonne à 100 lignes alors qu'on
+    // en demande 500, s'arrêter sur "page incomplète" perdrait tout le reste EN SILENCE (le piège
+    // signalé par l'audit du 31/08). Coût : une requête supplémentaire par lot, négligeable.
+    for (let debut = 0; ; ) {
+      const { data, error } = await construireRequete(lot).range(debut, debut + TAILLE_PAGE_LECTURE - 1);
+      if (error) throw error;
+      const page = data || [];
+      if (page.length === 0) break;
+      lignes.push(...page);
+      debut += page.length;
+    }
+  }
+  return lignes;
+}
+
+// Même résultat qu'appeler episodeVersFlat sur chaque épisode (assemblage strictement identique,
+// via assemblerEpisodeFlat), mais en un nombre constant de requêtes par lot au lieu de 3 par
+// épisode.
+async function episodesVersFlatEnLot(episodes) {
+  if (!episodes || episodes.length === 0) return [];
+  const idsEpisodes = episodes.map(ep => ep.id);
+  const idsDossiers = [...new Set(episodes.map(ep => ep.dossier_id).filter(Boolean))];
+
+  const [dossiers, fiches, paiementsAnnules] = await Promise.all([
+    lireParLotsDIds(idsDossiers, lot => supabase.from('dossiers').select('*').in('id', lot)),
+    // Même tri que la version unitaire (.order('date_creation')) : le tri est global ici, mais
+    // regrouper en préservant l'ordre de parcours laisse chaque épisode avec SES fiches dans ce
+    // même ordre.
+    lireParLotsDIds(idsEpisodes, lot => supabase.from('fiches').select('*').in('episode_id', lot).order('date_creation')),
+    // episode_id est sélectionné en plus de fiche_id (la version unitaire n'en a pas besoin,
+    // elle filtre déjà sur un seul épisode) — c'est lui qui permet de reconstituer, en mémoire,
+    // le même Set par épisode.
+    lireParLotsDIds(idsEpisodes, lot => supabase.from('paiements').select('fiche_id, episode_id').in('episode_id', lot).eq('annule', true).not('fiche_id', 'is', null)),
+  ]);
+
+  const dossierParId = new Map(dossiers.map(d => [d.id, d]));
+  const fichesParEpisode = new Map();
+  for (const f of fiches) {
+    if (!fichesParEpisode.has(f.episode_id)) fichesParEpisode.set(f.episode_id, []);
+    fichesParEpisode.get(f.episode_id).push(f);
+  }
+  const annuleesParEpisode = new Map();
+  for (const p of paiementsAnnules) {
+    if (!annuleesParEpisode.has(p.episode_id)) annuleesParEpisode.set(p.episode_id, new Set());
+    annuleesParEpisode.get(p.episode_id).add(p.fiche_id);
+  }
+
+  return episodes.map(ep => {
+    // Même signalement que la version unitaire : un épisode dont le dossier est illisible
+    // apparaîtrait comme un patient "sans nom", sans le moindre signal, s'il restait silencieux.
+    if (ep.dossier_id && !dossierParId.has(ep.dossier_id)) {
+      console.error(`⚠️ episodesVersFlatEnLot: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id})`);
+    }
+    return assemblerEpisodeFlat(
+      ep,
+      dossierParId.get(ep.dossier_id),
+      fichesParEpisode.get(ep.id) || [],
+      annuleesParEpisode.get(ep.id) || new Set(),
+    );
+  });
+}
+// ---------------------------------------------------------------------------------------------
 
 // Retour d'Esdras (26/08) : un dépôt (paiement mode='depot', jamais lié à une fiche précise —
 // voir episodeVersFlat ci-dessus) n'était jusqu'ici JAMAIS décrémenté au fur et à mesure de sa
@@ -437,8 +543,17 @@ app.get('/api/episodes/:id/solde-depot', async (req, res) => {
 app.get('/api/episodes', async (req, res) => {
   const { data: episodes, error } = await supabase.from('episodes').select('*').order('date_ouverture', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
-  const resultats = await Promise.all((episodes || []).map(episodeVersFlat));
-  res.json(resultats);
+  // Lecture groupée (voir episodesVersFlatEnLot) : un nombre constant de requêtes par lot au lieu
+  // de 3 par épisode. Résultat strictement identique — les deux chemins partagent le même
+  // assemblage (assemblerEpisodeFlat).
+  try {
+    res.json(await episodesVersFlatEnLot(episodes));
+  } catch (e) {
+    // lireParLotsDIds relaie l'erreur Supabase plutôt que de renvoyer une liste incomplète en
+    // silence : mieux vaut un échec visible que des dossiers manquants dans un rapport financier.
+    console.error('GET /api/episodes: lecture groupée échouée :', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Création : pas de dossier_id fourni par l'ancien flux (il ne connaît que la

@@ -938,8 +938,10 @@ test("POST /api/notifications/exoneration-demandee existe, protégée par verify
 // ligne si la date est invalide → AUCUN dossier ne ressortait dès qu'un filtre de date était posé,
 // sur l'écran même qui sert à préparer les factures partenaires.
 test("episodeVersFlat renvoie dateEntreePourTri et periodeSejourString, recalculés depuis le raw_state des fiches (aucune colonne ne les stocke)", () => {
-  const debut = serverSrc.indexOf('async function episodeVersFlat(ep) {');
-  assert.ok(debut !== -1, "episodeVersFlat introuvable");
+  // L'assemblage a été extrait dans assemblerEpisodeFlat le 31/08 (lecture groupée des épisodes) —
+  // les vérifications ci-dessous sont inchangées, seul le repère de découpe suit le déplacement.
+  const debut = serverSrc.indexOf('function assemblerEpisodeFlat(');
+  assert.ok(debut !== -1, "assemblerEpisodeFlat introuvable");
   const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', debut));
   assert.match(bloc, /dateEntreePourTri: datesSejour\.length > 0 \? datesSejour\[0\]\.in : '9999-12-31'/, "sans exeat, la valeur doit rester une date VALIDE (convention 9999-12-31 du navigateur) — sinon le filtre de date fait à nouveau disparaître la ligne");
   assert.match(bloc, /periodeSejourString,/, "la colonne 'période de séjour' de l'export Excel partenaire en dépend");
@@ -1009,4 +1011,210 @@ test("Sauvegarde automatique : une table illisible ne fait plus échouer la sauv
   assert.match(bloc, /throw new Error\(`Aucune table n'a pu être lue/, "si RIEN n'est lisible, il faut quand même échouer franchement");
   const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'"), serverSrc.indexOf('// Déclenchement manuel'));
   assert.match(blocCron, /resultat\.tablesEnEchec && resultat\.tablesEnEchec\.length > 0/, "une sauvegarde partielle doit déclencher une alerte WhatsApp, sinon le trou reste invisible des mois");
+});
+
+// ============================================================================================
+// Lecture groupée des épisodes (31/08) — le risque de montée en charge n°1 de l'audit :
+// GET /api/episodes appelait episodeVersFlat sur CHAQUE épisode, soit 3 requêtes Supabase par
+// épisode (~9000 requêtes pour 3000 épisodes). Remplacé par episodesVersFlatEnLot, qui lit en lots.
+//
+// Ces tests EXÉCUTENT réellement le code extrait de server.js (même approche que le test de calcul
+// du séjour plus haut), avec un faux client Supabase en mémoire. Ils ne vérifient pas seulement
+// que le code "a l'air correct" : ils comparent les DEUX chemins ligne par ligne. C'est le seul
+// moyen de garantir qu'un refactor de performance n'a rien changé aux chiffres affichés.
+// ============================================================================================
+
+// Extrait les fonctions de conversion + les deux chemins de lecture de server.js, et les exécute
+// avec un `supabase` injecté. Le bloc est contigu dans server.js (statutVersFlat -> fin de
+// episodesVersFlatEnLot), donc rien n'est recopié ici : c'est le VRAI code qui est testé.
+function chargerLecteursEpisodes(supabase) {
+  const debut = serverSrc.indexOf('function statutVersFlat(ep) {');
+  const marqueurFin = serverSrc.indexOf('async function episodesVersFlatEnLot');
+  const fin = serverSrc.indexOf('\n}', serverSrc.indexOf('return episodes.map(ep => {', marqueurFin)) + 2;
+  assert.ok(debut !== -1 && marqueurFin > debut && fin > marqueurFin, "bloc de lecture des épisodes introuvable dans server.js");
+  const code = serverSrc.slice(debut, fin);
+  return new Function('supabase', 'console', `${code}\nreturn { episodeVersFlat, episodesVersFlatEnLot };`)(
+    supabase,
+    { ...console, error: () => {} }, // les avertissements "dossier introuvable" sont attendus ici
+  );
+}
+
+// Faux client Supabase : juste assez pour les enchaînements utilisés par les deux chemins
+// (.select/.eq/.in/.not/.order/.range/.single, et l'attente directe de la requête).
+function faireFauxSupabase(donnees, compteur) {
+  return {
+    from(table) {
+      compteur.requetes++;
+      const etat = { eq: [], in: null, notNull: null, order: null };
+      const lignes = () => {
+        let r = (donnees[table] || []).slice();
+        for (const [col, val] of etat.eq) r = r.filter(l => l[col] === val);
+        if (etat.in) r = r.filter(l => etat.in.valeurs.includes(l[etat.in.colonne]));
+        if (etat.notNull) r = r.filter(l => l[etat.notNull] !== null && l[etat.notNull] !== undefined);
+        if (etat.order) r = r.sort((a, b) => String(a[etat.order]).localeCompare(String(b[etat.order])));
+        return r;
+      };
+      const api = {
+        select: () => api,
+        eq: (col, val) => { etat.eq.push([col, val]); return api; },
+        in: (col, valeurs) => {
+          // Simule la limite réelle : PostgREST met tous les ids dans l'URL, qui a une longueur
+          // maximale. Sans découpage en lots, la requête échouerait en production (414) — ici elle
+          // échoue franchement, pour que le test le voie au lieu de passer à côté.
+          if (valeurs.length > 200) throw new Error(`URL trop longue : ${valeurs.length} ids dans un seul .in() — le découpage en lots a disparu`);
+          etat.in = { colonne: col, valeurs }; return api;
+        },
+        not: (col) => { etat.notNull = col; return api; },
+        order: (col) => { etat.order = col; return api; },
+        range: (d, f) => Promise.resolve({ data: lignes().slice(d, f + 1), error: null }),
+        single: () => {
+          const r = lignes();
+          return Promise.resolve(r.length === 1 ? { data: r[0], error: null } : { data: null, error: { message: 'aucune ligne' } });
+        },
+        then: (ok, ko) => Promise.resolve({ data: lignes(), error: null }).then(ok, ko),
+      };
+      return api;
+    },
+  };
+}
+
+// Jeu de données couvrant les cas qui cassent typiquement un refactor de ce genre.
+function donneesDeTest() {
+  const dossiers = [
+    { id: 'dos-1', nom: 'Patient Un', numero_dossier: 'D-001', telephone: '3000', adresse: 'Fontaine', date_naissance: '1990-01-01' },
+    { id: 'dos-2', nom: 'Patient Deux', numero_dossier: 'D-002', telephone: null, adresse: null, date_naissance: null },
+  ];
+  const episodes = [
+    // Deux épisodes qui PARTAGENT le même dossier — un regroupement naïf par dossier les mélangerait.
+    { id: 'ep-1', dossier_id: 'dos-1', type_patient: 'prive', service: 'Urgences', statut: 'ouvert', est_hospitalisation: true, voie_entree: 'consultation', date_ouverture: '2026-08-20T08:00:00Z', lit: 'L1' },
+    { id: 'ep-2', dossier_id: 'dos-1', type_patient: 'partenaire', ong_partenaire: 'ALIMA', service: 'Maternité', statut: 'ferme', est_hospitalisation: false, voie_entree: 'vente_comptoir', date_ouverture: '2026-08-21T09:00:00Z' },
+    // Épisode SANS aucune fiche : ne doit pas disparaître, et son totalGlobal doit valoir 0.
+    { id: 'ep-3', dossier_id: 'dos-2', type_patient: 'prive', service: null, statut: 'ouvert', est_hospitalisation: false, voie_entree: 'consultation', date_ouverture: '2026-08-22T10:00:00Z' },
+    // Épisode ORPHELIN (dossier supprimé/illisible) : doit rester présent, sans nom de patient.
+    { id: 'ep-4', dossier_id: 'dos-disparu', type_patient: 'prive', statut: 'ouvert', est_hospitalisation: false, voie_entree: 'consultation', date_ouverture: '2026-08-23T11:00:00Z' },
+  ];
+  const fiches = [
+    { id: 'fi-1', episode_id: 'ep-1', numero_fiche: 1, date_creation: '2026-08-20T08:30:00Z', total_global: 1000, breakdown: { service: 1000 }, mode_paiement: 'cash', raw_state: { dateEntree1: '2026-08-20', dateSortie1: '2026-08-22' } },
+    { id: 'fi-2', episode_id: 'ep-1', numero_fiche: 2, date_creation: '2026-08-21T08:30:00Z', total_global: 500, breakdown: { med: 500 }, mode_paiement: 'cash', raw_state: {} },
+    // Fiche dont le paiement a été ANNULÉ : exclue de totalGlobal, mais marquée paiementAnnule.
+    { id: 'fi-3', episode_id: 'ep-2', numero_fiche: 3, date_creation: '2026-08-21T09:30:00Z', total_global: 7000, breakdown: { labo: 7000 }, mode_paiement: 'ong', raw_state: {} },
+    { id: 'fi-4', episode_id: 'ep-2', numero_fiche: 4, date_creation: '2026-08-21T10:30:00Z', total_global: 250, breakdown: { med: 250 }, mode_paiement: 'ong', raw_state: {} },
+  ];
+  const paiements = [
+    { id: 'pa-1', episode_id: 'ep-2', fiche_id: 'fi-3', annule: true },
+    // Paiement annulé SANS fiche (un dépôt remboursé) : ne doit exclure aucune fiche.
+    { id: 'pa-2', episode_id: 'ep-1', fiche_id: null, annule: true },
+    // Paiement normal : ne doit rien exclure.
+    { id: 'pa-3', episode_id: 'ep-1', fiche_id: 'fi-1', annule: false },
+  ];
+  return { dossiers, episodes, fiches, paiements };
+}
+
+test("Lecture groupée : episodesVersFlatEnLot renvoie EXACTEMENT le même résultat qu'episodeVersFlat appelé un par un (dossier partagé, épisode sans fiche, épisode orphelin, paiement annulé avec et sans fiche)", async () => {
+  const donnees = donneesDeTest();
+  const compteurUnitaire = { requetes: 0 };
+  const compteurGroupe = { requetes: 0 };
+  const { episodeVersFlat } = chargerLecteursEpisodes(faireFauxSupabase(donnees, compteurUnitaire));
+  const { episodesVersFlatEnLot } = chargerLecteursEpisodes(faireFauxSupabase(donnees, compteurGroupe));
+
+  const attendu = await Promise.all(donnees.episodes.map(episodeVersFlat));
+  const obtenu = await episodesVersFlatEnLot(donnees.episodes);
+
+  assert.deepStrictEqual(obtenu, attendu, "les deux chemins doivent produire des objets strictement identiques");
+
+  // Vérifications explicites sur le contenu, pour que le test échoue de façon lisible si les DEUX
+  // chemins dérivaient ensemble (une comparaison seule ne le verrait pas).
+  const parId = Object.fromEntries(obtenu.map(e => [e.id, e]));
+  assert.strictEqual(parId['ep-1'].totalGlobal, 1500, "les 2 fiches non annulées de ep-1 doivent être sommées");
+  assert.strictEqual(parId['ep-1'].nomPatient, 'Patient Un');
+  assert.strictEqual(parId['ep-1'].periodeSejourString, 'du 20/08 au 22/08');
+  assert.strictEqual(parId['ep-1'].fiches.length, 2);
+  assert.strictEqual(parId['ep-2'].totalGlobal, 250, "la fiche dont le paiement est annulé (7000) doit être exclue du total");
+  assert.strictEqual(parId['ep-2'].fiches.find(f => f.id === 'fi-3').paiementAnnule, true, "la fiche annulée doit rester visible mais marquée");
+  assert.strictEqual(parId['ep-2'].fiches.find(f => f.id === 'fi-4').paiementAnnule, false, "l'autre fiche du même épisode ne doit pas être marquée");
+  assert.strictEqual(parId['ep-2'].nomPatient, 'Patient Un', "un dossier partagé par 2 épisodes doit être rattaché aux deux");
+  assert.strictEqual(parId['ep-3'].totalGlobal, 0, "un épisode sans fiche vaut 0, il ne disparaît pas");
+  assert.deepStrictEqual(parId['ep-3'].fiches, []);
+  assert.strictEqual(parId['ep-4'].nomPatient, undefined, "un épisode orphelin reste présent, sans nom de patient");
+
+  // Le fond du correctif : beaucoup moins de requêtes, pour un résultat identique.
+  assert.ok(compteurGroupe.requetes < compteurUnitaire.requetes,
+    `la lecture groupée doit faire moins de requêtes (groupée: ${compteurGroupe.requetes}, unitaire: ${compteurUnitaire.requetes})`);
+});
+
+// Le piège qui ferait échouer ce correctif exactement à l'échelle qu'il vise : `.in()` met tous les
+// ids dans l'URL (limite de longueur) et PostgREST tronque les réponses trop longues SANS erreur.
+// D'où le découpage en lots + la pagination .range(). Ce test le prouve à une échelle qui force les
+// deux (plus de 200 épisodes -> plusieurs lots ; plus de 500 fiches -> plusieurs pages).
+test("Lecture groupée à l'échelle : aucun épisode ni aucune fiche perdus au-delà des tailles de lot et de page (le piège du plafond silencieux de PostgREST)", async () => {
+  const NB_EPISODES = 250; // > TAILLE_LOT_IDS (200) -> force le découpage des ids
+  const dossiers = [];
+  const episodes = [];
+  const fiches = [];
+  for (let i = 0; i < NB_EPISODES; i++) {
+    dossiers.push({ id: `dos-${i}`, nom: `Patient ${i}`, numero_dossier: `D-${i}` });
+    episodes.push({ id: `ep-${i}`, dossier_id: `dos-${i}`, type_patient: 'prive', statut: 'ouvert', est_hospitalisation: false, voie_entree: 'consultation', date_ouverture: '2026-08-20T08:00:00Z' });
+    // 4 fiches par épisode : le PREMIER lot (200 épisodes) porte donc 800 fiches, au-delà de
+    // TAILLE_PAGE_LECTURE (500) — c'est ce qui force réellement une 2e page à l'intérieur d'un
+    // même lot. Avec seulement 2 fiches par épisode, le découpage suffisait à rester sous la
+    // taille de page et la pagination n'était jamais exercée (piège vérifié : retirer la
+    // pagination ne faisait alors échouer aucun test).
+    for (let n = 1; n <= 4; n++) {
+      fiches.push({ id: `fi-${i}-${n}`, episode_id: `ep-${i}`, numero_fiche: n, date_creation: `2026-08-20T0${n}:00:00Z`, total_global: 100, breakdown: {}, raw_state: {} });
+    }
+  }
+  const donnees = { dossiers, episodes, fiches, paiements: [] };
+  const { episodesVersFlatEnLot } = chargerLecteursEpisodes(faireFauxSupabase(donnees, { requetes: 0 }));
+
+  const obtenu = await episodesVersFlatEnLot(episodes);
+
+  assert.strictEqual(obtenu.length, NB_EPISODES, "aucun épisode ne doit se perdre au-delà de la taille d'un lot d'ids");
+  assert.ok(obtenu.every(e => e.fiches.length === 4), "chaque épisode doit retrouver SES 4 fiches, malgré la pagination des lectures");
+  assert.ok(obtenu.every(e => e.totalGlobal === 400), "un total faux signalerait des fiches perdues ou mal rattachées");
+  assert.ok(obtenu.every(e => e.nomPatient === `Patient ${e.id.slice(3)}`), "chaque épisode doit être rattaché à SON dossier, pas à celui d'un autre lot");
+  assert.deepStrictEqual(obtenu[0].fiches.map(f => f.numeroFiche), [1, 2, 3, 4], "l'ordre des fiches (date_creation) doit être préservé après regroupement");
+});
+
+// Suite du correctif de lecture groupée : la pagination doit rester correcte même si Supabase
+// plafonne les réponses PLUS BAS que la taille de page demandée. Une première version s'arrêtait
+// dès qu'une page revenait "incomplète" — avec un plafond serveur à 100 lignes pour 500 demandées,
+// elle aurait pris la 1re page pour la dernière et perdu tout le reste SANS ERREUR, exactement le
+// piège que ce correctif est censé fermer.
+test("Lecture groupée : aucune ligne perdue même si le serveur plafonne les réponses plus bas que la taille de page demandée", async () => {
+  const PLAFOND_SERVEUR = 100; // très en dessous de TAILLE_PAGE_LECTURE (500)
+  const NB_EPISODES = 120;
+  const dossiers = [], episodes = [], fiches = [];
+  for (let i = 0; i < NB_EPISODES; i++) {
+    dossiers.push({ id: `dos-${i}`, nom: `Patient ${i}` });
+    episodes.push({ id: `ep-${i}`, dossier_id: `dos-${i}`, type_patient: 'prive', statut: 'ouvert', est_hospitalisation: false, voie_entree: 'consultation', date_ouverture: '2026-08-20T08:00:00Z' });
+    fiches.push({ id: `fi-${i}`, episode_id: `ep-${i}`, numero_fiche: 1, date_creation: '2026-08-20T08:00:00Z', total_global: 70, breakdown: {}, raw_state: {} });
+  }
+  const donnees = { dossiers, episodes, fiches, paiements: [] };
+
+  // Faux client identique au précédent, SAUF que .range() ne renvoie jamais plus de PLAFOND_SERVEUR
+  // lignes, quelle que soit la fenêtre demandée — comme le ferait un PostgREST configuré ainsi.
+  const supabasePlafonne = {
+    from(table) {
+      const etat = { in: null, notNull: null };
+      const lignes = () => {
+        let r = (donnees[table] || []).slice();
+        if (etat.in) r = r.filter(l => etat.in.valeurs.includes(l[etat.in.colonne]));
+        if (etat.notNull) r = r.filter(l => l[etat.notNull] != null);
+        return r;
+      };
+      const api = {
+        select: () => api, eq: () => api, not: (c) => { etat.notNull = c; return api; }, order: () => api,
+        in: (col, valeurs) => { etat.in = { colonne: col, valeurs }; return api; },
+        range: (d, f) => Promise.resolve({ data: lignes().slice(d, Math.min(f + 1, d + PLAFOND_SERVEUR)), error: null }),
+      };
+      return api;
+    },
+  };
+  const { episodesVersFlatEnLot } = chargerLecteursEpisodes(supabasePlafonne);
+
+  const obtenu = await episodesVersFlatEnLot(episodes);
+  assert.strictEqual(obtenu.length, NB_EPISODES);
+  assert.ok(obtenu.every(e => e.nomPatient === `Patient ${e.id.slice(3)}`), "tous les dossiers doivent être lus, malgré le plafond serveur");
+  assert.ok(obtenu.every(e => e.fiches.length === 1), "toutes les fiches doivent être lues, malgré le plafond serveur");
+  assert.ok(obtenu.every(e => e.totalGlobal === 70), "un total à 0 signalerait des fiches perdues par une pagination arrêtée trop tôt");
 });
