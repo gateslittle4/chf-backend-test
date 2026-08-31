@@ -59,7 +59,11 @@ test("Toutes les écritures (update/insert) vérifient une ligne réellement aff
 
 test("La route de catalogue utilise upsert (pas update seul) — sinon impossible de créer la toute première ligne", () => {
   const blocCatalog = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog"));
-  assert.match(blocCatalog.slice(0, 2200), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
+  // Fenêtre volontairement large : ce commentaire s'allonge à chaque session qui documente une
+  // nouvelle exception de permission sur cette route (permissions/parametres/sessions_caisse...) —
+  // un chiffre trop serré casserait ce test à chaque nouvelle explication, sans rapport avec ce
+  // qu'il vérifie réellement (upsert, pas update seul).
+  assert.match(blocCatalog.slice(0, 3000), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
 });
 
 test("POST /api/paiements en mode remboursement_credit relit le solde en base — n'accepte jamais tel quel le solde_restant envoyé par le navigateur", () => {
@@ -1423,4 +1427,34 @@ test("Paiements : le solde de crédit d'un épisode est REPORTÉ, une dette ne p
   assert.strictEqual(nouveauSolde(5000, 'depot', undefined), 5000, "un dépôt non plus");
   assert.strictEqual(nouveauSolde(5000, 'exoneration', 0), 5000, "une exonération sur une autre fiche non plus");
   assert.strictEqual(nouveauSolde(5000, 'credit', 3000), 8000, "deux fiches à crédit s'additionnent");
+});
+
+// Retour d'Esdras (01/09) : "comment Odoo gère l'encaissement de matin à nuit ?" — Odoo n'attribue
+// jamais une transaction à une "journée" en devinant depuis l'horloge : une session de caisse a un
+// début et une fin RÉELS, marqués par un clic humain ("Ouvrir"/"Fermer"), et tout ce qui se passe
+// entre les deux lui appartient — peu importe l'heure. Sessions de caisse explicites ajoutées
+// (type 'sessions_caisse', stocké via le mécanisme catalog déjà utilisé pour permissions/
+// paramètres/lits — aucune migration SQL). Un caissier doit pouvoir ouvrir/fermer SA propre
+// session sans avoir catalogue_gerer (réservé à direction/administrateur pour les vrais
+// catalogues — tarifs, médicaments).
+test("Sessions de caisse : un caissier (caisse_travailler) peut ouvrir et fermer sa propre session, sans catalogue_gerer", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  const routePut = src.slice(src.indexOf("app.put('/api/catalog/:type'"), src.indexOf("app.post('/api/catalog/:type/item'"));
+  assert.match(routePut, /\} else if \(type === 'sessions_caisse'\) \{\s*\n\s*permissionOk = await aPermission\(req\.user\.id, 'caisse_travailler'\);/,
+    "PUT (amorçage de la ligne catalog, une seule fois) doit accepter caisse_travailler pour ce type");
+
+  const routePost = src.slice(src.indexOf("app.post('/api/catalog/:type/item'"), src.indexOf("app.patch('/api/catalog/:type/champs'"));
+  assert.match(routePost, /const permissionOk = type === 'sessions_caisse'\s*\n\s*\? await aPermission\(req\.user\.id, 'caisse_travailler'\)/,
+    "POST item (ouverture d'une session, la voie normale — atomique) doit accepter caisse_travailler pour ce type");
+
+  // La fermeture (PATCH champs) n'a besoin d'AUCUN changement : elle accepte déjà
+  // catalogue_gerer OU caisse_travailler, pour tous les types, depuis le début.
+  const routePatch = src.slice(src.indexOf("app.patch('/api/catalog/:type/champs'"), src.indexOf("app.delete('/api/catalog/:type/item/:id'"));
+  assert.match(routePatch, /aPermission\(req\.user\.id, 'catalogue_gerer'\)\) && !\(await aPermission\(req\.user\.id, 'caisse_travailler'\)\)/);
+
+  // Les VRAIS catalogues (tarifs, médicaments...) ne doivent pas s'ouvrir à caisse_travailler par
+  // accident — seul 'sessions_caisse' bénéficie de cette exception.
+  assert.match(routePut, /permissionOk = await aPermission\(req\.user\.id, 'catalogue_gerer'\);\s*\n\s*\}\s*$/m,
+    "le cas générique (tout le reste) doit rester réservé à catalogue_gerer");
 });

@@ -1337,12 +1337,15 @@ app.put('/api/catalog/:type', async (req, res) => {
   // 'permissions' : réservé à permissions_gerer (écran Rôles & permissions).
   // 'parametres' : réservé à parametres_gerer (écran Paramètres — retour d'Esdras du 24/08,
   // "il me faut un onglet paramètres pour ce genre de truc").
+  // 'sessions_caisse' (01/09) : caisse_travailler — voir POST /api/catalog/:type/item plus bas.
   // Tout le reste (types_consultation, services_hospitalisation...) : catalogue_gerer.
   let permissionOk;
   if (type === 'permissions') {
     permissionOk = await aPermission(req.user.id, 'permissions_gerer');
   } else if (type === 'parametres') {
     permissionOk = await aPermission(req.user.id, 'parametres_gerer');
+  } else if (type === 'sessions_caisse') {
+    permissionOk = await aPermission(req.user.id, 'caisse_travailler');
   } else {
     permissionOk = await aPermission(req.user.id, 'catalogue_gerer');
   }
@@ -1368,7 +1371,12 @@ app.put('/api/catalog/:type', async (req, res) => {
 // depuis "Gestion des stocks", jamais depuis Tarifs Pharma (voir aussi le 410 ci-dessus).
 app.post('/api/catalog/:type/item', async (req, res) => {
   const { type } = req.params;
-  if (!(await aPermission(req.user.id, 'catalogue_gerer'))) {
+  // 'sessions_caisse' (01/09) : voir le même aparté sur PUT /api/catalog/:type juste au-dessus —
+  // un caissier doit pouvoir ouvrir SA session sans avoir catalogue_gerer.
+  const permissionOk = type === 'sessions_caisse'
+    ? await aPermission(req.user.id, 'caisse_travailler')
+    : await aPermission(req.user.id, 'catalogue_gerer');
+  if (!permissionOk) {
     return res.status(403).json({ error: "Permission 'catalogue_gerer' requise." });
   }
   const { item } = req.body;
