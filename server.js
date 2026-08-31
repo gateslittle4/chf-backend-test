@@ -1718,7 +1718,7 @@ app.post('/api/lots/prochain-numero', async (req, res) => {
   res.json({ numero: data });
 });
 
-// Décrémente le stock de façon atomique (voir fonction_decrementer_stock.sql) — remplace le
+// Décrémente le stock de façon atomique (voir fonction_decrementer_stock_et_numerotation_lots.sql) — remplace le
 // calcul côté navigateur + réécriture complète du catalogue, qui pouvait perdre une vente si
 // 2 ventes du même médicament arrivaient presque en même temps (2e écriture qui efface la
 // 1ère au lieu de s'additionner). Tout-ou-rien : si un seul article manque, rien n'est décrémenté.
@@ -1739,7 +1739,7 @@ app.post('/api/stock/decrementer', async (req, res) => {
   const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements });
   if (error) {
     if (error.code === '42883') {
-      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock.sql dans le SQL Editor." });
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
   }
@@ -1789,7 +1789,7 @@ app.post('/api/requisitions', async (req, res) => {
   });
   if (error) {
     if (error.code === '42883') {
-      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock.sql dans le SQL Editor." });
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
   }
