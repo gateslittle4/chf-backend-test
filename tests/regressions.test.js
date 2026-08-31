@@ -1292,3 +1292,40 @@ test("aPermission refuse un compte désactivé ou expiré, à chaque requête et
   // active NULL/absent = actif : ne jamais bloquer un compte qui n'a pas encore ce champ.
   assert.doesNotMatch(bloc, /if \(!profil\.active\) return false;/, "active absent/NULL doit rester ACTIF (mêmes règles que le navigateur), sinon on verrouille tout le monde");
 });
+
+// ============================================================================================
+// Sorties de caisse (31/08) — retour d'Esdras : "on a l'habitude de retirer de l'argent à la
+// caisse pour faire des achats". La table depenses_caisse existait déjà mais n'était branchée à
+// AUCUNE route ni AUCUN écran (confirmé par recherche dans les 2 dépôts avant de commencer).
+// Fonctionnalité pensée comme TEMPORAIRE (le comptable de la firme dit que cette pratique ne va
+// pas durer) — voir le paramètre 'sortiesCaisseActivees' côté chf-app2.
+// ============================================================================================
+
+test("GET /api/depenses-caisse exige les mêmes permissions que GET /api/paiements (même écran, même fiche de caisse journalière)", () => {
+  const bloc = blocRoutePermission("app.get('/api/depenses-caisse'", "app.post('/api/depenses-caisse'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_voir'\)/);
+});
+
+test("GET /api/depenses-caisse est paginée (même piège que /api/episodes et /api/paiements : un plafond de lignes tronquerait les dépenses les plus anciennes en silence)", () => {
+  const bloc = blocRoutePermission("app.get('/api/depenses-caisse'", "app.post('/api/depenses-caisse'");
+  assert.match(bloc, /lireToutesLesPages\(/);
+  assert.match(bloc, /\.order\('date', \{ ascending: false \}\)\.order\('id'\)/, "tri total obligatoire dès qu'on pagine");
+});
+
+test("POST /api/depenses-caisse exige caisse_travailler, valide motif/montant/validepar, et rattache la dépense au caissier qui l'enregistre", () => {
+  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "// Annulation d'un paiement");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'caisse_travailler'\)/, "manier de l'argent hors caisse reste une action de caisse");
+  assert.match(bloc, /if \(!motif \|\| typeof motif !== 'string' \|\| !motif\.trim\(\)\) return res\.status\(400\)/, "un motif est requis, jamais une sortie silencieuse");
+  assert.match(bloc, /if \(!\(montantNombre > 0\)\) return res\.status\(400\)/, "un montant à 0 ou négatif n'a aucun sens pour une sortie de caisse");
+  assert.match(bloc, /if \(!validepar \|\| typeof validepar !== 'string' \|\| !validepar\.trim\(\)\) return res\.status\(400\)/, "qui autorise la sortie doit être tracé, comme partout ailleurs dans l'app");
+  assert.match(bloc, /caissier_uid: req\.user\.id/, "doit rattacher la dépense au caissier qui clôture, sinon la fiche journalière ne peut pas la retrouver");
+});
+
+test("POST /api/depenses-caisse est idempotente via local_id, même principe que /api/paiements — sinon une confirmation perdue en file hors ligne dupliquerait la sortie d'argent", () => {
+  const bloc = blocRoutePermission("app.post('/api/depenses-caisse'", "// Annulation d'un paiement");
+  assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId;/);
+  assert.match(bloc, /if \(existant\) return res\.status\(200\)\.json\(existant\);/);
+  assert.match(bloc, /if \(error\.code === '23505' && local_id\)/, "un conflit sur la contrainte unique local_id doit renvoyer la ligne déjà créée, pas une erreur 500");
+});

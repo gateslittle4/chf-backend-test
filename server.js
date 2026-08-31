@@ -1493,6 +1493,64 @@ app.post('/api/paiements', async (req, res) => {
   res.status(201).json(data);
 });
 
+// Retour d'Esdras (31/08) : "on a l'habitude de retirer de l'argent à la caisse pour faire des
+// achats" — une pratique réelle jamais tracée nulle part jusqu'ici (table depenses_caisse déjà
+// créée, mais aucune route ni aucun écran ne la touchait — confirmé par recherche dans les 2
+// dépôts). Passé par le backend (comme paiements), pas par le shim db, pour appliquer une vraie
+// permission plutôt que la clé anon libre. Fonctionnalité pensée comme TEMPORAIRE : le comptable
+// venu pour la firme a dit que ce retrait direct ne durera pas une fois leur propre système en
+// place — d'où le paramètre 'sortiesCaisseActivees' (GestionParametres.js) qui masque tout l'écran
+// d'un coup côté navigateur le jour où ce n'est plus utile, sans qu'il faille retoucher au code ni
+// perdre l'historique déjà enregistré.
+app.get('/api/depenses-caisse', async (req, res) => {
+  // Même jeu de permissions que GET /api/paiements : cet écran (DashboardCaisse.js) affiche les
+  // deux ensemble pour la même fiche de caisse journalière.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances')) && !(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'caisse_voir'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances', 'caisse_travailler' ou 'caisse_voir' requise." });
+  }
+  try {
+    res.json(await lireToutesLesPages(
+      () => supabase.from('depenses_caisse').select('*').order('date', { ascending: false }).order('id')));
+  } catch (e) {
+    console.error('GET /api/depenses-caisse: lecture paginée échouée :', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/depenses-caisse', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
+  const { motif, montant, validepar } = req.body;
+  if (!motif || typeof motif !== 'string' || !motif.trim()) return res.status(400).json({ error: 'motif requis.' });
+  const montantNombre = parseFloat(montant);
+  if (!(montantNombre > 0)) return res.status(400).json({ error: 'montant doit être un nombre supérieur à 0.' });
+  if (!validepar || typeof validepar !== 'string' || !validepar.trim()) return res.status(400).json({ error: 'validepar (qui autorise la sortie) requis.' });
+
+  // Idempotence via local_id, même principe que /api/paiements et /api/fiches — nécessaire pour
+  // que la file hors ligne (api/supabase.js) puisse rejouer cette création sans risquer de la
+  // dupliquer si la confirmation du 1er essai s'est perdue en route.
+  const local_id = req.body.local_id || req.body.localId;
+  if (local_id) {
+    const { data: existant } = await supabase.from('depenses_caisse').select('*').eq('local_id', local_id).maybeSingle();
+    if (existant) return res.status(200).json(existant);
+  }
+
+  const { data, error } = await supabase
+    .from('depenses_caisse')
+    .insert({ motif: motif.trim(), montant: montantNombre, validepar: validepar.trim(), caissier_uid: req.user.id, local_id: local_id || null })
+    .select()
+    .single();
+  if (error) {
+    if (error.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('depenses_caisse').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.status(201).json(data);
+});
+
 // Annulation d'un paiement — réservée à direction/administrateur (jamais celui qui a
 // encaissé lui-même, pour éviter qu'une caissière encaisse en cash puis annule pour
 // empocher). Le paiement n'est jamais supprimé, juste marqué — la trace reste complète.
@@ -2044,7 +2102,7 @@ const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
 const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-  'transferts_service', 'salaires_service',
+  'transferts_service', 'salaires_service', 'depenses_caisse',
 ];
 
 async function sauvegarderVersStorage() {
