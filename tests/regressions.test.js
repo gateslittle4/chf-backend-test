@@ -222,7 +222,7 @@ test("dateOuNull convertit une date de naissance vide en null, jamais en chaîne
   for (const routeStart of ["app.post('/api/episodes'", "app.post('/api/dossiers'", "app.put('/api/dossiers/:id'"]) {
     const i = serverSrc.indexOf(routeStart);
     assert.ok(i !== -1, `route ${routeStart} introuvable`);
-    const bloc = serverSrc.slice(i, i + 1400);
+    const bloc = serverSrc.slice(i, i + 2000);
     assert.match(bloc, /date_naissance:\s*dateOuNull\(/, `${routeStart} doit passer date_naissance par dateOuNull()`);
   }
 });
@@ -1498,4 +1498,21 @@ test("Corbeille catalogue : purgerCorbeilleCatalogue ne supprime pour de bon qu'
   assert.match(blocFonction, /i\.supprimeLe && new Date\(i\.supprimeLe\)\.getTime\(\) < limite/, "ne doit purger que les articles dont supprimeLe date de plus de 30 jours, jamais les autres");
   assert.match(blocFonction, /supabase\.rpc\('supprimer_article_catalogue', \{ p_type: type, p_id: item\.id \}\)/, "doit réutiliser la RPC déjà en prod (ancien mécanisme de suppression directe), pas une nouvelle fonction non déployée");
   assert.match(src, /app\.post\('\/api\/admin\/purger-corbeille-catalogue'/, "un déclenchement manuel doit exister, comme pour la sauvegarde");
+});
+
+// Retour d'Esdras (01/09) : bébé enregistré au néonat sous un nom temporaire ("Bébé + nom de la
+// mère"), renommé plus tard avec son vrai prénom au retour de la mère en consultation —
+// "je ne veux pas oublier la racine de l'enfant". nom_origine fige le nom du dossier à sa
+// création, pour toujours ; PUT /api/dossiers/:id (le renommage) ne doit JAMAIS y toucher.
+test("POST /api/dossiers fige nom_origine=nom à la création (avec repli 42703 si la colonne n'existe pas encore) ; PUT /api/dossiers/:id ne le modifie jamais", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const blocPost = src.slice(src.indexOf("app.post('/api/dossiers'"), src.indexOf("app.get('/api/dossiers/:id'"));
+  assert.match(blocPost, /\.insert\(\{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)/,
+    "le premier essai d'insertion doit inclure nom_origine: nom");
+  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{/, "doit se replier sur l'ancien insert (sans nom_origine) si la colonne n'existe pas encore en base — comme les autres fonctions/colonnes pas encore déployées dans ce projet (42883 pour les RPC)");
+  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{\s*\(\{ data, error \} = await supabase\s*\.from\('dossiers'\)\.insert\(\{ numero_dossier, nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)\.select\(\)\.single\(\)\);\s*\}/,
+    "le repli doit être l'insert original, sans nom_origine");
+
+  const blocPut = src.slice(src.indexOf("app.put('/api/dossiers/:id'"), src.indexOf("app.get('/api/dossiers/:id/historique'"));
+  assert.doesNotMatch(blocPut, /nom_origine/, "un renommage (PUT) ne doit JAMAIS toucher nom_origine — sinon on perdrait la trace du tout premier nom, exactement ce qu'Esdras ne veut pas");
 });

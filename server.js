@@ -816,8 +816,20 @@ app.post('/api/dossiers', async (req, res) => {
     const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
     if (existant) return res.status(200).json(existant);
   }
-  const { data, error } = await supabase
-    .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
+  // Retour d'Esdras (01/09) : "je ne veux pas oublier la racine de l'enfant" — un bébé né au
+  // néonat est d'abord enregistré sous un nom temporaire ("Bébé + nom de la mère"), puis reçoit
+  // son vrai nom au retour de la mère en consultation. nom_origine fige le nom du dossier à sa
+  // CRÉATION, pour toujours — un renommage plus tard (PUT /api/dossiers/:id ci-dessous) ne
+  // touche jamais ce champ, donc le nom d'origine reste consultable même après. `error.code ===
+  // '42703'` (colonne inexistante) : la colonne peut ne pas encore exister dans Supabase (voir
+  // sql/ajoute_nom_origine_dossiers.sql, pas encore confirmé collé) — repli sur l'ancien insert
+  // sans elle, comme les autres fonctions Postgres pas encore déployées dans ce projet (42883).
+  let { data, error } = await supabase
+    .from('dossiers').insert({ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
+  if (error && error.code === '42703') {
+    ({ data, error } = await supabase
+      .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single());
+  }
   if (error) {
     if (error.code === '23505') {
       if (local_id) {
