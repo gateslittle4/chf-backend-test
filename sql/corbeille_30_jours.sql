@@ -14,6 +14,10 @@
 -- jours) sera branché dans un second temps, une fois ces colonnes confirmées présentes.
 --
 -- À coller dans Supabase → SQL Editor, dans le VRAI projet CHF (pas un projet de test).
+--
+-- ✅ APPLIQUÉ le 01/09 (accès Supabase direct de cette session, woghiwalsxusqtxvpzfo) — colonnes
+-- et index vérifiés présents juste après coup (information_schema.columns / pg_indexes), pas
+-- seulement supposés. Gardé ici pour une future recréation de la base depuis zéro.
 
 ALTER TABLE episodes        ADD COLUMN IF NOT EXISTS supprime_le timestamptz;
 ALTER TABLE fiches          ADD COLUMN IF NOT EXISTS supprime_le timestamptz;
