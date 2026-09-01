@@ -1484,3 +1484,18 @@ test("Sessions de caisse : un caissier ne peut fermer/modifier que SA PROPRE ses
   // accident : n'importe quel caisse_travailler doit toujours pouvoir y incrémenter un compteur.
   assert.match(routePatch, /if \(type === 'sessions_caisse'/, "la restriction doit être scopée au seul type sessions_caisse");
 });
+
+// Retour d'Esdras (01/09) : "j'aime pas trop suppression irréversible, met une poubelle de 30
+// jours pour toute action de suppression" — côté serveur, la purge réelle des articles
+// medicaments/actes mis à la corbeille (supprimeLe posé par GrilleEdition.js, chf-app2) tourne
+// tous les jours et réutilise supprimer_article_catalogue, déjà en prod — aucune nouvelle fonction
+// SQL ni colonne requise pour cette partie.
+test("Corbeille catalogue : purgerCorbeilleCatalogue ne supprime pour de bon qu'après 30 jours, via la RPC déjà existante", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /const JOURS_CORBEILLE_CATALOGUE = 30;/);
+  const blocFonction = src.slice(src.indexOf('async function purgerCorbeilleCatalogue'), src.indexOf("cron.schedule('0 6 * * *', async () => {\n  try {\n    const resultat = await purgerCorbeilleCatalogue"));
+  assert.match(blocFonction, /for \(const type of \['medicaments', 'actes'\]\)/, "seuls medicaments/actes sont concernés par cette purge — pas les dossiers/fiches/pièces jointes/partenaires ONG (pas encore de colonne supprime_le en base pour eux)");
+  assert.match(blocFonction, /i\.supprimeLe && new Date\(i\.supprimeLe\)\.getTime\(\) < limite/, "ne doit purger que les articles dont supprimeLe date de plus de 30 jours, jamais les autres");
+  assert.match(blocFonction, /supabase\.rpc\('supprimer_article_catalogue', \{ p_type: type, p_id: item\.id \}\)/, "doit réutiliser la RPC déjà en prod (ancien mécanisme de suppression directe), pas une nouvelle fonction non déployée");
+  assert.match(src, /app\.post\('\/api\/admin\/purger-corbeille-catalogue'/, "un déclenchement manuel doit exister, comme pour la sauvegarde");
+});

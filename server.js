@@ -2294,6 +2294,57 @@ cron.schedule('0 6 * * *', async () => {
   }
 });
 
+// ============================================================
+// CORBEILLE CATALOGUE (medicaments/actes) — retour d'Esdras (01/09) : "j'aime pas trop
+// suppression irréversible, met une poubelle de 30 jours pour toute action de suppression".
+// GrilleEdition.js (chf-app2) ne retire plus jamais un article du tableau JSONB en le supprimant —
+// il pose seulement un champ supprimeLe (via definir_champs_catalogue_lot, déjà en prod, aucune
+// migration SQL nécessaire pour cette partie). Ce cron fait le ménage réel après 30 jours, via la
+// RPC supprimer_article_catalogue qui existe déjà (c'était l'ancien mécanisme de suppression
+// directe). Seuls medicaments/actes sont concernés ici — les autres suppressions de l'app
+// (dossiers, fiches, pièces jointes, partenaires ONG) ont besoin de nouvelles colonnes en base
+// (voir sql/corbeille_30_jours.sql) et ne sont pas encore branchées.
+const JOURS_CORBEILLE_CATALOGUE = 30;
+async function purgerCorbeilleCatalogue() {
+  const resultats = { medicaments: 0, actes: 0 };
+  for (const type of ['medicaments', 'actes']) {
+    const { data: ligne, error } = await supabase.from('catalog').select('items').eq('type', type).maybeSingle();
+    if (error || !ligne) continue;
+    const limite = Date.now() - JOURS_CORBEILLE_CATALOGUE * 86400000;
+    const aPurger = (ligne.items || []).filter(i => i.supprimeLe && new Date(i.supprimeLe).getTime() < limite);
+    for (const item of aPurger) {
+      const { error: erreurSuppr } = await supabase.rpc('supprimer_article_catalogue', { p_type: type, p_id: item.id });
+      if (!erreurSuppr) resultats[type]++;
+    }
+  }
+  return resultats;
+}
+
+// Même heure creuse que la sauvegarde (6h UTC) — l'ordre entre les deux jobs n'a pas d'importance,
+// ils touchent des données différentes. Ne bloque jamais le serveur si ça échoue.
+cron.schedule('0 6 * * *', async () => {
+  try {
+    const resultat = await purgerCorbeilleCatalogue();
+    const total = resultat.medicaments + resultat.actes;
+    if (total > 0) console.log(`🗑️ Corbeille catalogue purgée : ${resultat.medicaments} médicament(s), ${resultat.actes} acte(s)`);
+  } catch (e) {
+    console.error('❌ Échec de la purge de la corbeille catalogue :', e.message);
+  }
+});
+
+// Déclenchement manuel — pour vérifier tout de suite sans attendre 6h UTC.
+app.post('/api/admin/purger-corbeille-catalogue', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'catalogue_gerer'))) {
+    return res.status(403).json({ error: "Permission 'catalogue_gerer' requise." });
+  }
+  try {
+    const resultat = await purgerCorbeilleCatalogue();
+    res.json({ success: true, ...resultat });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Déclenchement manuel — pour vérifier que la sauvegarde automatique fonctionne réellement sans
 // attendre la prochaine exécution planifiée, ou en cas de doute avant une opération risquée.
 app.post('/api/admin/backup-manuel', async (req, res) => {
