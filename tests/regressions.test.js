@@ -268,7 +268,7 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
 // — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
 test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
   const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
-  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier \} = req\.body;/);
+  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier, sexe \} = req\.body;/);
   assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint \};/, "poids/conjoint doivent toujours être écrits, sans condition");
   assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
   assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
@@ -1507,14 +1507,31 @@ test("Corbeille catalogue : purgerCorbeilleCatalogue ne supprime pour de bon qu'
 test("POST /api/dossiers fige nom_origine=nom à la création (avec repli 42703 si la colonne n'existe pas encore) ; PUT /api/dossiers/:id ne le modifie jamais", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const blocPost = src.slice(src.indexOf("app.post('/api/dossiers'"), src.indexOf("app.get('/api/dossiers/:id'"));
-  assert.match(blocPost, /\.insert\(\{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)/,
-    "le premier essai d'insertion doit inclure nom_origine: nom");
-  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{/, "doit se replier sur l'ancien insert (sans nom_origine) si la colonne n'existe pas encore en base — comme les autres fonctions/colonnes pas encore déployées dans ce projet (42883 pour les RPC)");
-  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{\s*\(\{ data, error \} = await supabase\s*\.from\('dossiers'\)\.insert\(\{ numero_dossier, nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)\.select\(\)\.single\(\)\);\s*\}/,
-    "le repli doit être l'insert original, sans nom_origine");
+  assert.match(blocPost, /\.insert\(\{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null, sexe: sexe \|\| null \}\)/,
+    "le premier essai d'insertion doit inclure nom_origine: nom ET sexe");
+  // Repli en cascade (retour d'Esdras 02/09, sexe ajouté au même mécanisme) : nom_origine seul
+  // manquant → 2e essai sans sexe (garde nom_origine) ; toujours 42703 (nom_origine aussi manquant)
+  // → 3e essai, l'insert original.
+  const occurrences42703 = (blocPost.match(/if \(error && error\.code === '42703'\) \{/g) || []).length;
+  assert.strictEqual(occurrences42703, 2, "doit se replier 2 fois en cascade (d'abord sans sexe, puis sans nom_origine non plus) si les colonnes n'existent pas encore en base — comme les autres fonctions/colonnes pas encore déployées dans ce projet (42883 pour les RPC)");
+  assert.match(blocPost, /\.insert\(\{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)\.select\(\)\.single\(\)\);\s*\}\s*\n\s*if \(error && error\.code === '42703'\) \{\s*\(\{ data, error \} = await supabase\s*\.from\('dossiers'\)\.insert\(\{ numero_dossier, nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)\.select\(\)\.single\(\)\);\s*\}/,
+    "le dernier repli doit être l'insert original, sans nom_origine ni sexe");
 
   const blocPut = src.slice(src.indexOf("app.put('/api/dossiers/:id'"), src.indexOf("app.get('/api/dossiers/:id/historique'"));
-  assert.doesNotMatch(blocPut, /nom_origine/, "un renommage (PUT) ne doit JAMAIS toucher nom_origine — sinon on perdrait la trace du tout premier nom, exactement ce qu'Esdras ne veut pas");
+  assert.doesNotMatch(blocPut, /maj\.sexe|nom_origine/, "un renommage (PUT) ne doit JAMAIS toucher nom_origine — sinon on perdrait la trace du tout premier nom, exactement ce qu'Esdras ne veut pas");
+});
+
+// Retour d'Esdras (02/09) : "on ajoute F/M dans le formulaire aussi" — sexe est une colonne toute
+// nouvelle (sql/ajoute_sexe_dossiers.sql), pas encore confirmée collée en base. PUT est appelé
+// bien plus souvent que POST (tout changement de fiche patient) : sexe doit être facultatif dans
+// le corps de la requête (sexe !== undefined) ET son absence en base (42703) ne doit jamais faire
+// échouer une modification qui n'a rien à voir avec sexe.
+test("PUT /api/dossiers/:id envoie sexe seulement quand fourni (sexe !== undefined), avec repli 42703 sans sexe — jamais bloquant pour une modification normale", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const blocPut = src.slice(src.indexOf("app.put('/api/dossiers/:id'"), src.indexOf("app.get('/api/dossiers/:id/historique'"));
+  assert.match(blocPut, /\.update\(sexe !== undefined \? \{ \.\.\.maj, sexe \} : maj\)/, "sexe ne doit être ajouté à la mise à jour que s'il est explicitement fourni");
+  assert.match(blocPut, /if \(error && error\.code === '42703'\) \{\s*\(\{ data, error \} = await supabase\.from\('dossiers'\)\.update\(maj\)\.eq\('id', req\.params\.id\)\.select\(\)\);\s*\}/,
+    "sur 42703 (colonne sexe inexistante), doit réessayer avec maj (sans sexe), jamais échouer toute la modification");
 });
 
 // Audit hors ligne du 01/09 (Esdras : "fais la protection sur le stock aussi") — /api/stock/

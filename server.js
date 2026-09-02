@@ -983,7 +983,7 @@ app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' requise." });
   }
-  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id } = req.body;
+  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id, sexe } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
   // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
@@ -1001,8 +1001,13 @@ app.post('/api/dossiers', async (req, res) => {
   // '42703'` (colonne inexistante) : la colonne peut ne pas encore exister dans Supabase (voir
   // sql/ajoute_nom_origine_dossiers.sql, pas encore confirmé collé) — repli sur l'ancien insert
   // sans elle, comme les autres fonctions Postgres pas encore déployées dans ce projet (42883).
+  // sexe (02/09, sql/ajoute_sexe_dossiers.sql) : même repli en cascade, une colonne à la fois.
   let { data, error } = await supabase
-    .from('dossiers').insert({ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
+    .from('dossiers').insert({ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null, sexe: sexe || null }).select().single();
+  if (error && error.code === '42703') {
+    ({ data, error } = await supabase
+      .from('dossiers').insert({ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single());
+  }
   if (error && error.code === '42703') {
     ({ data, error } = await supabase
       .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single());
@@ -1044,14 +1049,23 @@ app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier } = req.body;
+  const { nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier, sexe } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
   const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint };
   if (numero_dossier !== undefined) {
     if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
     maj.numero_dossier = numero_dossier;
   }
-  const { data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select();
+  // Retour d'Esdras (02/09) : "on ajoute F/M dans le formulaire aussi" — sexe est envoyé seulement
+  // quand explicitement fourni (sexe !== undefined), pas ajouté d'office comme poids/conjoint
+  // ci-dessus, car cette colonne est toute nouvelle (sql/ajoute_sexe_dossiers.sql, pas encore
+  // confirmé collée) : sur 42703 (colonne inexistante), on réessaie SANS sexe plutôt que de faire
+  // échouer toute la modification — PUT est appelé bien plus souvent que POST (tout changement de
+  // fiche patient), une régression ici casserait des modifications qui n'ont rien à voir avec sexe.
+  let { data, error } = await supabase.from('dossiers').update(sexe !== undefined ? { ...maj, sexe } : maj).eq('id', req.params.id).select();
+  if (error && error.code === '42703') {
+    ({ data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select());
+  }
   if (error) {
     if (error.code === '23505') {
       return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
