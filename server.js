@@ -1953,18 +1953,32 @@ app.post('/api/stock/decrementer', async (req, res) => {
   if (!Array.isArray(decrements) || decrements.length === 0) {
     return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
   }
+  // Idempotence (audit hors ligne du 01/09) : c'était la SEULE route d'écriture de la file hors
+  // ligne sans protection contre un rejeu. Depuis que syncPending garde les opérations "en vol"
+  // jusqu'à confirmation du serveur (api/supabase.js), un arrêt brutal entre l'envoi et sa
+  // confirmation fait rejouer l'opération au démarrage suivant — sans garde, le stock aurait été
+  // décrémenté deux fois pour une seule vente. La trace est posée dans la MÊME transaction que le
+  // décrément (voir decrementer_stock_medicaments(jsonb, text), sql/idempotence_decrement_stock.sql).
+  const local_id = req.body.local_id || req.body.localId || null;
   // Retour d'Esdras (29/08) : alerte WhatsApp quand un médicament FRANCHIT son seuil critique —
   // lu AVANT le décrément pour ne comparer qu'à ce moment précis (avant > seuil, après <= seuil),
   // sinon chaque vente suivante d'un article déjà bas redéclencherait une alerte à chaque fois.
   const { data: avantData } = await supabase.from('catalog').select('items').eq('type', 'medicaments').single();
   const avantParId = new Map((avantData?.items || []).map(m => [m.id, m]));
 
-  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements });
+  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements, p_local_id: local_id });
   if (error) {
     if (error.code === '42883') {
-      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql dans le SQL Editor." });
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql puis idempotence_decrement_stock.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
+  }
+  // Rejeu détecté : le stock a déjà été décrémenté par le premier envoi (voir local_id ci-dessus).
+  // On répond 200 avec l'état actuel, comme pour un succès — c'est ce que la file hors ligne attend
+  // pour considérer l'opération terminée et la sortir définitivement.
+  if (data.deja_applique) {
+    console.log(`↩️ Décrément de stock déjà appliqué (local_id=${local_id}) — rejeu ignoré.`);
+    return res.json({ success: true, deja_applique: true, items: data.items });
   }
   if (!data.succes) {
     const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant)`).join(', ');
@@ -2105,12 +2119,19 @@ app.post('/api/stock/decrementer-dons', async (req, res) => {
   if (!Array.isArray(decrements) || decrements.length === 0) {
     return res.status(400).json({ error: 'decrements (tableau non vide) requis.' });
   }
-  const { data, error } = await supabase.rpc('decrementer_stock_dons', { p_decrements: decrements });
+  // Même protection que /api/stock/decrementer ci-dessus — le stock donné se décrémente par la
+  // même vente, donc il court exactement le même risque de double décrément à un rejeu.
+  const local_id = req.body.local_id || req.body.localId || null;
+  const { data, error } = await supabase.rpc('decrementer_stock_dons', { p_decrements: decrements, p_local_id: local_id });
   if (error) {
     if (error.code === '42883') {
-      return res.status(500).json({ error: "La fonction SQL decrementer_stock_dons n'existe pas encore dans Supabase — colle fonction_stock_dons.sql dans le SQL Editor." });
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_dons n'existe pas encore dans Supabase — colle fonction_stock_dons.sql puis idempotence_decrement_stock.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
+  }
+  if (data.deja_applique) {
+    console.log(`↩️ Décrément de stock donné déjà appliqué (local_id=${local_id}) — rejeu ignoré.`);
+    return res.json({ success: true, deja_applique: true, items: data.items });
   }
   if (!data.succes) {
     const detail = (data.manquants || []).map(m => `${m.nom || m.id} — don ${m.ong} (${m.disponible} restant)`).join(', ');
@@ -2233,7 +2254,7 @@ const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
 const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-  'transferts_service', 'salaires_service', 'depenses_caisse',
+  'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
 ];
 
 async function sauvegarderVersStorage() {
@@ -2332,6 +2353,19 @@ async function purgerCorbeilleCatalogue() {
   return resultats;
 }
 
+// Traces d'idempotence des décréments de stock (voir sql/idempotence_decrement_stock.sql) : une
+// ligne par vente, utile seulement le temps qu'un rejeu de la file hors ligne puisse survenir.
+// 90 jours est très large pour ça (une file hors ligne se vide en heures, pas en mois) et évite
+// une table qui grossit indéfiniment.
+const JOURS_TRACES_DECREMENT_STOCK = 90;
+async function purgerTracesDecrementStock() {
+  const limite = new Date(Date.now() - JOURS_TRACES_DECREMENT_STOCK * 86400000).toISOString();
+  const { data, error } = await supabase
+    .from('decrements_stock_appliques').delete().lt('applique_le', limite).select('local_id');
+  if (error) throw error;
+  return (data || []).length;
+}
+
 // Même heure creuse que la sauvegarde (6h UTC) — l'ordre entre les deux jobs n'a pas d'importance,
 // ils touchent des données différentes. Ne bloque jamais le serveur si ça échoue.
 cron.schedule('0 6 * * *', async () => {
@@ -2341,6 +2375,13 @@ cron.schedule('0 6 * * *', async () => {
     if (total > 0) console.log(`🗑️ Corbeille catalogue purgée : ${resultat.medicaments} médicament(s), ${resultat.actes} acte(s)`);
   } catch (e) {
     console.error('❌ Échec de la purge de la corbeille catalogue :', e.message);
+  }
+  // Purge indépendante de la précédente : un échec de l'une ne doit pas empêcher l'autre.
+  try {
+    const purgees = await purgerTracesDecrementStock();
+    if (purgees > 0) console.log(`🧹 ${purgees} trace(s) d'idempotence de décrément de stock purgée(s) (> ${JOURS_TRACES_DECREMENT_STOCK} jours).`);
+  } catch (e) {
+    console.error('❌ Échec de la purge des traces de décrément de stock :', e.message);
   }
 });
 

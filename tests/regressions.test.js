@@ -1516,3 +1516,39 @@ test("POST /api/dossiers fige nom_origine=nom à la création (avec repli 42703 
   const blocPut = src.slice(src.indexOf("app.put('/api/dossiers/:id'"), src.indexOf("app.get('/api/dossiers/:id/historique'"));
   assert.doesNotMatch(blocPut, /nom_origine/, "un renommage (PUT) ne doit JAMAIS toucher nom_origine — sinon on perdrait la trace du tout premier nom, exactement ce qu'Esdras ne veut pas");
 });
+
+// Audit hors ligne du 01/09 (Esdras : "fais la protection sur le stock aussi") — /api/stock/
+// decrementer et decrementer-dons étaient les 2 seules routes d'écriture de la file hors ligne
+// sans protection contre un rejeu. Depuis que la file garde les opérations "en vol" jusqu'à
+// confirmation (chf-app2/api/supabase.js), un arrêt brutal entre l'envoi et la confirmation les
+// rejoue au démarrage : sans garde, le stock aurait été déduit 2 fois pour une seule vente.
+test("POST /api/stock/decrementer et /decrementer-dons transmettent local_id à la fonction Postgres et traitent un rejeu comme un succès, sans re-décrémenter", () => {
+  const bloc = blocRoutePermission("app.post('/api/stock/decrementer'", "app.post('/api/stock/decrementer-dons'");
+  assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId \|\| null;/);
+  assert.match(bloc, /supabase\.rpc\('decrementer_stock_medicaments', \{ p_decrements: decrements, p_local_id: local_id \}\)/,
+    "la garde d'idempotence vit dans la fonction Postgres, dans la MÊME transaction que le décrément");
+  assert.match(bloc, /if \(data\.deja_applique\) \{/, "un rejeu doit répondre 200 (succès) pour que la file le sorte définitivement, jamais une erreur qui le ferait retenter en boucle");
+
+  const blocDons = blocRoutePermission("app.post('/api/stock/decrementer-dons'", '// ============================================================');
+  assert.match(blocDons, /const local_id = req\.body\.local_id \|\| req\.body\.localId \|\| null;/);
+  assert.match(blocDons, /supabase\.rpc\('decrementer_stock_dons', \{ p_decrements: decrements, p_local_id: local_id \}\)/);
+  assert.match(blocDons, /if \(data\.deja_applique\) \{/);
+});
+
+test("Les réquisitions continuent d'utiliser la fonction Postgres SANS local_id — elles ne passent jamais par la file hors ligne, leur comportement ne doit pas changer", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf("app.post('/api/requisitions'"), src.indexOf("app.post('/api/requisitions'") + 3000);
+  assert.match(bloc, /supabase\.rpc\('decrementer_stock_medicaments', \{\s*\n?\s*p_decrements/, "doit appeler la surcharge à un seul argument, inchangée");
+  assert.doesNotMatch(bloc, /p_local_id/, "aucune idempotence à ajouter ici : une réquisition est toujours saisie en ligne");
+});
+
+test("Les traces d'idempotence du stock sont purgées automatiquement — sinon la table grossit indéfiniment", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /const JOURS_TRACES_DECREMENT_STOCK = 90;/);
+  assert.match(src, /async function purgerTracesDecrementStock\(\) \{/);
+  assert.match(src, /from\('decrements_stock_appliques'\)\.delete\(\)\.lt\('applique_le', limite\)/);
+  // La purge du stock ne doit pas être avalée par un échec de la purge de la corbeille catalogue.
+  const blocCron = src.slice(src.indexOf("cron.schedule('0 6 * * *'"), src.indexOf("app.post('/api/admin/purger-corbeille-catalogue'"));
+  assert.ok(blocCron.split('try {').length - 1 >= 2, "les 2 purges doivent avoir leur propre try/catch");
+  assert.match(blocCron, /purgerTracesDecrementStock\(\)/);
+});
