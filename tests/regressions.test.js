@@ -1552,3 +1552,97 @@ test("Les traces d'idempotence du stock sont purgées automatiquement — sinon 
   assert.ok(blocCron.split('try {').length - 1 >= 2, "les 2 purges doivent avoir leur propre try/catch");
   assert.match(blocCron, /purgerTracesDecrementStock\(\)/);
 });
+
+// ============================================================
+// LIENS D'INVITATION (retour d'Esdras, 02/09) : "la possibilité de générer un lien temporaire à
+// envoyer à quelqu'un pour qu'elle crée un nouveau compte toute seule, et je prédéfinis le rôle
+// dès le départ". Ces 2 routes sont PUBLIQUES et CRÉENT un compte — l'endroit du backend où une
+// régression coûterait le plus cher. Voir sql/invitations.sql.
+// ============================================================
+
+test("Les routes d'invitation publiques sont AVANT app.use('/api', verifyToken) — une personne invitée n'a pas encore de compte", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const iVerif = src.indexOf("app.get('/invitation/:token'");
+  const iCreation = src.indexOf("app.post('/invitation/:token/creer-compte'");
+  // lastIndexOf : ce chemin est cité dans plusieurs commentaires plus haut (dont celui du portail
+  // patient) — on veut la vraie ligne de code, pas sa première mention en prose.
+  const iMiddleware = src.lastIndexOf("app.use('/api', verifyToken);");
+  assert.ok(iVerif !== -1 && iCreation !== -1, "les 2 routes publiques doivent exister");
+  assert.ok(iVerif < iMiddleware && iCreation < iMiddleware, "hors /api et déclarées avant verifyToken");
+  // Le chemin ne doit surtout pas commencer par /api : app.use('/api', ...) l'intercepterait.
+  assert.doesNotMatch(src.slice(iVerif, iVerif + 60), /\/api\/invitation/);
+});
+
+test("Le rôle d'un compte créé par invitation vient TOUJOURS de la ligne en base, jamais du corps de la requête", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
+  // Le corps n'est déstructuré que pour ces 3 champs — pas de `role` parmi eux.
+  assert.match(bloc, /const \{ identifiant, displayName, password \} = req\.body \|\| \{\};/);
+  assert.doesNotMatch(bloc, /req\.body\.role|role: role\b/, "le rôle ne doit jamais être lu depuis la requête de l'invité");
+  assert.match(bloc, /role: invitation\.role/, "le profil users doit recevoir le rôle de l'invitation");
+});
+
+test("Le lien d'invitation est à USAGE UNIQUE, réservé atomiquement par Postgres avant la création du compte", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
+  // La condition d'unicité doit être DANS la requête SQL (évaluée par Postgres), pas un `if` en
+  // JavaScript entre une lecture et une écriture : deux personnes qui ouvrent le même lien en
+  // même temps passeraient toutes les deux dans ce dernier cas.
+  assert.match(bloc, /\.is\('utilise_le', null\)/, "la réservation doit exiger utilise_le IS NULL côté base");
+  assert.match(bloc, /\.eq\('revoque', false\)/, "un lien annulé ne doit pas pouvoir être réservé");
+  assert.match(bloc, /\.gt\('date_expiration'/, "l'expiration doit être revérifiée au moment de la réservation, pas seulement à la lecture");
+  const iReservation = bloc.indexOf(".is('utilise_le', null)");
+  const iCreation = bloc.indexOf('getAuth().createUser(');
+  assert.ok(iReservation < iCreation, "le lien doit être réservé AVANT de créer le compte, jamais après");
+  // Et relâché si la création échoue, sinon une faute de frappe brûle l'invitation.
+  assert.match(bloc, /const relacher = async \(\) => \{/);
+  // Deux points de relâchement : l'échec de création Firebase (identifiant déjà pris, mot de passe
+  // refusé, panne) et l'échec d'écriture du profil users. Aucun chemin d'échec après la
+  // réservation ne doit sortir sans passer par l'un des deux.
+  assert.ok((bloc.match(/await relacher\(\);/g) || []).length >= 2, "relâché sur chaque chemin d'échec après la réservation");
+});
+
+test("Un lien d'invitation ne peut JAMAIS donner le rôle administrateur", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const ligne = src.match(/const ROLES_INVITABLES = \[[^\]]*\];/);
+  assert.ok(ligne, 'ROLES_INVITABLES doit exister');
+  assert.doesNotMatch(ligne[0], /'administrateur'/, "un lien voyage dans WhatsApp : les pleins pouvoirs se donnent à la main");
+  // Et la vérification doit être faite côté serveur, pas seulement en cachant l'option à l'écran.
+  const bloc = blocRoutePermission("app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'");
+  assert.match(bloc, /ROLES_INVITABLES\.includes\(role\)/);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/);
+});
+
+test("Le jeton d'invitation est cryptographiquement imprévisible et sa durée de validité est bornée côté serveur", () => {
+  const bloc = blocRoutePermission("app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'");
+  assert.match(bloc, /crypto\.randomBytes\(32\)\.toString\('base64url'\)/, "Math.random() serait devinable");
+  assert.match(bloc, /heures > HEURES_VALIDITE_MAX/, "le corps de la requête ne doit pas pouvoir fabriquer un lien valable dix ans");
+});
+
+test("Les 3 routes d'administration des invitations exigent utilisateurs_gerer", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  for (const route of ["app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'", "app.patch('/api/admin/invitations/:token/revoquer'"]) {
+    const i = src.indexOf(route);
+    assert.ok(i !== -1, `route introuvable : ${route}`);
+    assert.match(src.slice(i, i + 300), /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, route);
+  }
+});
+
+test("L'identifiant choisi par la personne invitée ne peut pas sortir du domaine @chf.com", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
+  assert.match(bloc, /\/\^\[a-z0-9\._-\]\{3,40\}\$\/\.test\(identifiantPropre\)/, "liste blanche stricte : ni @, ni espace, ni accent");
+  assert.match(bloc, /const email = `\$\{identifiantPropre\}@chf\.com`;/, "le domaine est imposé par le serveur, jamais fourni par l'invité");
+  assert.doesNotMatch(bloc, /email: req\.body/, "l'email complet ne doit jamais venir de la requête");
+});
+
+test("La table invitations est sauvegardée et purgée automatiquement", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf('const TABLES_A_SAUVEGARDER'), src.indexOf('async function sauvegarderVersStorage'));
+  assert.match(bloc, /'invitations'/);
+  assert.match(src, /const JOURS_CONSERVATION_INVITATIONS = 90;/);
+  assert.match(src, /from\('invitations'\)\.delete\(\)\.lt\('date_creation', limite\)/);
+  const blocCron = src.slice(src.indexOf("cron.schedule('0 6 * * *'", src.indexOf('purgerCorbeilleCatalogue')), src.indexOf("app.post('/api/admin/purger-corbeille-catalogue'"));
+  assert.match(blocCron, /purgerInvitationsAnciennes\(\)/);
+  assert.ok(blocCron.split('try {').length - 1 >= 3, "chaque purge doit avoir son propre try/catch — un échec ne doit pas emporter les autres");
+});

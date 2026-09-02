@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
@@ -228,6 +229,182 @@ app.post('/portail-patient/recherche', async (req, res) => {
     articles: (f.raw_state?.lignesCalcul || []).map(l => ({ nom: l.nom, quantite: l.qte })),
   }));
   res.json({ nomPatient: dossier.nom, historique });
+});
+
+// ============================================================
+// LIENS D'INVITATION (retour d'Esdras, 02/09) : "la possibilité de générer un lien temporaire à
+// envoyer à quelqu'un pour qu'elle crée un nouveau compte toute seule, et je prédéfinis le rôle
+// dès le départ." L'administrateur génère le lien (POST /api/admin/invitations, plus bas), le
+// transmet lui-même par WhatsApp — même raison que le lien de réinitialisation : identifiant@chf.com
+// n'est pas une vraie boîte mail, aucun email ne partira jamais d'ici.
+//
+// Les 2 routes ci-dessous sont PUBLIQUES (hors /api, donc hors verifyToken) : la personne invitée
+// n'a par définition pas encore de compte. C'est le 2e accès public de tout ce backend après le
+// portail patient, et le plus sensible des deux — il CRÉE un compte. D'où :
+//   - un jeton de 32 octets aléatoires (crypto.randomBytes), impossible à deviner ou à énumérer ;
+//   - à USAGE UNIQUE, réservé de façon atomique (UPDATE ... WHERE utilise_le IS NULL) avant même
+//     de créer le compte : deux personnes qui ouvrent le même lien en même temps, une seule passe ;
+//   - une date d'expiration obligatoire, vérifiée ici et pas seulement à l'affichage ;
+//   - le rôle vient TOUJOURS de la ligne en base, JAMAIS du corps de la requête — sinon l'invité
+//     n'aurait qu'à changer un champ dans sa requête pour se donner le rôle qu'il veut ;
+//   - le rôle 'administrateur' est refusé à la création du lien (voir plus bas) : un lien qui
+//     traîne dans une conversation WhatsApp ne doit jamais pouvoir donner les pleins pouvoirs.
+const tentativesInvitation = new Map(); // cle: "ip" -> [timestamps]
+const FENETRE_LIMITE_INVITATION_MS = 15 * 60 * 1000;
+const MAX_TENTATIVES_INVITATION = 10;
+
+function limiteInvitationAtteinte(ip) {
+  const maintenant = Date.now();
+  const tentatives = (tentativesInvitation.get(ip) || []).filter(t => maintenant - t < FENETRE_LIMITE_INVITATION_MS);
+  tentatives.push(maintenant);
+  tentativesInvitation.set(ip, tentatives);
+  // Même ménage que pour le portail patient : sans ça, chaque IP ayant essayé une fois laisserait
+  // une clé pour toujours sur une route publique atteignable par n'importe quel scanner d'internet.
+  if (tentativesInvitation.size > 5000) {
+    for (const [k, ts] of tentativesInvitation) {
+      if (!ts.some(t => maintenant - t < FENETRE_LIMITE_INVITATION_MS)) tentativesInvitation.delete(k);
+    }
+  }
+  return tentatives.length > MAX_TENTATIVES_INVITATION;
+}
+
+// Lit une invitation et dit si elle est encore utilisable. Message d'erreur volontairement précis
+// ICI (expiré / déjà utilisé / inconnu) : contrairement au portail patient, il n'y a rien à
+// deviner — sans le jeton, qui fait 43 caractères aléatoires, on n'atteint jamais cette réponse ;
+// et la personne invitée doit pouvoir comprendre pourquoi son lien ne marche pas.
+async function lireInvitationUtilisable(token) {
+  const { data } = await supabase.from('invitations').select('*').eq('token', token).maybeSingle();
+  if (!data) return { erreur: "Ce lien d'invitation n'existe pas ou a été supprimé." };
+  if (data.revoque) return { erreur: "Ce lien d'invitation a été annulé par l'administrateur." };
+  if (data.utilise_le) return { erreur: "Ce lien a déjà servi à créer un compte. Demande-en un nouveau." };
+  if (new Date(data.date_expiration) < new Date()) return { erreur: "Ce lien a expiré. Demande-en un nouveau à l'administrateur." };
+  return { invitation: data };
+}
+
+app.get('/invitation/:token', async (req, res) => {
+  if (limiteInvitationAtteinte(req.ip)) {
+    return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
+  }
+  const { erreur, invitation } = await lireInvitationUtilisable(req.params.token);
+  if (erreur) return res.status(404).json({ error: erreur });
+  // Rien d'autre ne sort d'ici : ni qui a créé le lien, ni la note interne de l'administrateur
+  // (« le nouveau caissier de nuit »), qui ne regarde pas la personne invitée.
+  res.json({ valide: true, role: invitation.role, expire_le: invitation.date_expiration });
+});
+
+app.post('/invitation/:token/creer-compte', async (req, res) => {
+  if (limiteInvitationAtteinte(req.ip)) {
+    return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
+  }
+  const { identifiant, displayName, password } = req.body || {};
+  if (!identifiant || !displayName || !password) {
+    return res.status(400).json({ error: "Identifiant, nom complet et mot de passe sont requis." });
+  }
+  // Même forme d'identifiant que les comptes créés à la main par l'administrateur : un mot simple,
+  // auquel on ajoute @chf.com. On refuse tout ce qui n'est pas [a-z0-9._-] pour que la personne
+  // invitée ne puisse pas fabriquer une adresse dans un autre domaine, ni glisser d'espace.
+  const identifiantPropre = String(identifiant).trim().toLowerCase().replace(/@chf\.com$/, '');
+  if (!/^[a-z0-9._-]{3,40}$/.test(identifiantPropre)) {
+    return res.status(400).json({ error: "Identifiant invalide : 3 à 40 caractères, lettres/chiffres/point/tiret uniquement, sans espace ni accent." });
+  }
+  if (String(password).length < 8) {
+    return res.status(400).json({ error: "Le mot de passe doit faire au moins 8 caractères." });
+  }
+  if (!String(displayName).trim()) {
+    return res.status(400).json({ error: "Le nom complet est requis." });
+  }
+
+  const { erreur } = await lireInvitationUtilisable(req.params.token);
+  if (erreur) return res.status(404).json({ error: erreur });
+
+  // RÉSERVATION ATOMIQUE avant toute création : la condition utilise_le IS NULL est évaluée par
+  // Postgres, pas par nous — deux requêtes simultanées avec le même jeton ne peuvent pas passer
+  // toutes les deux. `date_expiration` est revérifiée ici aussi pour qu'un lien qui expire pile
+  // entre la lecture ci-dessus et cette écriture ne passe pas.
+  const { data: reserve, error: erreurReservation } = await supabase.from('invitations')
+    .update({ utilise_le: new Date().toISOString() })
+    .eq('token', req.params.token).is('utilise_le', null).eq('revoque', false)
+    .gt('date_expiration', new Date().toISOString())
+    .select();
+  if (erreurReservation) return res.status(500).json({ error: erreurReservation.message });
+  if (!reserve || reserve.length === 0) {
+    return res.status(409).json({ error: "Ce lien vient d'être utilisé. Demande-en un nouveau." });
+  }
+  const invitation = reserve[0];
+  // Si la création échoue (identifiant déjà pris, Firebase indisponible), le lien est RELIBÉRÉ :
+  // sans ça, une personne qui se trompe d'identifiant une seule fois brûlerait son invitation et
+  // devrait rappeler l'administrateur.
+  // .select() obligatoire : un UPDATE qui ne touche aucune ligne ne lève AUCUNE erreur côté
+  // Supabase (voir le test "Toutes les écritures vérifient une ligne réellement affectée"). Ici,
+  // une libération silencieusement sans effet laisserait l'invitation brûlée alors que le compte
+  // n'a pas été créé — la personne appellerait l'administrateur sans que rien ne l'explique.
+  const relacher = async () => {
+    const { data, error } = await supabase.from('invitations')
+      .update({ utilise_le: null }).eq('token', req.params.token).select();
+    if (error || !data || data.length === 0) {
+      console.error(`⚠️ Invitation ${req.params.token.slice(0, 8)}… NON relâchée après un échec de création — elle restera inutilisable.`, error ? error.message : '0 ligne');
+    }
+  };
+
+  const email = `${identifiantPropre}@chf.com`;
+  let nouvelUtilisateur;
+  try {
+    nouvelUtilisateur = await getAuth().createUser({ email, password: String(password), emailVerified: true });
+    await getAuth().setCustomUserClaims(nouvelUtilisateur.uid, { role: 'authenticated' });
+  } catch (e) {
+    await relacher();
+    if (e.code === 'auth/email-already-exists') {
+      return res.status(409).json({ error: "Cet identifiant est déjà pris. Choisis-en un autre." });
+    }
+    if (e.code === 'auth/invalid-password') {
+      return res.status(400).json({ error: "Mot de passe refusé : au moins 8 caractères." });
+    }
+    return res.status(500).json({ error: e.message });
+  }
+
+  // Le profil est écrit ICI, côté serveur (clé service_role) : la personne invitée n'a aucun droit
+  // d'écriture sur la table users depuis son navigateur, et surtout le rôle doit venir de
+  // l'invitation, pas d'elle. `active: true` explicitement, jamais de date_expiration (l'accès
+  // temporaire reste une décision distincte, prise après coup depuis Gestion des utilisateurs).
+  const { error: erreurProfil } = await supabase.from('users').insert({
+    id: nouvelUtilisateur.uid, email, display_name: String(displayName).trim(),
+    role: invitation.role, active: true,
+  });
+  if (erreurProfil) {
+    // Le compte Firebase existe mais n'a pas de profil : sans rôle il ne peut rien faire et le
+    // prochain login le recréerait en 'auditeur' (voir ApplicationRoot). On le supprime pour que
+    // l'invité puisse simplement recommencer avec le même lien, relâché juste après.
+    try { await getAuth().deleteUser(nouvelUtilisateur.uid); } catch (_) {}
+    await relacher();
+    return res.status(500).json({ error: erreurProfil.message });
+  }
+
+  // Complète la ligne déjà réservée plus haut (utilise_le est posé depuis la réservation). Le
+  // compte existe déjà à ce stade : si cette écriture-ci rate, l'invitation reste bien consommée,
+  // seule la trace de QUI l'a utilisée manque — journalisée pour qu'elle ne disparaisse pas.
+  const { data: trace, error: erreurTrace } = await supabase.from('invitations').update({
+    utilise_par_uid: nouvelUtilisateur.uid, utilise_par_email: email,
+  }).eq('token', req.params.token).select();
+  if (erreurTrace || !trace || trace.length === 0) {
+    console.warn(`⚠️ Invitation ${req.params.token.slice(0, 8)}… : compte ${email} créé, mais l'utilisateur n'a pas pu être noté sur le lien.`, erreurTrace ? erreurTrace.message : '0 ligne');
+  }
+
+  // Trace anti-fraude : c'est la seule création de compte que personne de connecté n'a effectuée.
+  // effectue_par_uid porte l'UID du NOUVEAU compte, et details rappelle qui avait émis le lien.
+  // Best-effort comme partout ailleurs (enregistrerAudit côté front) : un journal qui refuse la
+  // ligne ne doit pas annuler un compte déjà créé — mais l'échec est journalisé, pas avalé.
+  const { error: erreurAudit } = await supabase.from('audit_log').insert({
+    id: crypto.randomUUID(),
+    action: 'creation_compte_par_invitation',
+    effectue_par: String(displayName).trim(),
+    effectue_par_uid: nouvelUtilisateur.uid,
+    details: { email, role: invitation.role, invite_par: invitation.cree_par_email || invitation.cree_par_uid || null },
+    date: new Date().toISOString(),
+  });
+  if (erreurAudit) console.warn('Audit de création par invitation non enregistré :', erreurAudit.message);
+
+  console.log(`✅ Compte créé par invitation : ${email} (rôle ${invitation.role})`);
+  res.status(201).json({ success: true, email, role: invitation.role });
 });
 
 // Vérification via Firebase Admin SDK — remplace la vérification Supabase.
@@ -2202,6 +2379,68 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------
+// Côté administrateur des liens d'invitation (partie publique : voir /invitation/:token plus haut).
+// ------------------------------------------------------------
+// Rôles qu'un lien d'invitation peut accorder. 'administrateur' est VOLONTAIREMENT absent : un
+// lien d'invitation voyage dans une conversation WhatsApp, se transfère en un geste et reste
+// lisible longtemps après coup. Donner les pleins pouvoirs par ce canal serait le maillon le plus
+// faible de toute la sécurité de l'app — un administrateur se crée à la main, depuis Gestion des
+// utilisateurs, avec un mot de passe que l'administrateur en place choisit lui-même.
+const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'visiteur'];
+// Durées proposées à l'écran. Bornées ici aussi : le corps de la requête ne doit pas pouvoir
+// fabriquer un lien valable dix ans.
+const HEURES_VALIDITE_MAX = 168; // 7 jours
+
+app.post('/api/admin/invitations', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const { role, heuresValidite, note } = req.body || {};
+  if (!ROLES_INVITABLES.includes(role)) {
+    return res.status(400).json({ error: `Rôle invalide ou non autorisé par lien d'invitation. Rôles possibles : ${ROLES_INVITABLES.join(', ')}.` });
+  }
+  const heures = Number(heuresValidite);
+  if (!Number.isFinite(heures) || heures <= 0 || heures > HEURES_VALIDITE_MAX) {
+    return res.status(400).json({ error: `Durée de validité invalide (entre 1 et ${HEURES_VALIDITE_MAX} heures).` });
+  }
+  // 32 octets aléatoires = 43 caractères en base64url. Sûr cryptographiquement (crypto, pas
+  // Math.random) et sans caractère qui pose problème dans une URL collée dans WhatsApp.
+  const token = crypto.randomBytes(32).toString('base64url');
+  const { data, error } = await supabase.from('invitations').insert({
+    token, role, note: (note || '').trim() || null,
+    cree_par_uid: req.user.id, cree_par_email: req.user.email || null,
+    date_expiration: new Date(Date.now() + heures * 3600000).toISOString(),
+  }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json({ ...data, lien: `${ORIGINE_FRONTEND}/invitation/${token}` });
+});
+
+app.get('/api/admin/invitations', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const { data, error } = await supabase.from('invitations').select('*')
+    .order('date_creation', { ascending: false }).limit(50);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json((data || []).map(i => ({ ...i, lien: `${ORIGINE_FRONTEND}/invitation/${i.token}` })));
+});
+
+// Annulation d'un lien encore ouvert (envoyé à la mauvaise personne, ou plus nécessaire).
+// On ne SUPPRIME pas la ligne : la trace de qui a invité qui, et avec quel rôle, doit rester.
+app.patch('/api/admin/invitations/:token/revoquer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const { data, error } = await supabase.from('invitations')
+    .update({ revoque: true }).eq('token', req.params.token).is('utilise_le', null).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) {
+    return res.status(409).json({ error: "Ce lien a déjà servi — impossible de l'annuler. Désactive plutôt le compte créé." });
+  }
+  res.json(data[0]);
+});
+
 // ============================================================
 // CALLMEBOT — retour d'Esdras (29/08) : alertes WhatsApp pour 3 événements (stock bas franchi,
 // demande d'exonération en attente, sauvegarde automatique échouée). CALLMEBOT_PHONE/APIKEY dans
@@ -2255,6 +2494,7 @@ const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
   'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
+  'invitations',
 ];
 
 async function sauvegarderVersStorage() {
@@ -2366,6 +2606,19 @@ async function purgerTracesDecrementStock() {
   return (data || []).length;
 }
 
+// Liens d'invitation : un lien expire au bout de quelques heures/jours, mais la LIGNE reste
+// (c'est la trace de qui a invité qui, avec quel rôle). 90 jours suffisent largement à retrouver
+// l'origine d'un compte récent ; au-delà, l'information utile vit dans audit_log
+// ('creation_compte_par_invitation'), qui n'est jamais purgé, lui.
+const JOURS_CONSERVATION_INVITATIONS = 90;
+async function purgerInvitationsAnciennes() {
+  const limite = new Date(Date.now() - JOURS_CONSERVATION_INVITATIONS * 86400000).toISOString();
+  const { data, error } = await supabase
+    .from('invitations').delete().lt('date_creation', limite).select('token');
+  if (error) throw error;
+  return (data || []).length;
+}
+
 // Même heure creuse que la sauvegarde (6h UTC) — l'ordre entre les deux jobs n'a pas d'importance,
 // ils touchent des données différentes. Ne bloque jamais le serveur si ça échoue.
 cron.schedule('0 6 * * *', async () => {
@@ -2382,6 +2635,12 @@ cron.schedule('0 6 * * *', async () => {
     if (purgees > 0) console.log(`🧹 ${purgees} trace(s) d'idempotence de décrément de stock purgée(s) (> ${JOURS_TRACES_DECREMENT_STOCK} jours).`);
   } catch (e) {
     console.error('❌ Échec de la purge des traces de décrément de stock :', e.message);
+  }
+  try {
+    const purgees = await purgerInvitationsAnciennes();
+    if (purgees > 0) console.log(`🧹 ${purgees} lien(s) d'invitation périmé(s) purgé(s) (> ${JOURS_CONSERVATION_INVITATIONS} jours).`);
+  } catch (e) {
+    console.error('❌ Échec de la purge des invitations périmées :', e.message);
   }
 });
 
