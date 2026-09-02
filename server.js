@@ -575,6 +575,10 @@ function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
   return {
     id: ep.id,
     nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
+    // sexe (02/09) : seul champ dossier ajouté ici pour un rapport (MSPP, répartition homme/femme
+    // des examens) — poids/conjoint restent volontairement absents de cette liste, lus seulement
+    // via GET /api/dossiers/:id (Fiche Patient), aucun rapport n'en ayant besoin jusqu'ici.
+    sexe: dossier?.sexe || null,
     telephone: dossier?.telephone, adresse: dossier?.adresse, numDossier: dossier?.numero_dossier,
     typePatient: typePatientVersFlat(ep.type_patient),
     ongPartenaire: ep.ong_partenaire || null,
@@ -1040,13 +1044,21 @@ app.get('/api/dossiers/:id', async (req, res) => {
 // (nouvelles colonnes, voir sql/ajoute_poids_conjoint_dossiers.sql) toujours acceptés tels quels
 // (pas de contrainte d'unicité), numero_dossier réutilise le même traitement du conflit 23505 que
 // POST /api/dossiers ci-dessus (déjà utilisé par un AUTRE patient).
+// Retour d'Esdras (02/09) : sexe ajouté pour le rapport MSPP (répartition homme/femme des examens,
+// voir components/RapportCHF.js) — contrairement à poids/conjoint, validé ICI en plus de la
+// contrainte CHECK côté base (sql/ajoute_sexe_dossiers.sql) : c'est la seule colonne de cette
+// table dont la valeur EXACTE alimente un calcul plutôt qu'un simple affichage, et un rejet 400
+// clair vaut mieux que l'erreur Postgres brute d'une contrainte violée remontant telle quelle.
 app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier } = req.body;
+  const { nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
-  const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint };
+  if (sexe !== undefined && sexe !== null && sexe !== 'M' && sexe !== 'F') {
+    return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
+  }
+  const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint, sexe: sexe || null };
   if (numero_dossier !== undefined) {
     if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
     maj.numero_dossier = numero_dossier;

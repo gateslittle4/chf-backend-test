@@ -268,8 +268,8 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
 // — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
 test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
   const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
-  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, numero_dossier \} = req\.body;/);
-  assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint \};/, "poids/conjoint doivent toujours être écrits, sans condition");
+  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier \} = req\.body;/);
+  assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint, sexe: sexe \|\| null \};/, "poids/conjoint/sexe doivent toujours être écrits, sans condition");
   assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
   assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
   assert.match(bloc, /if \(error\.code === '23505'\) \{\s*\n\s*return res\.status\(409\)\.json\(\{ error: `Le numéro de dossier "\$\{numero_dossier\}" est déjà utilisé par un autre patient\.` \}\);/, "même message de conflit que POST /api/dossiers");
@@ -1645,4 +1645,24 @@ test("La table invitations est sauvegardée et purgée automatiquement", () => {
   const blocCron = src.slice(src.indexOf("cron.schedule('0 6 * * *'", src.indexOf('purgerCorbeilleCatalogue')), src.indexOf("app.post('/api/admin/purger-corbeille-catalogue'"));
   assert.match(blocCron, /purgerInvitationsAnciennes\(\)/);
   assert.ok(blocCron.split('try {').length - 1 >= 3, "chaque purge doit avoir son propre try/catch — un échec ne doit pas emporter les autres");
+});
+
+// ============================================================
+// SEXE (retour d'Esdras, 02/09) : ajouté pour le rapport MSPP (répartition homme/femme des
+// examens de laboratoire, voir components/RapportCHF.js dans chf-app2). Contrairement à
+// poids/conjoint (texte libre), c'est la seule colonne dossiers dont la valeur EXACTE alimente
+// un calcul plutôt qu'un simple affichage — voir sql/ajoute_sexe_dossiers.sql.
+// ============================================================
+
+test("PUT /api/dossiers/:id refuse toute valeur de sexe autre que 'M', 'F' ou vide — la contrainte CHECK en base ne doit jamais être le premier rempart", () => {
+  const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
+  assert.match(bloc, /if \(sexe !== undefined && sexe !== null && sexe !== 'M' && sexe !== 'F'\) \{/, "un sexe invalide doit être un 400 clair, pas l'erreur Postgres brute de la contrainte CHECK");
+  const iValidation = bloc.indexOf("sexe !== 'M' && sexe !== 'F'");
+  const iMaj = bloc.indexOf('const maj = {');
+  assert.ok(iValidation !== -1 && iValidation < iMaj, "la validation doit avoir lieu AVANT d'écrire en base");
+});
+
+test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne peut jamais répartir homme/femme", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('function assemblerEpisodeFlat'), serverSrc.indexOf('function assemblerEpisodeFlat') + 3000);
+  assert.match(bloc, /sexe: dossier\?\.sexe \|\| null,/);
 });
