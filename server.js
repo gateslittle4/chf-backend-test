@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
@@ -2539,9 +2540,15 @@ async function sauvegarderVersStorage() {
   }
 
   const nomFichier = `backup-${new Date().toISOString().slice(0, 10)}.json`;
+  // Gardé pour la copie email plus bas (envoyerSauvegardeParEmail) : sérialiser deux fois la même
+  // sauvegarde (une pour Storage, une pour l'email) risquerait de produire deux fichiers
+  // légèrement différents si un appel concurrent modifiait `contenu` entre les deux — improbable
+  // ici (fonction locale, pas de mutation externe possible) mais une seule sérialisation reste la
+  // seule garantie que les deux copies sont VRAIMENT identiques.
+  const contenuBuffer = Buffer.from(JSON.stringify(contenu));
   const { error: erreurUpload } = await supabase.storage
     .from(BUCKET_SAUVEGARDES)
-    .upload(nomFichier, Buffer.from(JSON.stringify(contenu)), { contentType: 'application/json', upsert: true });
+    .upload(nomFichier, contenuBuffer, { contentType: 'application/json', upsert: true });
   if (erreurUpload) throw new Error(`Envoi vers Storage : ${erreurUpload.message}`);
 
   // Rétention : garde les 30 dernières sauvegardes quotidiennes (~1 mois), supprime le reste —
@@ -2556,7 +2563,40 @@ async function sauvegarderVersStorage() {
   const nombreLignes = Object.fromEntries(
     TABLES_A_SAUVEGARDER.filter(t => contenu[t]).map(t => [t, contenu[t].length])
   );
-  return { fichier: nomFichier, nombreLignes, tablesEnEchec };
+  return { fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer };
+}
+
+// Copie HORS SUPABASE (retour d'Esdras, 02/09 : "pourquoi la sauvegarde est sur Supabase ?" — la
+// bonne question à se poser). Une sauvegarde qui vit dans le MÊME projet que les données qu'elle
+// protège ne protège de rien en cas d'incident sur ce projet précis (panne, suspension pour
+// facturation impayée, ou un accès malveillant qui supprime les données ET leur sauvegarde d'un
+// seul geste, puisque les deux sont à portée de la même clé). Envoyée par email, sur un compte
+// Gmail totalement indépendant de Supabase : un incident sur l'un n'emporte jamais l'autre.
+//
+// EMAIL_SAUVEGARDE_MOT_DE_PASSE_APP est un "mot de passe d'application" Gmail — PAS le vrai mot de
+// passe du compte — révocable seul, à tout moment, sans jamais toucher au compte lui-même. Comme
+// CallMeBot, best-effort et jamais codé en dur : si les 3 variables d'environnement ne sont pas
+// encore posées dans Render, la sauvegarde Supabase (le principal) continue normalement, seule
+// cette copie manque, avec un avertissement dans les logs plutôt qu'un échec silencieux.
+async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
+  const expediteur = process.env.EMAIL_SAUVEGARDE_EXPEDITEUR;
+  const motDePasseApp = process.env.EMAIL_SAUVEGARDE_MOT_DE_PASSE_APP;
+  const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
+  if (!expediteur || !motDePasseApp || !destinataire) {
+    console.warn('Copie de sauvegarde par email NON envoyée — EMAIL_SAUVEGARDE_EXPEDITEUR/MOT_DE_PASSE_APP/DESTINATAIRE manquant(s) dans les variables d\'environnement Render.');
+    return;
+  }
+  const transporteur = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: expediteur, pass: motDePasseApp },
+  });
+  await transporteur.sendMail({
+    from: expediteur,
+    to: destinataire,
+    subject: `Sauvegarde CHF — ${nomFichier}`,
+    text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
+    attachments: [{ filename: nomFichier, content: contenuBuffer, contentType: 'application/json' }],
+  });
 }
 
 // Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le
@@ -2570,6 +2610,16 @@ cron.schedule('0 6 * * *', async () => {
     // ne saurait qu'une table n'est plus protégée, parfois pendant des mois.
     if (resultat.tablesEnEchec && resultat.tablesEnEchec.length > 0) {
       await envoyerCallMeBot(`⚠️ CHF : sauvegarde faite, mais ${resultat.tablesEnEchec.length} table(s) n'ont PAS pu être sauvegardées — ${resultat.tablesEnEchec.join(' ; ')}`);
+    }
+    // Copie hors Supabase (02/09) — échec séparé de la sauvegarde principale : Supabase a déjà
+    // sa copie, celle-ci n'en est qu'une seconde. Un échec ici mérite quand même une alerte : une
+    // copie hors site qui ne part plus, en silence, pendant des semaines n'a plus aucune valeur
+    // le jour où on en a besoin.
+    try {
+      await envoyerSauvegardeParEmail(resultat.fichier, resultat.contenuBuffer);
+    } catch (e) {
+      console.error('❌ Échec de la copie de sauvegarde par email :', e.message);
+      await envoyerCallMeBot(`⚠️ CHF : sauvegarde Supabase faite, mais la copie par email a échoué (${e.message}).`);
     }
   } catch (e) {
     console.error('❌ Échec de la sauvegarde automatique :', e.message);
@@ -2677,7 +2727,16 @@ app.post('/api/admin/backup-manuel', async (req, res) => {
   }
   try {
     const resultat = await sauvegarderVersStorage();
-    res.json({ success: true, ...resultat });
+    // La copie email suit le même sort qu'à 6h UTC : un échec ici ne doit jamais transformer un
+    // succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour vérifier que tout
+    // fonctionne) mérite de savoir si cette 2e copie est vraiment partie, pas seulement la 1re.
+    let emailEnvoye = false, erreurEmail = null;
+    try {
+      await envoyerSauvegardeParEmail(resultat.fichier, resultat.contenuBuffer);
+      emailEnvoye = true;
+    } catch (e) { erreurEmail = e.message; }
+    const { contenuBuffer, ...resultatSansBuffer } = resultat;
+    res.json({ success: true, ...resultatSansBuffer, emailEnvoye, erreurEmail });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

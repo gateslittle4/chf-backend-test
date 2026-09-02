@@ -1666,3 +1666,44 @@ test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne pe
   const bloc = serverSrc.slice(serverSrc.indexOf('function assemblerEpisodeFlat'), serverSrc.indexOf('function assemblerEpisodeFlat') + 3000);
   assert.match(bloc, /sexe: dossier\?\.sexe \|\| null,/);
 });
+
+// ============================================================
+// COPIE DE SAUVEGARDE HORS SUPABASE (retour d'Esdras, 02/09) : "pourquoi la sauvegarde est sur
+// Supabase ?" — une sauvegarde qui vit dans le même projet que les données qu'elle protège ne
+// survit pas à un incident sur ce projet. Envoyée par email (Gmail), sur un compte totalement
+// indépendant de Supabase, best-effort comme CallMeBot : jamais codé en dur, jamais bloquant.
+// ============================================================
+
+test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie email ne doit jamais re-sérialiser une 2e fois", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function sauvegarderVersStorage'), serverSrc.indexOf('async function envoyerSauvegardeParEmail'));
+  assert.match(bloc, /const contenuBuffer = Buffer\.from\(JSON\.stringify\(contenu\)\);/);
+  assert.match(bloc, /\.upload\(nomFichier, contenuBuffer,/, "l'upload Storage doit utiliser CE buffer, pas une sérialisation séparée");
+  assert.match(bloc, /return \{ fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer \};/);
+});
+
+test("envoyerSauvegardeParEmail est best-effort : les 3 variables d'environnement manquantes ne lèvent jamais, juste un avertissement", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerSauvegardeParEmail'), serverSrc.indexOf('cron.schedule(\'0 6 * * *\''));
+  assert.match(bloc, /if \(!expediteur \|\| !motDePasseApp \|\| !destinataire\) \{/);
+  assert.match(bloc, /console\.warn\(/, "doit avertir plutôt que planter quand la config n'est pas encore posée");
+  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans EMAIL_SAUVEGARDE_* planterait au démarrage");
+  // Le mot de passe attendu est explicitement documenté (dans le commentaire juste au-dessus de
+  // la fonction) comme un mot de passe D'APPLICATION — jamais le vrai mot de passe Gmail du compte.
+  const blocAvecCommentaire = serverSrc.slice(serverSrc.indexOf('// Copie HORS SUPABASE'), serverSrc.indexOf('async function envoyerSauvegardeParEmail'));
+  assert.match(blocAvecCommentaire, /mot de passe d'application/i);
+});
+
+test("La copie email de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
+  const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'", serverSrc.indexOf('async function sauvegarderVersStorage')), serverSrc.indexOf("// ============================================================\n// CORBEILLE CATALOGUE"));
+  assert.match(blocCron, /await envoyerSauvegardeParEmail\(resultat\.fichier, resultat\.contenuBuffer\);/);
+  const iEmailCall = blocCron.indexOf('envoyerSauvegardeParEmail(');
+  const iCatchEmail = blocCron.indexOf('} catch (e) {', iEmailCall);
+  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error('❌ Échec de la sauvegarde automatique"), "le catch de l'email doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
+  assert.match(blocCron, /sauvegarde Supabase faite, mais la copie par email a échoué/, "le message d'alerte doit distinguer clairement les 2 échecs possibles");
+});
+
+test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sérialisé en JSON serait illisible et inutile), mais indique si la copie email est partie", () => {
+  const bloc = blocRoutePermission("app.post('/api/admin/backup-manuel'", "app.get('/api/admin/derniere-sauvegarde'");
+  assert.match(bloc, /const \{ contenuBuffer, \.\.\.resultatSansBuffer \} = resultat;/, "contenuBuffer doit être retiré avant res.json");
+  assert.match(bloc, /res\.json\(\{ success: true, \.\.\.resultatSansBuffer, emailEnvoye, erreurEmail \}\);/);
+  assert.doesNotMatch(bloc, /res\.json\(\{ success: true, \.\.\.resultat \}\)/, "ne doit plus étaler resultat tel quel (contiendrait contenuBuffer)");
+});
