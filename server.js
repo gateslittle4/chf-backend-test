@@ -2211,8 +2211,23 @@ app.post('/api/requisitions', async (req, res) => {
   if (!Array.isArray(lignes) || lignes.length === 0) {
     return res.status(400).json({ error: 'lignes (tableau non vide) requis.' });
   }
+  // Audit hors ligne du 03/09 : cette route était la PIRE des trois trouvées — un rejeu sortait le
+  // stock DEUX fois ET laissait 2 lignes au registre pour une seule demande réelle (le service
+  // reçoit 10 sérums, le stock en compte 20 de moins). Le commentaire d'origine justifiait
+  // l'absence de local_id par "les réquisitions ne passent jamais par la file hors ligne" — c'était
+  // faux : chf.creerRequisition() est un this.request() ordinaire, donc mis en file comme le reste.
+  // Double protection, exactement comme dossiers/fiches/paiements :
+  //   1. la ligne déjà écrite est renvoyée telle quelle (200) si ce local_id est déjà connu ;
+  //   2. le décrément passe par la surcharge idempotente (p_local_id) — donc même si l'insert
+  //      ci-dessous échoue et que l'opération est rejouée, le stock ne sort qu'une fois.
+  const local_id = req.body.local_id || req.body.localId || null;
+  if (local_id) {
+    const { data: existante } = await supabase.from('requisitions').select('*').eq('local_id', local_id).maybeSingle();
+    if (existante) return res.status(200).json({ ...existante, deja_applique: true });
+  }
   const { data, error } = await supabase.rpc('decrementer_stock_medicaments', {
     p_decrements: lignes.map(l => ({ id: l.id, qte: l.qte })),
+    p_local_id: local_id,
   });
   if (error) {
     if (error.code === '42883') {
@@ -2232,9 +2247,18 @@ app.post('/api/requisitions', async (req, res) => {
   });
   const { data: requisition, error: erreurInsert } = await supabase.from('requisitions').insert({
     service_demandeur: service_demandeur.trim(), lignes: lignesAvecNoms,
-    demande_par: demande_par || null, demande_par_uid: req.user.id,
+    demande_par: demande_par || null, demande_par_uid: req.user.id, local_id: local_id || null,
   }).select().single();
-  if (erreurInsert) return res.status(500).json({ error: erreurInsert.message });
+  if (erreurInsert) {
+    // 23505 = ce local_id est déjà en base : un rejeu a doublé l'insert entre la lecture ci-dessus
+    // et ici (deux onglets, ou une reprise de file très rapprochée). La ligne existe donc bien —
+    // la renvoyer vaut mieux qu'une erreur 500 qui ferait retenter indéfiniment.
+    if (erreurInsert.code === '23505' && local_id) {
+      const { data: existante } = await supabase.from('requisitions').select('*').eq('local_id', local_id).maybeSingle();
+      if (existante) return res.status(200).json({ ...existante, deja_applique: true });
+    }
+    return res.status(500).json({ error: erreurInsert.message });
+  }
   res.status(201).json({ ...requisition, items: data.items });
 });
 
@@ -2264,12 +2288,23 @@ app.post('/api/stock/ajouter', async (req, res) => {
   if (!id || typeof quantite !== 'number' || quantite <= 0) {
     return res.status(400).json({ error: 'id et quantite (nombre positif) requis.' });
   }
-  const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: id, p_quantite_ajoutee: quantite });
+  // Audit hors ligne du 03/09 (Esdras : "vérifie la solidité des transactions hors lignes") :
+  // cette route était ADDITIVE et sans protection contre un rejeu — prouvé en exécutant le
+  // mécanisme (tests/hors_ligne_bout_en_bout.test.js) : une réception de 50 boîtes dont la
+  // confirmation se perd en route entrait DEUX fois (stock fantôme, invisible jusqu'à
+  // l'inventaire physique). Même remède que les décréments le 01/09 : surcharge de la fonction
+  // Postgres avec un p_local_id, trace posée dans la MÊME transaction que l'ajout.
+  const local_id = req.body.local_id || req.body.localId || null;
+  const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: id, p_quantite_ajoutee: quantite, p_local_id: local_id });
   if (error) {
     if (error.code === '42883') {
       return res.status(500).json({ error: "La fonction SQL ajouter_stock_medicament n'existe pas encore dans Supabase — colle fonction_maj_stock_medicament.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
+  }
+  if (data && data.deja_applique) {
+    console.log(`↩️ Ajout de stock déjà appliqué (local_id=${local_id}) — rejeu ignoré.`);
+    return res.json({ success: true, deja_applique: true, item: data.item });
   }
   res.json({ success: true, item: data });
 });
@@ -2285,12 +2320,20 @@ app.post('/api/stock/ajouter-don', async (req, res) => {
   if (!id || !ong || typeof quantite !== 'number' || quantite <= 0) {
     return res.status(400).json({ error: 'id, ong et quantite (nombre positif) requis.' });
   }
-  const { data, error } = await supabase.rpc('ajouter_stock_don_medicament', { p_id: id, p_ong: ong, p_quantite_ajoutee: quantite });
+  // Même protection contre le rejeu que /api/stock/ajouter juste au-dessus (audit du 03/09) : un
+  // don de partenaire compté deux fois fausse en plus la facturation à ce partenaire, pas
+  // seulement l'inventaire.
+  const local_id = req.body.local_id || req.body.localId || null;
+  const { data, error } = await supabase.rpc('ajouter_stock_don_medicament', { p_id: id, p_ong: ong, p_quantite_ajoutee: quantite, p_local_id: local_id });
   if (error) {
     if (error.code === '42883') {
       return res.status(500).json({ error: "La fonction SQL ajouter_stock_don_medicament n'existe pas encore dans Supabase — colle fonction_stock_dons.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
+  }
+  if (data && data.deja_applique) {
+    console.log(`↩️ Ajout de stock donné déjà appliqué (local_id=${local_id}) — rejeu ignoré.`);
+    return res.json({ success: true, deja_applique: true, item: data.item });
   }
   res.json({ success: true, item: data });
 });

@@ -1535,11 +1535,47 @@ test("POST /api/stock/decrementer et /decrementer-dons transmettent local_id à 
   assert.match(blocDons, /if \(data\.deja_applique\) \{/);
 });
 
-test("Les réquisitions continuent d'utiliser la fonction Postgres SANS local_id — elles ne passent jamais par la file hors ligne, leur comportement ne doit pas changer", () => {
+// CE TEST AFFIRMAIT L'INVERSE JUSQU'AU 03/09 : "les réquisitions continuent d'utiliser la fonction
+// SANS local_id — elles ne passent jamais par la file hors ligne". C'était FAUX, et l'audit hors
+// ligne du 03/09 (Esdras : "vérifie la solidité des transactions hors lignes") l'a démontré en
+// exécutant le mécanisme : chf.creerRequisition() est un this.request() ordinaire, donc mis en
+// file d'attente comme n'importe quelle autre écriture, donc rejouable après une coupure en pleine
+// synchronisation. Conséquence mesurée : le stock sortait DEUX fois et le registre gardait 2
+// lignes pour une seule demande. Leçon à garder : une hypothèse écrite dans un commentaire (ou
+// gelée dans un test) n'est pas une garantie — seul le code l'est.
+test("Une réquisition est idempotente : local_id sur la ligne ET sur le décrément, pour qu'un rejeu ne sorte pas le stock deux fois", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  const bloc = src.slice(src.indexOf("app.post('/api/requisitions'"), src.indexOf("app.post('/api/requisitions'") + 3000);
-  assert.match(bloc, /supabase\.rpc\('decrementer_stock_medicaments', \{\s*\n?\s*p_decrements/, "doit appeler la surcharge à un seul argument, inchangée");
-  assert.doesNotMatch(bloc, /p_local_id/, "aucune idempotence à ajouter ici : une réquisition est toujours saisie en ligne");
+  // Borne sur la route suivante plutôt qu'un nombre de caractères : la route a grandi avec le
+  // correctif du 03/09 et une fenêtre fixe (3000) coupait juste avant l'insert à vérifier.
+  const bloc = src.slice(src.indexOf("app.post('/api/requisitions'"), src.indexOf("app.get('/api/requisitions'"));
+  // 1. La ligne déjà écrite est reconnue et renvoyée telle quelle, sans retoucher au stock.
+  assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId \|\| null;/);
+  assert.match(bloc, /from\('requisitions'\)\.select\('\*'\)\.eq\('local_id', local_id\)/, "doit d'abord chercher une réquisition déjà enregistrée sous ce local_id");
+  const iLecture = bloc.indexOf(".eq('local_id', local_id)");
+  const iDecrement = bloc.indexOf("supabase.rpc('decrementer_stock_medicaments'");
+  assert.ok(iLecture !== -1 && iLecture < iDecrement, "la reconnaissance du rejeu doit précéder le décrément — sinon le stock sort avant qu'on s'aperçoive du doublon");
+  // 2. Le décrément lui-même passe par la surcharge idempotente (celle du 01/09).
+  assert.match(bloc, /p_local_id: local_id,/, "le décrément doit être protégé même si l'insert échoue ensuite et que l'opération est rejouée");
+  // 3. La ligne porte le local_id, et une collision (23505) renvoie l'existante au lieu d'un 500
+  //    qui ferait retenter la file indéfiniment.
+  assert.match(bloc, /local_id: local_id \|\| null,/, "le local_id doit être écrit sur la ligne");
+  assert.match(bloc, /erreurInsert\.code === '23505' && local_id/);
+});
+
+test("Les 2 routes d'AJOUT de stock sont idempotentes — un rejeu ne fait pas entrer la quantité deux fois", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  for (const [route, fonction, borne] of [
+    ["app.post('/api/stock/ajouter'", 'ajouter_stock_medicament', "app.patch('/api/stock/:id'"],
+    ["app.post('/api/stock/ajouter-don'", 'ajouter_stock_don_medicament', "app.post('/api/stock/decrementer-dons'"],
+  ]) {
+    const i = src.indexOf(route);
+    assert.ok(i !== -1, `route introuvable : ${route}`);
+    const fin = src.indexOf(borne, i);
+    const bloc = src.slice(i, fin !== -1 ? fin : i + 2000);
+    assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId \|\| null;/, route);
+    assert.match(bloc, new RegExp(`supabase\\.rpc\\('${fonction}'[\\s\\S]*?p_local_id: local_id`), `${route} doit appeler la surcharge avec p_local_id`);
+    assert.match(bloc, /if \(data && data\.deja_applique\) \{/, `${route} doit renvoyer deja_applique plutôt que de compter le rejeu comme un vrai ajout`);
+  }
 });
 
 test("Les traces d'idempotence du stock sont purgées automatiquement — sinon la table grossit indéfiniment", () => {

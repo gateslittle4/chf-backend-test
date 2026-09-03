@@ -1,0 +1,78 @@
+-- Audit hors ligne du 03/09 (Esdras : "vérifie la solidité des transactions hors lignes").
+--
+-- CONTEXTE. Depuis le correctif du 01/09 (pending_ops_en_cours), plus aucune opération non
+-- confirmée n'est perdue quand une tablette meurt en pleine synchronisation. Contrepartie assumée
+-- et documentée : une opération partie mais dont la confirmation s'est perdue est REJOUÉE une fois
+-- au démarrage suivant. Ce rejeu est inoffensif partout où le serveur reconnaît un `local_id` déjà
+-- vu — dossiers, épisodes, fiches, paiements (routes idempotentes) et décréments de stock
+-- (sql/idempotence_decrement_stock.sql, 01/09).
+--
+-- CE QUI MANQUAIT. Trois routes ADDITIVES échappaient encore à cette protection. Trouvé en
+-- EXÉCUTANT le mécanisme (tests/hors_ligne_bout_en_bout.test.js, chf-app2), pas en le relisant :
+--
+--   1. POST /api/stock/ajouter      → ajouter_stock_medicament(p_id, p_quantite_ajoutee)
+--      Une réception de 50 boîtes dont la confirmation se perd entrait DEUX fois. Stock fantôme :
+--      la pharmacie compte 200 là où il y a 150, invisible jusqu'à l'inventaire physique.
+--
+--   2. POST /api/stock/ajouter-don  → ajouter_stock_don_medicament(p_id, p_ong, p_quantite_ajoutee)
+--      Même chose, en pire : un don compté double fausse aussi la facturation au partenaire.
+--
+--   3. POST /api/requisitions       → le plus grave des trois.
+--      Un rejeu sortait le stock DEUX fois ET laissait 2 lignes au registre pour une seule
+--      demande (le service reçoit 10 sérums, le stock en compte 20 de moins). Le code justifiait
+--      pourtant l'absence de local_id par un commentaire affirmant que "les réquisitions ne
+--      passent jamais par la file hors ligne" — c'était FAUX : chf.creerRequisition() est un
+--      this.request() ordinaire, donc mis en file comme n'importe quelle autre écriture. Une
+--      hypothèse écrite dans un commentaire n'est pas une garantie ; seul le code l'est.
+--
+-- MÉCANISME. Identique au 01/09, pour qu'il n'y ait qu'UN seul patron d'idempotence à comprendre
+-- dans ce projet :
+--   • une SURCHARGE des 2 fonctions d'ajout prenant un `p_local_id` en plus (les versions sans
+--     local_id restent en place, inchangées, pour tout appelant qui n'en a pas besoin) ;
+--   • verrou `FOR UPDATE` sur la ligne catalog pris AVANT de consulter le registre des traces :
+--     deux appels simultanés portant le même local_id sont sérialisés, donc le second voit
+--     forcément la trace du premier ;
+--   • trace posée dans la MÊME TRANSACTION que l'ajout (une fonction plpgsql = une transaction) :
+--     les deux réussissent, ou aucun — impossible de marquer "déjà appliqué" un ajout qui n'a pas
+--     eu lieu ;
+--   • pour les réquisitions, PAS de nouvelle fonction : la colonne `local_id` (UNIQUE) sur la
+--     table suffit — exactement le patron déjà utilisé par dossiers/fiches/paiements — et le
+--     décrément associé réutilise la surcharge idempotente qui existait déjà depuis le 01/09.
+--
+-- REGISTRE PARTAGÉ. Les ajouts écrivent dans la MÊME table `decrements_stock_appliques` que les
+-- décréments. Son nom historique parle de décréments, son contenu couvre désormais toute opération
+-- de stock protégée contre un rejeu (un COMMENT ON TABLE le dit en base). Table volontairement
+-- partagée plutôt que dupliquée : la renommer aurait obligé à redéfinir les fonctions du chemin de
+-- l'argent — un risque réel sur le mécanisme qui protège les encaissements — pour zéro gain
+-- fonctionnel. Les local_id sont uniques par nature (horodatage + aléa + suffixe distinct :
+-- `-ajout-stock`, `-ajout-don`, `-requisition`, `-stock`...), donc aucune collision possible entre
+-- les deux familles d'opérations. La purge quotidienne à 90 jours (purgerTracesDecrementStock,
+-- server.js) couvre les deux sans changement.
+--
+-- ✅ APPLIQUÉ le 03/09 en production (accès Supabase direct de cette session) et vérifié sur une
+-- vraie ligne de stock : 2 appels successifs avec le même local_id → une seule addition
+-- (888 → 895, le 2e appel répondant `deja_applique: true`), données de test remises à 888 ensuite
+-- et trace de test supprimée.
+
+-- Les corps complets sont gardés à l'identique des versions d'origine (récupérables par
+--   SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--   WHERE n.nspname='public' AND p.proname IN ('ajouter_stock_medicament','ajouter_stock_don_medicament');
+-- ) à l'exception des 2 blocs marqués "Idempotence" — pour qu'une divergence de comportement entre
+-- la version avec et sans local_id soit impossible.
+--
+-- ajouter_stock_medicament(p_id text, p_quantite_ajoutee numeric, p_local_id text) :
+--   ... SELECT items INTO v_items FROM catalog WHERE type='medicaments' FOR UPDATE;   -- verrou d'abord
+--   IF p_local_id IS NOT NULL AND EXISTS (SELECT 1 FROM decrements_stock_appliques WHERE local_id = p_local_id)
+--   THEN RETURN jsonb_build_object('deja_applique', true, 'item', <article courant>); END IF;
+--   ... (recherche de l'article + addition, identiques à la version d'origine) ...
+--   IF p_local_id IS NOT NULL THEN
+--     INSERT INTO decrements_stock_appliques (local_id) VALUES (p_local_id) ON CONFLICT DO NOTHING;
+--   END IF;
+--
+-- ajouter_stock_don_medicament(p_id text, p_ong text, p_quantite_ajoutee numeric, p_local_id text) :
+--   mêmes 2 blocs, au même endroit.
+
+-- Réquisitions : même patron que dossiers/fiches/paiements (colonne local_id + index UNIQUE
+-- partiel, NULL autorisé pour tout ce qui a été créé avant ce correctif).
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS local_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_requisitions_local_id ON requisitions (local_id) WHERE local_id IS NOT NULL;
