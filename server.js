@@ -2621,6 +2621,18 @@ async function sauvegarderVersStorage() {
 // CallMeBot, best-effort et jamais codé en dur : si les 3 variables d'environnement ne sont pas
 // encore posées dans Render, la sauvegarde Supabase (le principal) continue normalement, seule
 // cette copie manque, avec un avertissement dans les logs plutôt qu'un échec silencieux.
+// Bug trouvé le 07/09 (Esdras : "je suis encore cliqué sur tester la sauvegarde, mais je ne vois
+// pas de gmail" puis "c'est bloqué sur en cours") : sans timeout, un port SMTP sortant bloqué
+// (fréquent sur les plans gratuits d'hébergement, mesure anti-spam) ne fait pas ÉCHOUER
+// sendMail() — la connexion reste ouverte en silence, et l'attente ne se termine JAMAIS. Comme
+// cette fonction est attendue (await) avant de répondre à POST /api/admin/backup-manuel, ce
+// blocage empêchait aussi la réponse de revenir — la sauvegarde Supabase avait pourtant bien
+// réussi (vérifié en base : backup-2026-09-04.json et backup-2026-09-07.json existent), mais
+// l'écran restait bloqué sur "En cours" sans jamais l'annoncer. Double filet : les timeouts natifs
+// de nodemailer (première ligne de défense, message d'erreur clair de leur part) PLUS un
+// Promise.race (deuxième ligne, garantit un délai maximum même si un cas imprévu leur échappait).
+const DELAI_MAX_ENVOI_EMAIL_MS = 15000;
+
 async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
   const expediteur = process.env.EMAIL_SAUVEGARDE_EXPEDITEUR;
   const motDePasseApp = process.env.EMAIL_SAUVEGARDE_MOT_DE_PASSE_APP;
@@ -2632,14 +2644,20 @@ async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
   const transporteur = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: expediteur, pass: motDePasseApp },
+    connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
+    greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
+    socketTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
   });
-  await transporteur.sendMail({
+  const envoi = transporteur.sendMail({
     from: expediteur,
     to: destinataire,
     subject: `Sauvegarde CHF — ${nomFichier}`,
     text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
     attachments: [{ filename: nomFichier, content: contenuBuffer, contentType: 'application/json' }],
   });
+  const delaiDepasse = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`Aucune réponse du serveur email après ${DELAI_MAX_ENVOI_EMAIL_MS / 1000}s (port SMTP sortant probablement bloqué).`)), DELAI_MAX_ENVOI_EMAIL_MS));
+  await Promise.race([envoi, delaiDepasse]);
 }
 
 // Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le

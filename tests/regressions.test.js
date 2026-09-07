@@ -1743,3 +1743,24 @@ test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sé
   assert.match(bloc, /res\.json\(\{ success: true, \.\.\.resultatSansBuffer, emailEnvoye, erreurEmail \}\);/);
   assert.doesNotMatch(bloc, /res\.json\(\{ success: true, \.\.\.resultat \}\)/, "ne doit plus étaler resultat tel quel (contiendrait contenuBuffer)");
 });
+
+// ============================================================
+// TIMEOUT DE L'ENVOI EMAIL (07/09) — Esdras : "c'est bloqué sur en cours" après avoir cliqué sur
+// tester la sauvegarde. Vérifié en base : la sauvegarde Supabase avait bien réussi (les fichiers
+// existent dans Storage), mais la réponse HTTP ne revenait jamais — sendMail() sans timeout
+// restait bloqué indéfiniment sur un port SMTP sortant probablement filtré, empêchant même
+// l'annonce du succès Supabase. Sans ce test, un futur retrait "accidentel" des timeouts (ex. lors
+// d'un refactor de envoyerSauvegardeParEmail) réintroduirait ce blocage sans qu'aucun signal ne le
+// détecte avant qu'un vrai clic ne reste, à nouveau, bloqué sur "En cours" pour de vrai.
+// ============================================================
+
+test("envoyerSauvegardeParEmail ne peut jamais bloquer indéfiniment — timeouts nodemailer ET Promise.race en filet", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('async function envoyerSauvegardeParEmail') + 2000);
+  assert.match(bloc, /connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
+  assert.match(bloc, /greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
+  assert.match(bloc, /socketTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
+  // Le filet Promise.race doit envelopper l'appel réel — sinon un cas que nodemailer ne couvrirait
+  // pas (ex. un blocage AVANT même la tentative de connexion) bloquerait quand même tout.
+  assert.match(bloc, /await Promise\.race\(\[envoi, delaiDepasse\]\);/);
+  assert.match(bloc, /setTimeout\(\(\) => reject\(new Error/, "le filet doit REJETER après le délai, pas juste logguer");
+});
