@@ -587,6 +587,7 @@ function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
     status: statutVersFlat(ep),
     dateSuspension: ep.date_suspension, moisReport: ep.mois_report,
     numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
+    moisLot: ep.mois_lot || null, lotVerrouille: ep.lot_verrouille || false,
     estHospitalisation: ep.est_hospitalisation,
     motifFermeture: ep.motif_fermeture, dateFermeture: ep.date_fermeture,
     lit: ep.lit || null,
@@ -894,6 +895,12 @@ app.put('/api/episodes/:id', async (req, res) => {
   }
   if (d.numero_lot !== undefined) maj.numero_lot = d.numero_lot;
   if (d.verrouille_facture !== undefined) maj.verrouille_facture = d.verrouille_facture;
+  // Lots & Facturation (version chf-demo2, portée le 08/09) : mois_lot (badge affiché sur le lot,
+  // modifiable/rétro-rempli automatiquement) et lot_verrouille (verrouillage d'un lot déjà
+  // approuvé par le partenaire — distinct de verrouille_facture, qui protège un dossier
+  // individuel). Colonnes ajoutées par sql/ajoute_lot_mois_verrouillage_episodes.sql.
+  if (d.mois_lot !== undefined) maj.mois_lot = d.mois_lot;
+  if (d.lot_verrouille !== undefined) maj.lot_verrouille = d.lot_verrouille;
 
   if (Object.keys(maj).length > 0) {
     const { data, error } = await supabase.from('episodes').update(maj).eq('id', req.params.id).select();
