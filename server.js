@@ -2656,6 +2656,13 @@ async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
     console.warn('Copie de sauvegarde par email NON envoyée — EMAIL_SAUVEGARDE_EXPEDITEUR/MOT_DE_PASSE_APP/DESTINATAIRE manquant(s) dans les variables d\'environnement Render.');
     return;
   }
+  // Diagnostic (09/09, retour d'Esdras : "ça ne m'envoie rien dans mon gmail", 2e fois après le
+  // correctif du timeout du 08/09) — le message d'erreur générique ne suffisait pas à savoir SI
+  // la connexion Gmail a même été tentée, ni POURQUOI elle a échoué. Un compte gmail masqué (les 3
+  // premiers caractères puis ***) permet de confirmer dans les logs Render que la bonne adresse
+  // expéditrice est bien lue, sans jamais journaliser le mot de passe d'application lui-même.
+  const expediteurMasque = expediteur.length > 3 ? `${expediteur.slice(0, 3)}***@${expediteur.split('@')[1] || '?'}` : '***';
+  console.log(`📧 Copie de sauvegarde par email : tentative d'envoi depuis ${expediteurMasque} vers le destinataire configuré...`);
   const transporteur = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: expediteur, pass: motDePasseApp },
@@ -2672,7 +2679,18 @@ async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
   });
   const delaiDepasse = new Promise((_, reject) =>
     setTimeout(() => reject(new Error(`Aucune réponse du serveur email après ${DELAI_MAX_ENVOI_EMAIL_MS / 1000}s (port SMTP sortant probablement bloqué).`)), DELAI_MAX_ENVOI_EMAIL_MS));
-  await Promise.race([envoi, delaiDepasse]);
+  try {
+    const info = await Promise.race([envoi, delaiDepasse]);
+    console.log(`✅ Copie de sauvegarde par email envoyée — messageId=${info?.messageId || '?'}, réponse SMTP="${info?.response || '?'}"`);
+  } catch (e) {
+    // Les erreurs SMTP de Gmail (identifiants refusés, mot de passe d'application invalide/révoqué,
+    // 2FA pas activée...) portent l'information utile dans .code/.responseCode/.response, presque
+    // jamais dans .message seul — on les rattache explicitement au message rethrow pour qu'elles
+    // remontent jusqu'à erreurEmail affiché à l'écran, sans jamais logguer motDePasseApp.
+    const details = [e.code, e.responseCode, e.response].filter(Boolean).join(' | ');
+    console.error(`❌ Échec d'envoi de la copie de sauvegarde par email : ${e.message}${details ? ` (${details})` : ''}`);
+    throw new Error(details ? `${e.message} — ${details}` : e.message);
+  }
 }
 
 // Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le
@@ -2801,8 +2819,14 @@ app.post('/api/admin/backup-manuel', async (req, res) => {
   if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
+  // Log d'entrée (09/09) : sans ça, un clic sur "Tester la sauvegarde" ne laisse AUCUNE trace
+  // dans les logs Render en cas de succès (sauvegarderVersStorage()/envoyerSauvegardeParEmail() ne
+  // logguent que leurs propres échecs) — impossible de distinguer "il n'a jamais cliqué"/"la
+  // requête n'est jamais arrivée jusqu'ici" de "elle est arrivée mais qqch a échoué en silence".
+  console.log(`🧪 Sauvegarde manuelle demandée par ${req.user.email || req.user.id}...`);
   try {
     const resultat = await sauvegarderVersStorage();
+    console.log(`✅ Sauvegarde manuelle vers Storage réussie : ${resultat.fichier}`);
     // La copie email suit le même sort qu'à 6h UTC : un échec ici ne doit jamais transformer un
     // succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour vérifier que tout
     // fonctionne) mérite de savoir si cette 2e copie est vraiment partie, pas seulement la 1re.

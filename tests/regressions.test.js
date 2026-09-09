@@ -1768,7 +1768,7 @@ test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sé
 // ============================================================
 
 test("envoyerSauvegardeParEmail ne peut jamais bloquer indéfiniment — timeouts nodemailer ET Promise.race en filet", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('async function envoyerSauvegardeParEmail') + 2000);
+  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('// Tous les jours à 6h UTC'));
   assert.match(bloc, /connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
   assert.match(bloc, /greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
   assert.match(bloc, /socketTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
