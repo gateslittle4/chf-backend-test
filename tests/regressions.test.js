@@ -197,6 +197,19 @@ test("PUT /api/episodes/:id lit le corps en snake_case (service_choisi, type_pat
   assert.doesNotMatch(blocRoute, /d\.(serviceChoisi|typePatient|ongPartenaire|numeroLot|verrouilleFacture|dateSuspension|moisReport)\b/, "ne doit plus lire ces champs en camelCase");
 });
 
+test("PUT /api/episodes/:id lit mois_lot et lot_verrouille (Lots & Facturation, version chf-demo2 portée le 08/09) — sinon le mois affiché sur un lot et le verrouillage d'un lot déjà approuvé réussiraient (200 OK) sans jamais rien écrire en base, comme numero_lot/verrouille_facture avant leur ajout à cette route", () => {
+  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
+  assert.match(blocRoute, /d\.mois_lot\b/, "doit lire d.mois_lot");
+  assert.match(blocRoute, /d\.lot_verrouille\b/, "doit lire d.lot_verrouille");
+  assert.doesNotMatch(blocRoute, /d\.(moisLot|lotVerrouille)\b/, "ne doit pas lire ces champs en camelCase");
+});
+
+test("episodeVersFlat/assemblerEpisodeFlat expose moisLot et lotVerrouille — sinon l'écran Lots ne peut jamais afficher le mois d'un lot ni savoir s'il est verrouillé, même une fois écrits en base", () => {
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('function assemblerEpisodeFlat'), serverSrc.indexOf('// Lecture GROUPÉE'));
+  assert.match(blocFlat, /moisLot:\s*ep\.mois_lot/, "assemblerEpisodeFlat doit renvoyer moisLot");
+  assert.match(blocFlat, /lotVerrouille:\s*ep\.lot_verrouille/, "assemblerEpisodeFlat doit renvoyer lotVerrouille");
+});
+
 test("PUT /api/episodes/:id exige la permission facturation_modifier pour modifier un dossier déjà archivé (statut ferme) — avant, n'importe quel utilisateur connecté pouvait modifier les fiches/totaux d'un dossier déjà facturé et verrouillé en appelant l'API directement, même si le bouton était caché dans l'interface", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
   assert.match(blocRoute, /statut === 'ferme'/, "doit vérifier le statut de l'épisode avant toute modification");
