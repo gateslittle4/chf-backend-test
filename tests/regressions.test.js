@@ -1764,3 +1764,28 @@ test("envoyerSauvegardeParEmail ne peut jamais bloquer indéfiniment — timeout
   assert.match(bloc, /await Promise\.race\(\[envoi, delaiDepasse\]\);/);
   assert.match(bloc, /setTimeout\(\(\) => reject\(new Error/, "le filet doit REJETER après le délai, pas juste logguer");
 });
+
+// Dérive trouvée le 09/09 (analyse en profondeur avant mise en production) : le miroir serveur
+// PERMISSIONS_PAR_DEFAUT s'était à nouveau désynchronisé de utils/permissions.js côté front —
+// audit_voir manquait à direction et auditeur, fiche_patient_modifier à infirmier et
+// infirmier_chef. Conséquence concrète sur une installation neuve (table catalog('permissions')
+// jamais enregistrée, donc repli sur ce miroir) : le front affiche le bouton, le serveur répond
+// 403. Ce test fige les 4 entrées qui avaient dérivé, pour que la prochaine désynchronisation
+// échoue en test au lieu d'apparaître à l'écran.
+test("miroir serveur PERMISSIONS_PAR_DEFAUT : audit_voir présent pour direction/auditeur et fiche_patient_modifier pour infirmier/infirmier_chef — les 4 entrées qui avaient dérivé de utils/permissions.js côté front", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  const ligne = (role) => {
+    const debut = bloc.indexOf(`{ role: '${role}'`);
+    assert.ok(debut !== -1, `le rôle ${role} doit exister dans le miroir`);
+    return bloc.slice(debut, bloc.indexOf('\n', debut));
+  };
+  for (const role of ['direction', 'auditeur']) {
+    assert.match(ligne(role), /'audit_voir'/, `${role} a audit_voir côté front — le miroir serveur doit l'avoir aussi, sinon 403 sur une installation neuve`);
+  }
+  for (const role of ['infirmier', 'infirmier_chef']) {
+    assert.match(ligne(role), /'fiche_patient_modifier'/, `${role} a fiche_patient_modifier côté front — le miroir serveur doit l'avoir aussi`);
+  }
+  // Les exclusions volontaires ne doivent pas être "réparées" par mégarde dans le même mouvement.
+  assert.doesNotMatch(ligne('archiviste'), /'fiche_patient_modifier'/, "archiviste consulte le dossier, ne le modifie pas");
+  assert.doesNotMatch(ligne('visiteur'), /'fiche_patient_modifier'/, "visiteur ne modifie jamais rien");
+});

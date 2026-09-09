@@ -53,17 +53,25 @@ const { motsDuNom } = require('./utils/portailPatient');
 // paiement + solde de dépôt) accordé à direction/comptable/auditeur, jamais à archiviste/infirmier,
 // qui consultent le dossier pour l'historique clinique, pas les montants — voir aussi le filtrage
 // dans GET /api/dossiers/:id/historique plus bas.
+// Dérive corrigée le 09/09 (analyse avant mise en production) : ce miroir avait de nouveau pris
+// du retard sur utils/permissions.js côté front — audit_voir manquait à direction et auditeur,
+// fiche_patient_modifier manquait à infirmier et infirmier_chef. Effet : sur une installation
+// dont la table catalog('permissions') n'a jamais été enregistrée, l'écran affiche le bouton
+// (le front l'autorise) et le serveur répond 403. Dormant en production aujourd'hui, puisque le
+// catalogue enregistré couvre les 9 rôles et sert alors de seule source de vérité — mais un
+// piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
+// chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','sortie_caisse_demander'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
-  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','facturation_voir'] },
+  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
   { role: 'archiviste', permissions: ['fiche_patient_voir','facturation_voir'] },
   // Retour d'Esdras (28/08) : "l'infirmier ne peut voir que Dossier/Épisode et Fiche Patient" —
   // rapport_chf_voir déplacé vers infirmier_chef (nouveau rôle, ci-dessous) ; facturation_voir
   // jamais accordé ici (Calcul Facture/Facturation exclus, c'est justement ce qu'on retire).
-  { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir'] },
-  { role: 'infirmier_chef', permissions: ['dossier_creer','fiche_patient_voir','rapport_chf_voir'] },
+  { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier'] },
+  { role: 'infirmier_chef', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier','rapport_chf_voir'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
