@@ -2663,8 +2663,21 @@ async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
   // expéditrice est bien lue, sans jamais journaliser le mot de passe d'application lui-même.
   const expediteurMasque = expediteur.length > 3 ? `${expediteur.slice(0, 3)}***@${expediteur.split('@')[1] || '?'}` : '***';
   console.log(`📧 Copie de sauvegarde par email : tentative d'envoi depuis ${expediteurMasque} vers le destinataire configuré...`);
+  // Port 587 explicite (10/09) — le 1er clic réel après le correctif du 09/09 a montré un échec
+  // silencieux de 15s pile, deux fois de suite (aucune erreur SMTP renvoyée, juste rien) :
+  // signature d'un port bloqué en sortie, pas d'identifiants refusés (qui échouerait en 1-2s avec
+  // un message clair de Gmail). `service: 'gmail'` de nodemailer utilise le port 465 (SSL direct)
+  // par défaut — beaucoup d'hébergeurs gratuits (Render inclus) le bloquent spécifiquement contre
+  // le spam, mais laissent souvent passer le 587 (STARTTLS). Preuve que ce n'est pas TOUT le
+  // sortant qui est bloqué : envoyerCallMeBot() (alertes WhatsApp, même fichier) fonctionne déjà en
+  // HTTPS normal sur ce même service. host/port/secure explicites remplacent le raccourci
+  // `service: 'gmail'` pour forcer 587 au lieu de 465 ; requireTLS force le chiffrement STARTTLS
+  // (Gmail refuse l'authentification en clair).
   const transporteur = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    requireTLS: true,
     auth: { user: expediteur, pass: motDePasseApp },
     connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
     greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
