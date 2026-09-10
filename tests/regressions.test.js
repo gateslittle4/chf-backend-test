@@ -51,6 +51,11 @@ test("Toutes les écritures (update/insert) vérifient une ligne réellement aff
   // catalogue et de la mise à jour des dossiers/fiches (succès silencieux sans rien écrire).
   const blocsUpdate = [...serverSrc.matchAll(/\.update\(/g)];
   for (const bloc of blocsUpdate) {
+    // crypto.createHash('sha1').update(buffer) (copie hors Supabase, 10/09) n'est pas un .update()
+    // Supabase — c'est l'API standard de Node pour construire un hash, aucun risque d'écriture
+    // silencieuse à vérifier ici. Seul faux positif connu de ce test texte-brut.
+    const avant = serverSrc.slice(Math.max(0, bloc.index - 30), bloc.index);
+    if (avant.includes("createHash(")) continue;
     const contexte = serverSrc.slice(bloc.index, bloc.index + 400);
     const aVerification = /\.select\(\)|\.single\(\)/.test(contexte);
     assert.ok(aVerification, `Un .update() sans .select()/.single() à proximité (vers le caractère ${bloc.index}) — risque de succès silencieux sans rien écrire`);
@@ -1719,82 +1724,102 @@ test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne pe
 // ============================================================
 // COPIE DE SAUVEGARDE HORS SUPABASE (retour d'Esdras, 02/09) : "pourquoi la sauvegarde est sur
 // Supabase ?" — une sauvegarde qui vit dans le même projet que les données qu'elle protège ne
-// survit pas à un incident sur ce projet. Envoyée par email (API Resend, HTTPS — SMTP abandonné
-// le 10/09, 465 et 587 confirmés bloqués par l'hébergeur), sur un compte totalement indépendant
-// de Supabase, best-effort comme CallMeBot : jamais codé en dur, jamais bloquant.
+// survit pas à un incident sur ce projet. D'abord envoyée par email (SMTP puis API Resend), mais
+// joindre le fichier entier a ses propres limites de taille (40 Mo Resend, 50 Mo réception
+// Gmail) — Esdras a lui-même posé la question le 10/09 ("quel serait la taille avec des milliers
+// de transactions ?"), et la réponse (~20-40 Mo à quelques milliers de paiements) a confirmé que
+// ça finirait par casser. Remplacé par Backblaze B2 (stockage objet indépendant, 10 Go gratuits,
+// aucune limite pratique) — l'email redevient une simple notification best-effort, sans pièce
+// jointe, qui ne doit jamais faire échouer la copie B2 elle-même en cas de problème.
 // ============================================================
 
-test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie email ne doit jamais re-sérialiser une 2e fois", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function sauvegarderVersStorage'), serverSrc.indexOf('async function envoyerSauvegardeParEmail'));
+test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie hors Supabase ne doit jamais re-sérialiser une 2e fois", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function sauvegarderVersStorage'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
   assert.match(bloc, /const contenuBuffer = Buffer\.from\(JSON\.stringify\(contenu\)\);/);
   assert.match(bloc, /\.upload\(nomFichier, contenuBuffer,/, "l'upload Storage doit utiliser CE buffer, pas une sérialisation séparée");
   assert.match(bloc, /return \{ fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer \};/);
 });
 
-test("envoyerSauvegardeParEmail est best-effort : les variables d'environnement manquantes ne lèvent jamais, juste un avertissement", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerSauvegardeParEmail'), serverSrc.indexOf('cron.schedule(\'0 6 * * *\''));
-  assert.match(bloc, /if \(!cleApi \|\| !destinataire\) \{/);
+test("envoyerCopieHorsSupabase est best-effort : les variables B2 manquantes ne lèvent jamais, juste un avertissement", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
+  assert.match(bloc, /if \(!keyId \|\| !applicationKey \|\| !nomBucket\) \{/);
   assert.match(bloc, /console\.warn\(/, "doit avertir plutôt que planter quand la config n'est pas encore posée");
-  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans RESEND_API_KEY/EMAIL_SAUVEGARDE_DESTINATAIRE planterait au démarrage");
-  // La clé d'API est révocable seule depuis le tableau de bord Resend, sans jamais toucher à un
-  // vrai compte email — documenté dans le commentaire juste au-dessus de la fonction.
-  const blocAvecCommentaire = serverSrc.slice(serverSrc.indexOf('// Copie HORS SUPABASE'), serverSrc.indexOf('async function envoyerSauvegardeParEmail'));
+  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME planterait au démarrage");
+  // La clé d'application est révocable seule depuis le tableau de bord Backblaze, sans jamais
+  // toucher au reste du compte — documenté dans le commentaire juste au-dessus de la fonction.
+  const blocAvecCommentaire = serverSrc.slice(serverSrc.indexOf('// Copie HORS SUPABASE'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
   assert.match(blocAvecCommentaire, /révocable seule/i);
 });
 
-test("La copie email de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
+test("envoyerCopieHorsSupabase suit le vrai protocole B2 natif (autorisation → résolution du bucket par nom → URL d'upload → envoi avec SHA1), jamais le mode compatible S3 (pas de signature façon AWS)", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
+  assert.match(bloc, /appelB2\('https:\/\/api\.backblazeb2\.com\/b2api\/v2\/b2_authorize_account'/, "doit s'authentifier en premier");
+  assert.match(bloc, /Authorization: `Basic \$\{identifiants\}`/, "l'authentification initiale B2 est HTTP Basic (base64 de keyId:applicationKey)");
+  assert.match(bloc, /b2_list_buckets/, "doit résoudre le bucketId à partir du NOM (B2_BUCKET_NAME) — Esdras n'a que le nom, jamais l'ID technique");
+  assert.match(bloc, /b2_get_upload_url/, "doit demander une URL d'upload dédiée avant d'envoyer le fichier");
+  assert.match(bloc, /'X-Bz-Content-Sha1': sha1,/, "B2 exige le SHA1 du contenu en en-tête pour vérifier l'intégrité de l'upload");
+  assert.match(bloc, /crypto\.createHash\('sha1'\)\.update\(contenuBuffer\)\.digest\('hex'\)/, "le SHA1 doit porter sur le VRAI contenu envoyé, pas une valeur arbitraire");
+});
+
+test("La notification email qui suit un envoi B2 réussi est SANS pièce jointe (le fichier vit sur B2, plus de limite de taille à gérer côté email) et son échec ne doit jamais annuler le succès B2", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
+  assert.doesNotMatch(bloc, /attachments:/, "aucune pièce jointe — c'était justement la source du problème de taille (Resend 40 Mo / Gmail 50 Mo)");
+  assert.doesNotMatch(bloc, /contenuBuffer\.toString\('base64'\)/, "le buffer ne doit plus être encodé pour un envoi email");
+  // La notification est dans un bloc try/catch séparé, APRÈS le throw du bloc B2 (donc jamais
+  // atteinte si B2 a échoué) — un console.warn en cas d'échec email, jamais un throw qui
+  // remonterait et ferait croire que la sauvegarde hors Supabase a échoué alors que B2 a marché.
+  const iNotifEmail = bloc.indexOf("cleApi = process.env.RESEND_API_KEY");
+  assert.ok(iNotifEmail !== -1, "la notification email doit exister après la partie B2");
+  const blocNotif = bloc.slice(iNotifEmail);
+  assert.match(blocNotif, /console\.warn\(/, "un échec de la notification email doit seulement avertir, jamais lever");
+  assert.doesNotMatch(blocNotif, /\n\s*throw /, "aucun throw dans le bloc de notification email — un échec ici ne doit jamais annuler le succès B2 déjà acquis");
+});
+
+test("La copie hors Supabase (B2) de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
   const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'", serverSrc.indexOf('async function sauvegarderVersStorage')), serverSrc.indexOf("// ============================================================\n// CORBEILLE CATALOGUE"));
-  assert.match(blocCron, /await envoyerSauvegardeParEmail\(resultat\.fichier, resultat\.contenuBuffer\);/);
-  const iEmailCall = blocCron.indexOf('envoyerSauvegardeParEmail(');
+  assert.match(blocCron, /await envoyerCopieHorsSupabase\(resultat\.fichier, resultat\.contenuBuffer\);/);
+  const iEmailCall = blocCron.indexOf('envoyerCopieHorsSupabase(');
   const iCatchEmail = blocCron.indexOf('} catch (e) {', iEmailCall);
-  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error('❌ Échec de la sauvegarde automatique"), "le catch de l'email doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
+  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error('❌ Échec de la sauvegarde automatique"), "le catch de la copie hors Supabase doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
   assert.match(blocCron, /sauvegarde Supabase faite, mais la copie par email a échoué/, "le message d'alerte doit distinguer clairement les 2 échecs possibles");
 });
 
-test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sérialisé en JSON serait illisible et inutile), mais indique si la copie email est partie", () => {
+test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sérialisé en JSON serait illisible et inutile), mais indique si la copie hors Supabase est partie", () => {
   const bloc = blocRoutePermission("app.post('/api/admin/backup-manuel'", "app.get('/api/admin/derniere-sauvegarde'");
   assert.match(bloc, /const \{ contenuBuffer, \.\.\.resultatSansBuffer \} = resultat;/, "contenuBuffer doit être retiré avant res.json");
-  assert.match(bloc, /res\.json\(\{ success: true, \.\.\.resultatSansBuffer, emailEnvoye, erreurEmail \}\);/);
+  assert.match(bloc, /res\.json\(\{ success: true, \.\.\.resultatSansBuffer, copieEnvoyee, erreurCopie \}\);/);
   assert.doesNotMatch(bloc, /res\.json\(\{ success: true, \.\.\.resultat \}\)/, "ne doit plus étaler resultat tel quel (contiendrait contenuBuffer)");
+  // Vérifie le vrai code (res.json/let/catch), jamais un commentaire à proximité qui a le droit
+  // de mentionner les anciens noms pour expliquer le renommage sans faire échouer ce test.
+  const ligneCode = bloc.slice(bloc.indexOf('res.json({ success: true, ...resultatSansBuffer'));
+  assert.doesNotMatch(ligneCode.slice(0, ligneCode.indexOf('\n')), /emailEnvoye|erreurEmail/, "ces champs ont été renommés le 10/09 — emailEnvoye ne décrivait plus ce qui se passe réellement (B2, pas email)");
 });
 
 // ============================================================
-// TIMEOUT DE L'ENVOI EMAIL (07/09, puis SMTP abandonné le 10/09) — Esdras : "c'est bloqué sur en
-// cours" après avoir cliqué sur tester la sauvegarde. Vérifié en base : la sauvegarde Supabase
-// avait bien réussi (les fichiers existent dans Storage), mais la réponse HTTP ne revenait
-// jamais — sendMail() sans timeout restait bloqué indéfiniment. Deux ports SMTP testés en
-// conditions réelles ensuite (465 puis 587), même blocage silencieux de 15s pile les deux fois —
-// bloqués tous les deux par l'hébergeur, pas un problème d'identifiants. Remplacé par l'API HTTP
-// de Resend (HTTPS normal, jamais bloqué — envoyerCallMeBot() le prouve déjà sur ce même
-// service). Sans ce test, un futur retrait "accidentel" du garde-fou (ex. lors d'un refactor de
-// envoyerSauvegardeParEmail) réintroduirait un blocage possible sans qu'aucun signal ne le
-// détecte avant qu'un vrai clic ne reste, à nouveau, bloqué sur "En cours" pour de vrai.
+// GARDE-FOU CONTRE UN BLOCAGE INDÉFINI (07/09, SMTP abandonné le 10/09, puis Resend/B2) — Esdras :
+// "c'est bloqué sur en cours" après avoir cliqué sur tester la sauvegarde. Vérifié en base : la
+// sauvegarde Supabase avait bien réussi, mais la réponse HTTP ne revenait jamais — sendMail() sans
+// timeout restait bloqué indéfiniment. Chaque appel réseau de la copie hors Supabase (B2 comme
+// Resend) passe maintenant par appelB2(), qui enveloppe systématiquement un AbortController. Sans
+// ce test, un futur refactor qui retirerait ce garde-fou réintroduirait un blocage possible sans
+// qu'aucun signal ne le détecte avant qu'un vrai clic ne reste, à nouveau, bloqué pour de vrai.
 // ============================================================
 
-test("envoyerSauvegardeParEmail passe par l'API HTTP de Resend (jamais du SMTP brut) et ne peut jamais bloquer indéfiniment", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('// Tous les jours à 6h UTC'));
-  assert.match(bloc, /fetch\('https:\/\/api\.resend\.com\/emails'/, "doit passer par l'API HTTP de Resend, pas par nodemailer/SMTP (465 et 587 confirmés bloqués par l'hébergeur le 10/09)");
-  assert.doesNotMatch(bloc, /nodemailer/i, "ne doit plus jamais réintroduire nodemailer/SMTP ici");
-  assert.match(bloc, /Bearer \$\{cleApi\}/, "l'authentification Resend doit passer par RESEND_API_KEY, jamais codée en dur");
-  // Le garde-fou AbortController doit envelopper l'appel réel — sinon un cas imprévu (ex. un
-  // blocage réseau avant même la réponse HTTP) bloquerait quand même la réponse à l'utilisateur.
+test("appelB2() (utilisé pour B2 ET pour la notification Resend) ne peut jamais bloquer indéfiniment — AbortController qui annule vraiment la requête après le délai", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_APPEL_B2_MS'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
   assert.match(bloc, /new AbortController\(\)/);
-  assert.match(bloc, /signal: controleur\.signal,/, "le fetch() doit être annulable par le garde-fou, sinon il ne sert à rien");
-  assert.match(bloc, /setTimeout\(\(\) => controleur\.abort\(\), DELAI_MAX_ENVOI_EMAIL_MS\)/, "le garde-fou doit vraiment ANNULER la requête après le délai, pas juste logguer");
+  assert.match(bloc, /signal: controleur\.signal/, "le fetch() doit être annulable par le garde-fou, sinon il ne sert à rien");
+  assert.match(bloc, /setTimeout\(\(\) => controleur\.abort\(\), gardeFouMs\)/, "le garde-fou doit vraiment ANNULER la requête après le délai, pas juste logguer");
+  assert.match(bloc, /clearTimeout\(gardeFou\)/, "le minuteur doit être nettoyé une fois la réponse reçue, sinon il traîne inutilement");
 });
 
-// Faille trouvée en conditions réelles le 10/09 : un premier clic après le passage à Resend a
-// échoué avec "The gmail.com domain is not verified" (HTTP 403) — le code lisait encore l'ancienne
-// variable EMAIL_SAUVEGARDE_EXPEDITEUR (une adresse @gmail.com, restée posée sur Render depuis
-// l'ère SMTP) comme adresse d'expéditeur. Resend exige un domaine PROUVÉ par des enregistrements
-// DNS pour toute adresse d'expéditeur personnalisée — impossible pour gmail.com (qui appartient à
-// Google) ou pour chf-app2.onrender.com (qui appartient à Render), donc impossible pour Esdras tant
-// qu'il n'achète pas et ne vérifie pas un domaine à lui. L'expéditeur doit rester l'adresse de test
-// onboarding@resend.dev, sans jamais redevenir configurable par variable d'environnement.
-test("l'expéditeur Resend reste toujours onboarding@resend.dev, jamais lu depuis une variable d'environnement (EMAIL_SAUVEGARDE_EXPEDITEUR a fait échouer un vrai envoi le 10/09 : \"gmail.com domain is not verified\")", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('// Tous les jours à 6h UTC'));
-  assert.match(bloc, /from: 'Sauvegarde CHF <onboarding@resend\.dev>',/, "l'expéditeur doit être l'adresse de test Resend, en dur");
-  assert.doesNotMatch(bloc, /process\.env\.EMAIL_SAUVEGARDE_EXPEDITEUR/, "ne doit plus jamais LIRE cette variable — Resend exige un domaine vérifié qu'Esdras ne peut pas fournir pour gmail.com ni pour onrender.com (le nom peut rester cité dans un commentaire expliquant pourquoi)");
+test("L'upload direct du fichier vers B2 (en dehors de appelB2, car le corps est un Buffer binaire et non du JSON) a lui aussi son propre garde-fou AbortController", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
+  const iUpload = bloc.indexOf("fetch(upload.uploadUrl");
+  assert.ok(iUpload !== -1);
+  const blocUpload = bloc.slice(Math.max(0, iUpload - 400), iUpload + 200);
+  assert.match(blocUpload, /new AbortController\(\)/);
+  assert.match(blocUpload, /signal: controleur\.signal,/);
 });
 
 // Dérive trouvée le 09/09 (analyse en profondeur avant mise en production) : le miroir serveur

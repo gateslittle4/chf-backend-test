@@ -2597,7 +2597,7 @@ async function sauvegarderVersStorage() {
   }
 
   const nomFichier = `backup-${new Date().toISOString().slice(0, 10)}.json`;
-  // Gardé pour la copie email plus bas (envoyerSauvegardeParEmail) : sérialiser deux fois la même
+  // Gardé pour la copie hors Supabase plus bas (envoyerCopieHorsSupabase) : sérialiser deux fois la même
   // sauvegarde (une pour Storage, une pour l'email) risquerait de produire deux fichiers
   // légèrement différents si un appel concurrent modifiait `contenu` entre les deux — improbable
   // ici (fonction locale, pas de mutation externe possible) mais une seule sérialisation reste la
@@ -2627,75 +2627,138 @@ async function sauvegarderVersStorage() {
 // bonne question à se poser). Une sauvegarde qui vit dans le MÊME projet que les données qu'elle
 // protège ne protège de rien en cas d'incident sur ce projet précis (panne, suspension pour
 // facturation impayée, ou un accès malveillant qui supprime les données ET leur sauvegarde d'un
-// seul geste, puisque les deux sont à portée de la même clé). Envoyée par email, sur un compte
-// totalement indépendant de Supabase : un incident sur l'un n'emporte jamais l'autre.
+// seul geste, puisque les deux sont à portée de la même clé).
 //
-// PAS de SMTP (10/09) — deux ports testés en conditions réelles (465 par défaut de nodemailer,
-// puis 587/STARTTLS après un 1er correctif), même symptôme les deux fois : la connexion reste
-// ouverte 15s sans AUCUNE réponse, ni erreur ni succès — pas un rejet rapide d'identifiants
-// invalides (qui arriverait en 1-2s avec un message clair de Gmail). Signature d'un port bloqué en
-// sortie par l'hébergeur (mesure anti-spam courante sur les plans gratuits), qui ne dépend pas du
-// port choisi. Remplacé par l'API HTTP de Resend (https://api.resend.com) — HTTPS normal, port
-// 443, jamais bloqué : envoyerCallMeBot() (alertes WhatsApp, plus haut dans ce fichier) le prouve
-// déjà en pratique sur ce même service.
-// RESEND_API_KEY : clé d'API révocable seule depuis le tableau de bord Resend, sans jamais toucher
-// à un vrai compte email — même principe que l'ancien mot de passe d'application Gmail. Comme
-// CallMeBot, best-effort et jamais codée en dur : si la variable d'environnement n'est pas encore
-// posée dans Render, la sauvegarde Supabase (le principal) continue normalement, seule cette copie
-// manque, avec un avertissement dans les logs plutôt qu'un échec silencieux.
-// Sans domaine à soi vérifié sur Resend, l'expéditeur reste forcément onboarding@resend.dev (leur
-// domaine de test) — sans impact ici puisque EMAIL_SAUVEGARDE_DESTINATAIRE est justement
-// l'adresse personnelle d'Esdras, jamais un domaine à vérifier.
-const DELAI_MAX_ENVOI_EMAIL_MS = 15000;
+// Hébergée sur Backblaze B2 (10/09) — un stockage objet indépendant, sans AUCUN lien avec
+// Supabase, Render ou Google : un incident sur l'un des trois n'emporte jamais les autres. Choisi
+// après deux détours : le SMTP direct (nodemailer, ports 465 puis 587) restait bloqué en sortie
+// par l'hébergeur, systématiquement, sans la moindre erreur — remplacé par l'API HTTP de Resend
+// qui, elle, a marché ; mais joindre le fichier entier à un email a ses propres limites (40 Mo
+// chez Resend, 50 Mo en réception Gmail), qu'une base en pleine croissance finirait par dépasser
+// (retour d'Esdras : "quel serait la taille du fichier avec des milliers de transactions ?").
+// Backblaze B2 n'a pas cette limite pratique (10 Go gratuits, fichiers bien plus gros acceptés) —
+// la bonne solution à long terme, pas un simple pansement sur la taille du jour.
+// L'API "native" de B2 (b2_authorize_account / b2_list_buckets / b2_get_upload_url, PAS le mode
+// compatible S3) est utilisée volontairement : de simples appels HTTP avec fetch(), sans
+// signature de requête façon AWS SigV4 — même esprit que CallMeBot/Resend, aucune dépendance
+// ajoutée au projet.
+// B2_KEY_ID/B2_APPLICATION_KEY : une "clé d'application" limitée à UN SEUL bucket (celui choisi
+// à sa création) — jamais un accès à tout le compte Backblaze d'Esdras. Révocable seule depuis
+// son tableau de bord, sans toucher au reste, même principe que les clés CallMeBot/Resend et
+// l'ancien mot de passe d'application Gmail. Comme elles, best-effort et jamais codée en dur : si
+// les variables d'environnement ne sont pas encore posées dans Render, la sauvegarde Supabase (le
+// principal) continue normalement, seule cette copie manque, avec un avertissement dans les logs.
+// Une notification par email (Resend) accompagne l'envoi — SANS pièce jointe cette fois (le
+// fichier vit sur B2, l'email ne fait plus que confirmer que c'est fait) — mais son échec ne doit
+// jamais faire échouer la copie B2 elle-même : c'est purement une commodité, pas le mécanisme de
+// protection réel.
+const DELAI_MAX_APPEL_B2_MS = 15000;
 
-async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
-  const cleApi = process.env.RESEND_API_KEY;
-  const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
-  if (!cleApi || !destinataire) {
-    console.warn('Copie de sauvegarde par email NON envoyée — RESEND_API_KEY/EMAIL_SAUVEGARDE_DESTINATAIRE manquant(s) dans les variables d\'environnement Render.');
+async function appelB2(url, options, gardeFouMs = DELAI_MAX_APPEL_B2_MS) {
+  const controleur = new AbortController();
+  const gardeFou = setTimeout(() => controleur.abort(), gardeFouMs);
+  try {
+    const reponse = await fetch(url, { ...options, signal: controleur.signal });
+    const corps = await reponse.text();
+    if (!reponse.ok) throw new Error(`B2 a refusé l'appel ${url} (HTTP ${reponse.status}) — ${corps}`);
+    return JSON.parse(corps);
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`Aucune réponse de Backblaze B2 après ${gardeFouMs / 1000}s (${url}).`);
+    throw e;
+  } finally {
+    clearTimeout(gardeFou);
+  }
+}
+
+async function envoyerCopieHorsSupabase(nomFichier, contenuBuffer) {
+  const keyId = process.env.B2_KEY_ID;
+  const applicationKey = process.env.B2_APPLICATION_KEY;
+  const nomBucket = process.env.B2_BUCKET_NAME;
+  if (!keyId || !applicationKey || !nomBucket) {
+    console.warn('Copie hors Supabase NON envoyée — B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME manquant(s) dans les variables d\'environnement Render.');
     return;
   }
-  console.log(`📧 Copie de sauvegarde par email : tentative d'envoi (API Resend, HTTPS) vers le destinataire configuré...`);
-  // AbortController plutôt qu'un Promise.race manuel (l'ancien filet contre un sendMail() qui ne
-  // se terminait jamais) : un fetch() HTTPS classique échoue de lui-même en cas de vrai problème
-  // réseau, ce filet n'est qu'une garantie supplémentaire pour ne plus jamais reproduire le
-  // blocage sur "En cours" du 07/09, quelle qu'en soit la cause.
-  const controleur = new AbortController();
-  const gardeFou = setTimeout(() => controleur.abort(), DELAI_MAX_ENVOI_EMAIL_MS);
+  console.log(`📦 Copie hors Supabase : tentative d'envoi vers Backblaze B2 (bucket "${nomBucket}")...`);
   try {
-    const reponse = await fetch('https://api.resend.com/emails', {
+    // 1. S'authentifier — renvoie un jeton + l'URL de l'API à utiliser pour CE compte (varie
+    // selon la région Backblaze attribuée à Esdras, jamais fixe).
+    const identifiants = Buffer.from(`${keyId}:${applicationKey}`).toString('base64');
+    const auth = await appelB2('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
+      headers: { Authorization: `Basic ${identifiants}` },
+    });
+    const apiUrl = auth.apiInfo?.storageApi?.apiUrl || auth.apiUrl;
+
+    // 2. Retrouver l'ID interne du bucket à partir de son NOM (b2_get_upload_url exige l'ID, pas
+    // le nom) — évite de demander à Esdras un identifiant technique qu'il ne voit nulle part
+    // dans son tableau de bord, seul le nom du bucket y est affiché.
+    const listeBuckets = await appelB2(`${apiUrl}/b2api/v2/b2_list_buckets`, {
       method: 'POST',
-      signal: controleur.signal,
+      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId: auth.accountId, bucketName: nomBucket }),
+    });
+    const bucket = (listeBuckets.buckets || [])[0];
+    if (!bucket) throw new Error(`Bucket "${nomBucket}" introuvable — vérifie B2_BUCKET_NAME et que la clé d'application y a bien accès.`);
+
+    // 3. Obtenir une URL d'upload à usage unique (B2 en distribue une par appel, jamais réutilisée).
+    const upload = await appelB2(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
+      method: 'POST',
+      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bucketId: bucket.bucketId }),
+    });
+
+    // 4. Envoyer le fichier — B2 exige le SHA1 du contenu en en-tête pour vérifier l'intégrité
+    // de la copie reçue (rejette l'upload si ça ne correspond pas).
+    const sha1 = crypto.createHash('sha1').update(contenuBuffer).digest('hex');
+    const controleur = new AbortController();
+    const gardeFou = setTimeout(() => controleur.abort(), DELAI_MAX_APPEL_B2_MS);
+    let reponseUpload;
+    try {
+      reponseUpload = await fetch(upload.uploadUrl, {
+        method: 'POST',
+        signal: controleur.signal,
+        headers: {
+          Authorization: upload.authorizationToken,
+          'X-Bz-File-Name': encodeURIComponent(nomFichier),
+          'Content-Type': 'application/json',
+          'X-Bz-Content-Sha1': sha1,
+          'Content-Length': String(contenuBuffer.length),
+        },
+        body: contenuBuffer,
+      });
+    } catch (e) {
+      throw e.name === 'AbortError' ? new Error(`Aucune réponse de Backblaze B2 après ${DELAI_MAX_APPEL_B2_MS / 1000}s (upload).`) : e;
+    } finally {
+      clearTimeout(gardeFou);
+    }
+    const corpsUpload = await reponseUpload.text();
+    if (!reponseUpload.ok) throw new Error(`B2 a refusé l'upload (HTTP ${reponseUpload.status}) — ${corpsUpload}`);
+    let fileId = '?';
+    try { fileId = JSON.parse(corpsUpload).fileId || '?'; } catch { /* corps non-JSON, fileId restera '?' */ }
+    console.log(`✅ Copie hors Supabase envoyée vers Backblaze B2 — fileId=${fileId}`);
+  } catch (e) {
+    console.error(`❌ Échec d'envoi de la copie hors Supabase vers B2 : ${e.message}`);
+    throw e;
+  }
+
+  // Notification email best-effort, SANS pièce jointe (le fichier vit sur B2, pas de limite de
+  // taille à surveiller ici) — un échec de cette étape ne doit jamais annuler le succès B2
+  // ci-dessus, juste rester dans les logs.
+  try {
+    const cleApi = process.env.RESEND_API_KEY;
+    const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
+    if (!cleApi || !destinataire) return;
+    await appelB2('https://api.resend.com/emails', {
+      method: 'POST',
       headers: { Authorization: `Bearer ${cleApi}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        // JAMAIS EMAIL_SAUVEGARDE_EXPEDITEUR (ancienne variable de l'ère SMTP, laissée en
-        // place sur Render) : Resend a refusé un premier envoi réel le 10/09 avec "The
-        // gmail.com domain is not verified" — Resend exige un domaine PROUVÉ (par des
-        // enregistrements DNS) pour la moindre adresse d'expéditeur personnalisée, chose
-        // impossible pour un gmail.com qui appartient à Google, pas à Esdras. Sans domaine à
-        // lui pour l'app (chf-app2.onrender.com appartient à Render), l'expéditeur reste
-        // onboarding@resend.dev — leur adresse de test, qui marche tant que le destinataire
-        // est l'adresse avec laquelle le compte Resend a été créé (le cas ici).
         from: 'Sauvegarde CHF <onboarding@resend.dev>',
         to: [destinataire],
         subject: `Sauvegarde CHF — ${nomFichier}`,
-        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
-        attachments: [{ filename: nomFichier, content: contenuBuffer.toString('base64') }],
+        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')} envoyée sur Backblaze B2 (bucket "${process.env.B2_BUCKET_NAME}").\n\nPas de pièce jointe cette fois — regarde/télécharge le fichier directement depuis ton tableau de bord Backblaze si besoin.`,
       }),
     });
-    const corps = await reponse.text();
-    if (!reponse.ok) throw new Error(`Resend a refusé l'envoi (HTTP ${reponse.status}) — ${corps}`);
-    let id = '?';
-    try { id = JSON.parse(corps).id || '?'; } catch { /* corps non-JSON, id restera '?' */ }
-    console.log(`✅ Copie de sauvegarde par email envoyée via Resend — id=${id}`);
   } catch (e) {
-    const message = e.name === 'AbortError'
-      ? `Aucune réponse de Resend après ${DELAI_MAX_ENVOI_EMAIL_MS / 1000}s.`
-      : e.message;
-    console.error(`❌ Échec d'envoi de la copie de sauvegarde par email : ${message}`);
-    throw new Error(message);
-  } finally {
-    clearTimeout(gardeFou);
+    console.warn(`⚠️ Copie B2 réussie, mais la notification email a échoué (sans impact sur la sauvegarde) : ${e.message}`);
   }
 }
 
@@ -2716,7 +2779,7 @@ cron.schedule('0 6 * * *', async () => {
     // copie hors site qui ne part plus, en silence, pendant des semaines n'a plus aucune valeur
     // le jour où on en a besoin.
     try {
-      await envoyerSauvegardeParEmail(resultat.fichier, resultat.contenuBuffer);
+      await envoyerCopieHorsSupabase(resultat.fichier, resultat.contenuBuffer);
     } catch (e) {
       console.error('❌ Échec de la copie de sauvegarde par email :', e.message);
       await envoyerCallMeBot(`⚠️ CHF : sauvegarde Supabase faite, mais la copie par email a échoué (${e.message}).`);
@@ -2826,23 +2889,26 @@ app.post('/api/admin/backup-manuel', async (req, res) => {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
   // Log d'entrée (09/09) : sans ça, un clic sur "Tester la sauvegarde" ne laisse AUCUNE trace
-  // dans les logs Render en cas de succès (sauvegarderVersStorage()/envoyerSauvegardeParEmail() ne
+  // dans les logs Render en cas de succès (sauvegarderVersStorage()/envoyerCopieHorsSupabase() ne
   // logguent que leurs propres échecs) — impossible de distinguer "il n'a jamais cliqué"/"la
   // requête n'est jamais arrivée jusqu'ici" de "elle est arrivée mais qqch a échoué en silence".
   console.log(`🧪 Sauvegarde manuelle demandée par ${req.user.email || req.user.id}...`);
   try {
     const resultat = await sauvegarderVersStorage();
     console.log(`✅ Sauvegarde manuelle vers Storage réussie : ${resultat.fichier}`);
-    // La copie email suit le même sort qu'à 6h UTC : un échec ici ne doit jamais transformer un
-    // succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour vérifier que tout
-    // fonctionne) mérite de savoir si cette 2e copie est vraiment partie, pas seulement la 1re.
-    let emailEnvoye = false, erreurEmail = null;
+    // La copie hors Supabase (B2) suit le même sort qu'à 6h UTC : un échec ici ne doit jamais
+    // transformer un succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour
+    // vérifier que tout fonctionne) mérite de savoir si cette 2e copie est vraiment partie, pas
+    // seulement la 1re. Champs renommés le 10/09 (B2 a remplacé l'email comme copie hors
+    // Supabase) — copieEnvoyee/erreurCopie, plus copieEnvoyee/erreurEmail qui ne décrivaient plus
+    // ce qui se passait réellement une fois l'email réduit à une simple notification.
+    let copieEnvoyee = false, erreurCopie = null;
     try {
-      await envoyerSauvegardeParEmail(resultat.fichier, resultat.contenuBuffer);
-      emailEnvoye = true;
-    } catch (e) { erreurEmail = e.message; }
+      await envoyerCopieHorsSupabase(resultat.fichier, resultat.contenuBuffer);
+      copieEnvoyee = true;
+    } catch (e) { erreurCopie = e.message; }
     const { contenuBuffer, ...resultatSansBuffer } = resultat;
-    res.json({ success: true, ...resultatSansBuffer, emailEnvoye, erreurEmail });
+    res.json({ success: true, ...resultatSansBuffer, copieEnvoyee, erreurCopie });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
