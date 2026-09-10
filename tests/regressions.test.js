@@ -1783,6 +1783,20 @@ test("envoyerSauvegardeParEmail passe par l'API HTTP de Resend (jamais du SMTP b
   assert.match(bloc, /setTimeout\(\(\) => controleur\.abort\(\), DELAI_MAX_ENVOI_EMAIL_MS\)/, "le garde-fou doit vraiment ANNULER la requête après le délai, pas juste logguer");
 });
 
+// Faille trouvée en conditions réelles le 10/09 : un premier clic après le passage à Resend a
+// échoué avec "The gmail.com domain is not verified" (HTTP 403) — le code lisait encore l'ancienne
+// variable EMAIL_SAUVEGARDE_EXPEDITEUR (une adresse @gmail.com, restée posée sur Render depuis
+// l'ère SMTP) comme adresse d'expéditeur. Resend exige un domaine PROUVÉ par des enregistrements
+// DNS pour toute adresse d'expéditeur personnalisée — impossible pour gmail.com (qui appartient à
+// Google) ou pour chf-app2.onrender.com (qui appartient à Render), donc impossible pour Esdras tant
+// qu'il n'achète pas et ne vérifie pas un domaine à lui. L'expéditeur doit rester l'adresse de test
+// onboarding@resend.dev, sans jamais redevenir configurable par variable d'environnement.
+test("l'expéditeur Resend reste toujours onboarding@resend.dev, jamais lu depuis une variable d'environnement (EMAIL_SAUVEGARDE_EXPEDITEUR a fait échouer un vrai envoi le 10/09 : \"gmail.com domain is not verified\")", () => {
+  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('// Tous les jours à 6h UTC'));
+  assert.match(bloc, /from: 'Sauvegarde CHF <onboarding@resend\.dev>',/, "l'expéditeur doit être l'adresse de test Resend, en dur");
+  assert.doesNotMatch(bloc, /process\.env\.EMAIL_SAUVEGARDE_EXPEDITEUR/, "ne doit plus jamais LIRE cette variable — Resend exige un domaine vérifié qu'Esdras ne peut pas fournir pour gmail.com ni pour onrender.com (le nom peut rester cité dans un commentaire expliquant pourquoi)");
+});
+
 // Dérive trouvée le 09/09 (analyse en profondeur avant mise en production) : le miroir serveur
 // PERMISSIONS_PAR_DEFAUT s'était à nouveau désynchronisé de utils/permissions.js côté front —
 // audit_voir manquait à direction et auditeur, fiche_patient_modifier à infirmier et

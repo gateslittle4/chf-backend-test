@@ -2668,7 +2668,15 @@ async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
       signal: controleur.signal,
       headers: { Authorization: `Bearer ${cleApi}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: process.env.EMAIL_SAUVEGARDE_EXPEDITEUR || 'Sauvegarde CHF <onboarding@resend.dev>',
+        // JAMAIS EMAIL_SAUVEGARDE_EXPEDITEUR (ancienne variable de l'ère SMTP, laissée en
+        // place sur Render) : Resend a refusé un premier envoi réel le 10/09 avec "The
+        // gmail.com domain is not verified" — Resend exige un domaine PROUVÉ (par des
+        // enregistrements DNS) pour la moindre adresse d'expéditeur personnalisée, chose
+        // impossible pour un gmail.com qui appartient à Google, pas à Esdras. Sans domaine à
+        // lui pour l'app (chf-app2.onrender.com appartient à Render), l'expéditeur reste
+        // onboarding@resend.dev — leur adresse de test, qui marche tant que le destinataire
+        // est l'adresse avec laquelle le compte Resend a été créé (le cas ici).
+        from: 'Sauvegarde CHF <onboarding@resend.dev>',
         to: [destinataire],
         subject: `Sauvegarde CHF — ${nomFichier}`,
         text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
