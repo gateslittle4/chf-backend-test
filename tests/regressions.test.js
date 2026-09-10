@@ -1719,8 +1719,9 @@ test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne pe
 // ============================================================
 // COPIE DE SAUVEGARDE HORS SUPABASE (retour d'Esdras, 02/09) : "pourquoi la sauvegarde est sur
 // Supabase ?" — une sauvegarde qui vit dans le même projet que les données qu'elle protège ne
-// survit pas à un incident sur ce projet. Envoyée par email (Gmail), sur un compte totalement
-// indépendant de Supabase, best-effort comme CallMeBot : jamais codé en dur, jamais bloquant.
+// survit pas à un incident sur ce projet. Envoyée par email (API Resend, HTTPS — SMTP abandonné
+// le 10/09, 465 et 587 confirmés bloqués par l'hébergeur), sur un compte totalement indépendant
+// de Supabase, best-effort comme CallMeBot : jamais codé en dur, jamais bloquant.
 // ============================================================
 
 test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie email ne doit jamais re-sérialiser une 2e fois", () => {
@@ -1730,15 +1731,15 @@ test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie e
   assert.match(bloc, /return \{ fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer \};/);
 });
 
-test("envoyerSauvegardeParEmail est best-effort : les 3 variables d'environnement manquantes ne lèvent jamais, juste un avertissement", () => {
+test("envoyerSauvegardeParEmail est best-effort : les variables d'environnement manquantes ne lèvent jamais, juste un avertissement", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerSauvegardeParEmail'), serverSrc.indexOf('cron.schedule(\'0 6 * * *\''));
-  assert.match(bloc, /if \(!expediteur \|\| !motDePasseApp \|\| !destinataire\) \{/);
+  assert.match(bloc, /if \(!cleApi \|\| !destinataire\) \{/);
   assert.match(bloc, /console\.warn\(/, "doit avertir plutôt que planter quand la config n'est pas encore posée");
-  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans EMAIL_SAUVEGARDE_* planterait au démarrage");
-  // Le mot de passe attendu est explicitement documenté (dans le commentaire juste au-dessus de
-  // la fonction) comme un mot de passe D'APPLICATION — jamais le vrai mot de passe Gmail du compte.
+  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans RESEND_API_KEY/EMAIL_SAUVEGARDE_DESTINATAIRE planterait au démarrage");
+  // La clé d'API est révocable seule depuis le tableau de bord Resend, sans jamais toucher à un
+  // vrai compte email — documenté dans le commentaire juste au-dessus de la fonction.
   const blocAvecCommentaire = serverSrc.slice(serverSrc.indexOf('// Copie HORS SUPABASE'), serverSrc.indexOf('async function envoyerSauvegardeParEmail'));
-  assert.match(blocAvecCommentaire, /mot de passe d'application/i);
+  assert.match(blocAvecCommentaire, /révocable seule/i);
 });
 
 test("La copie email de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
@@ -1758,24 +1759,28 @@ test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sé
 });
 
 // ============================================================
-// TIMEOUT DE L'ENVOI EMAIL (07/09) — Esdras : "c'est bloqué sur en cours" après avoir cliqué sur
-// tester la sauvegarde. Vérifié en base : la sauvegarde Supabase avait bien réussi (les fichiers
-// existent dans Storage), mais la réponse HTTP ne revenait jamais — sendMail() sans timeout
-// restait bloqué indéfiniment sur un port SMTP sortant probablement filtré, empêchant même
-// l'annonce du succès Supabase. Sans ce test, un futur retrait "accidentel" des timeouts (ex. lors
-// d'un refactor de envoyerSauvegardeParEmail) réintroduirait ce blocage sans qu'aucun signal ne le
+// TIMEOUT DE L'ENVOI EMAIL (07/09, puis SMTP abandonné le 10/09) — Esdras : "c'est bloqué sur en
+// cours" après avoir cliqué sur tester la sauvegarde. Vérifié en base : la sauvegarde Supabase
+// avait bien réussi (les fichiers existent dans Storage), mais la réponse HTTP ne revenait
+// jamais — sendMail() sans timeout restait bloqué indéfiniment. Deux ports SMTP testés en
+// conditions réelles ensuite (465 puis 587), même blocage silencieux de 15s pile les deux fois —
+// bloqués tous les deux par l'hébergeur, pas un problème d'identifiants. Remplacé par l'API HTTP
+// de Resend (HTTPS normal, jamais bloqué — envoyerCallMeBot() le prouve déjà sur ce même
+// service). Sans ce test, un futur retrait "accidentel" du garde-fou (ex. lors d'un refactor de
+// envoyerSauvegardeParEmail) réintroduirait un blocage possible sans qu'aucun signal ne le
 // détecte avant qu'un vrai clic ne reste, à nouveau, bloqué sur "En cours" pour de vrai.
 // ============================================================
 
-test("envoyerSauvegardeParEmail ne peut jamais bloquer indéfiniment — timeouts nodemailer ET Promise.race en filet", () => {
+test("envoyerSauvegardeParEmail passe par l'API HTTP de Resend (jamais du SMTP brut) et ne peut jamais bloquer indéfiniment", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_ENVOI_EMAIL_MS'), serverSrc.indexOf('// Tous les jours à 6h UTC'));
-  assert.match(bloc, /connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
-  assert.match(bloc, /greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
-  assert.match(bloc, /socketTimeout: DELAI_MAX_ENVOI_EMAIL_MS,/);
-  // Le filet Promise.race doit envelopper l'appel réel — sinon un cas que nodemailer ne couvrirait
-  // pas (ex. un blocage AVANT même la tentative de connexion) bloquerait quand même tout.
-  assert.match(bloc, /await Promise\.race\(\[envoi, delaiDepasse\]\);/);
-  assert.match(bloc, /setTimeout\(\(\) => reject\(new Error/, "le filet doit REJETER après le délai, pas juste logguer");
+  assert.match(bloc, /fetch\('https:\/\/api\.resend\.com\/emails'/, "doit passer par l'API HTTP de Resend, pas par nodemailer/SMTP (465 et 587 confirmés bloqués par l'hébergeur le 10/09)");
+  assert.doesNotMatch(bloc, /nodemailer/i, "ne doit plus jamais réintroduire nodemailer/SMTP ici");
+  assert.match(bloc, /Bearer \$\{cleApi\}/, "l'authentification Resend doit passer par RESEND_API_KEY, jamais codée en dur");
+  // Le garde-fou AbortController doit envelopper l'appel réel — sinon un cas imprévu (ex. un
+  // blocage réseau avant même la réponse HTTP) bloquerait quand même la réponse à l'utilisateur.
+  assert.match(bloc, /new AbortController\(\)/);
+  assert.match(bloc, /signal: controleur\.signal,/, "le fetch() doit être annulable par le garde-fou, sinon il ne sert à rien");
+  assert.match(bloc, /setTimeout\(\(\) => controleur\.abort\(\), DELAI_MAX_ENVOI_EMAIL_MS\)/, "le garde-fou doit vraiment ANNULER la requête après le délai, pas juste logguer");
 });
 
 // Dérive trouvée le 09/09 (analyse en profondeur avant mise en production) : le miroir serveur

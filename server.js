@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
@@ -2629,80 +2628,66 @@ async function sauvegarderVersStorage() {
 // protège ne protège de rien en cas d'incident sur ce projet précis (panne, suspension pour
 // facturation impayée, ou un accès malveillant qui supprime les données ET leur sauvegarde d'un
 // seul geste, puisque les deux sont à portée de la même clé). Envoyée par email, sur un compte
-// Gmail totalement indépendant de Supabase : un incident sur l'un n'emporte jamais l'autre.
+// totalement indépendant de Supabase : un incident sur l'un n'emporte jamais l'autre.
 //
-// EMAIL_SAUVEGARDE_MOT_DE_PASSE_APP est un "mot de passe d'application" Gmail — PAS le vrai mot de
-// passe du compte — révocable seul, à tout moment, sans jamais toucher au compte lui-même. Comme
-// CallMeBot, best-effort et jamais codé en dur : si les 3 variables d'environnement ne sont pas
-// encore posées dans Render, la sauvegarde Supabase (le principal) continue normalement, seule
-// cette copie manque, avec un avertissement dans les logs plutôt qu'un échec silencieux.
-// Bug trouvé le 07/09 (Esdras : "je suis encore cliqué sur tester la sauvegarde, mais je ne vois
-// pas de gmail" puis "c'est bloqué sur en cours") : sans timeout, un port SMTP sortant bloqué
-// (fréquent sur les plans gratuits d'hébergement, mesure anti-spam) ne fait pas ÉCHOUER
-// sendMail() — la connexion reste ouverte en silence, et l'attente ne se termine JAMAIS. Comme
-// cette fonction est attendue (await) avant de répondre à POST /api/admin/backup-manuel, ce
-// blocage empêchait aussi la réponse de revenir — la sauvegarde Supabase avait pourtant bien
-// réussi (vérifié en base : backup-2026-09-04.json et backup-2026-09-07.json existent), mais
-// l'écran restait bloqué sur "En cours" sans jamais l'annoncer. Double filet : les timeouts natifs
-// de nodemailer (première ligne de défense, message d'erreur clair de leur part) PLUS un
-// Promise.race (deuxième ligne, garantit un délai maximum même si un cas imprévu leur échappait).
+// PAS de SMTP (10/09) — deux ports testés en conditions réelles (465 par défaut de nodemailer,
+// puis 587/STARTTLS après un 1er correctif), même symptôme les deux fois : la connexion reste
+// ouverte 15s sans AUCUNE réponse, ni erreur ni succès — pas un rejet rapide d'identifiants
+// invalides (qui arriverait en 1-2s avec un message clair de Gmail). Signature d'un port bloqué en
+// sortie par l'hébergeur (mesure anti-spam courante sur les plans gratuits), qui ne dépend pas du
+// port choisi. Remplacé par l'API HTTP de Resend (https://api.resend.com) — HTTPS normal, port
+// 443, jamais bloqué : envoyerCallMeBot() (alertes WhatsApp, plus haut dans ce fichier) le prouve
+// déjà en pratique sur ce même service.
+// RESEND_API_KEY : clé d'API révocable seule depuis le tableau de bord Resend, sans jamais toucher
+// à un vrai compte email — même principe que l'ancien mot de passe d'application Gmail. Comme
+// CallMeBot, best-effort et jamais codée en dur : si la variable d'environnement n'est pas encore
+// posée dans Render, la sauvegarde Supabase (le principal) continue normalement, seule cette copie
+// manque, avec un avertissement dans les logs plutôt qu'un échec silencieux.
+// Sans domaine à soi vérifié sur Resend, l'expéditeur reste forcément onboarding@resend.dev (leur
+// domaine de test) — sans impact ici puisque EMAIL_SAUVEGARDE_DESTINATAIRE est justement
+// l'adresse personnelle d'Esdras, jamais un domaine à vérifier.
 const DELAI_MAX_ENVOI_EMAIL_MS = 15000;
 
 async function envoyerSauvegardeParEmail(nomFichier, contenuBuffer) {
-  const expediteur = process.env.EMAIL_SAUVEGARDE_EXPEDITEUR;
-  const motDePasseApp = process.env.EMAIL_SAUVEGARDE_MOT_DE_PASSE_APP;
+  const cleApi = process.env.RESEND_API_KEY;
   const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
-  if (!expediteur || !motDePasseApp || !destinataire) {
-    console.warn('Copie de sauvegarde par email NON envoyée — EMAIL_SAUVEGARDE_EXPEDITEUR/MOT_DE_PASSE_APP/DESTINATAIRE manquant(s) dans les variables d\'environnement Render.');
+  if (!cleApi || !destinataire) {
+    console.warn('Copie de sauvegarde par email NON envoyée — RESEND_API_KEY/EMAIL_SAUVEGARDE_DESTINATAIRE manquant(s) dans les variables d\'environnement Render.');
     return;
   }
-  // Diagnostic (09/09, retour d'Esdras : "ça ne m'envoie rien dans mon gmail", 2e fois après le
-  // correctif du timeout du 08/09) — le message d'erreur générique ne suffisait pas à savoir SI
-  // la connexion Gmail a même été tentée, ni POURQUOI elle a échoué. Un compte gmail masqué (les 3
-  // premiers caractères puis ***) permet de confirmer dans les logs Render que la bonne adresse
-  // expéditrice est bien lue, sans jamais journaliser le mot de passe d'application lui-même.
-  const expediteurMasque = expediteur.length > 3 ? `${expediteur.slice(0, 3)}***@${expediteur.split('@')[1] || '?'}` : '***';
-  console.log(`📧 Copie de sauvegarde par email : tentative d'envoi depuis ${expediteurMasque} vers le destinataire configuré...`);
-  // Port 587 explicite (10/09) — le 1er clic réel après le correctif du 09/09 a montré un échec
-  // silencieux de 15s pile, deux fois de suite (aucune erreur SMTP renvoyée, juste rien) :
-  // signature d'un port bloqué en sortie, pas d'identifiants refusés (qui échouerait en 1-2s avec
-  // un message clair de Gmail). `service: 'gmail'` de nodemailer utilise le port 465 (SSL direct)
-  // par défaut — beaucoup d'hébergeurs gratuits (Render inclus) le bloquent spécifiquement contre
-  // le spam, mais laissent souvent passer le 587 (STARTTLS). Preuve que ce n'est pas TOUT le
-  // sortant qui est bloqué : envoyerCallMeBot() (alertes WhatsApp, même fichier) fonctionne déjà en
-  // HTTPS normal sur ce même service. host/port/secure explicites remplacent le raccourci
-  // `service: 'gmail'` pour forcer 587 au lieu de 465 ; requireTLS force le chiffrement STARTTLS
-  // (Gmail refuse l'authentification en clair).
-  const transporteur = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
-    auth: { user: expediteur, pass: motDePasseApp },
-    connectionTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
-    greetingTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
-    socketTimeout: DELAI_MAX_ENVOI_EMAIL_MS,
-  });
-  const envoi = transporteur.sendMail({
-    from: expediteur,
-    to: destinataire,
-    subject: `Sauvegarde CHF — ${nomFichier}`,
-    text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
-    attachments: [{ filename: nomFichier, content: contenuBuffer, contentType: 'application/json' }],
-  });
-  const delaiDepasse = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Aucune réponse du serveur email après ${DELAI_MAX_ENVOI_EMAIL_MS / 1000}s (port SMTP sortant probablement bloqué).`)), DELAI_MAX_ENVOI_EMAIL_MS));
+  console.log(`📧 Copie de sauvegarde par email : tentative d'envoi (API Resend, HTTPS) vers le destinataire configuré...`);
+  // AbortController plutôt qu'un Promise.race manuel (l'ancien filet contre un sendMail() qui ne
+  // se terminait jamais) : un fetch() HTTPS classique échoue de lui-même en cas de vrai problème
+  // réseau, ce filet n'est qu'une garantie supplémentaire pour ne plus jamais reproduire le
+  // blocage sur "En cours" du 07/09, quelle qu'en soit la cause.
+  const controleur = new AbortController();
+  const gardeFou = setTimeout(() => controleur.abort(), DELAI_MAX_ENVOI_EMAIL_MS);
   try {
-    const info = await Promise.race([envoi, delaiDepasse]);
-    console.log(`✅ Copie de sauvegarde par email envoyée — messageId=${info?.messageId || '?'}, réponse SMTP="${info?.response || '?'}"`);
+    const reponse = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      signal: controleur.signal,
+      headers: { Authorization: `Bearer ${cleApi}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: process.env.EMAIL_SAUVEGARDE_EXPEDITEUR || 'Sauvegarde CHF <onboarding@resend.dev>',
+        to: [destinataire],
+        subject: `Sauvegarde CHF — ${nomFichier}`,
+        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')}, en pièce jointe.\n\nCopie HORS Supabase, volontairement — garde-la de ton côté (elle ne dépend d'aucun service du CHF).`,
+        attachments: [{ filename: nomFichier, content: contenuBuffer.toString('base64') }],
+      }),
+    });
+    const corps = await reponse.text();
+    if (!reponse.ok) throw new Error(`Resend a refusé l'envoi (HTTP ${reponse.status}) — ${corps}`);
+    let id = '?';
+    try { id = JSON.parse(corps).id || '?'; } catch { /* corps non-JSON, id restera '?' */ }
+    console.log(`✅ Copie de sauvegarde par email envoyée via Resend — id=${id}`);
   } catch (e) {
-    // Les erreurs SMTP de Gmail (identifiants refusés, mot de passe d'application invalide/révoqué,
-    // 2FA pas activée...) portent l'information utile dans .code/.responseCode/.response, presque
-    // jamais dans .message seul — on les rattache explicitement au message rethrow pour qu'elles
-    // remontent jusqu'à erreurEmail affiché à l'écran, sans jamais logguer motDePasseApp.
-    const details = [e.code, e.responseCode, e.response].filter(Boolean).join(' | ');
-    console.error(`❌ Échec d'envoi de la copie de sauvegarde par email : ${e.message}${details ? ` (${details})` : ''}`);
-    throw new Error(details ? `${e.message} — ${details}` : e.message);
+    const message = e.name === 'AbortError'
+      ? `Aucune réponse de Resend après ${DELAI_MAX_ENVOI_EMAIL_MS / 1000}s.`
+      : e.message;
+    console.error(`❌ Échec d'envoi de la copie de sauvegarde par email : ${message}`);
+    throw new Error(message);
+  } finally {
+    clearTimeout(gardeFou);
   }
 }
 
