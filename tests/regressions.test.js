@@ -194,6 +194,33 @@ test("episodeVersFlat expose voieEntree — sinon le badge de classification ne 
   assert.match(blocFlat, /voieEntree:\s*ep\.voie_entree/, "episodeVersFlat doit renvoyer voieEntree");
 });
 
+// Audit du 11/09 — ce serveur (Render) tourne en UTC, jamais à l'heure d'Haïti. Un dossier ouvert
+// entre 20h et minuit heure d'Haïti (= déjà le lendemain en UTC) recevait un dateHeure daté d'un
+// jour trop tard, en confirmé sur de vraies données de production (4 dossiers réels vérifiés,
+// ex. un dossier ouvert le 28/08 à 20h46 heure d'Haïti dateHeure'd "29/08"). Comme dateHeure est
+// recalculé à CHAQUE lecture (jamais stocké), l'écart n'était pas qu'un affichage : Direction
+// (Admissions/Hospitalisations/Consultations "aujourd'hui" + leurs deltas vs hier/semaine
+// dernière) et tout filtre par date d'Archives en dépendent directement.
+test("assemblerEpisodeFlat calcule dateHeure dans le fuseau d'Haïti (FUSEAU_HAITI), jamais l'heure locale du serveur (UTC) — sinon un dossier ouvert entre 20h et minuit heure d'Haïti se voit daté du lendemain, en confirmé sur de vraies données de production", () => {
+  const blocFlat = serverSrc.slice(serverSrc.indexOf('function episodeVersFlat'), serverSrc.indexOf("app.get('/api/episodes'"));
+  assert.match(blocFlat, /dateHeure:\s*new Date\(ep\.date_ouverture\)\.toLocaleDateString\('fr-FR',\s*\{\s*timeZone:\s*FUSEAU_HAITI\s*\}\)/, "dateHeure doit préciser timeZone: FUSEAU_HAITI");
+});
+
+test("FUSEAU_HAITI = 'America/Port-au-Prince' (jamais un décalage fixe '-4' en dur) — Haïti suit le changement d'heure américain (UTC-5 l'hiver, UTC-4 l'été) : un décalage figé serait faux une bonne partie de l'année", () => {
+  assert.match(serverSrc, /const FUSEAU_HAITI = 'America\/Port-au-Prince';/);
+  // Vérifié en conditions réelles (Intl/ICU de ce Node) : le fuseau IANA gère bien les 2 saisons,
+  // ce qu'un décalage fixe ne pourrait jamais faire.
+  const hiver = new Date('2026-01-15T02:00:00Z').toLocaleString('en-US', { timeZone: 'America/Port-au-Prince', timeZoneName: 'short' });
+  const ete = new Date('2026-07-15T02:00:00Z').toLocaleString('en-US', { timeZone: 'America/Port-au-Prince', timeZoneName: 'short' });
+  assert.match(hiver, /EST/, "l'hiver, Haïti doit être en EST (UTC-5)");
+  assert.match(ete, /EDT/, "l'été, Haïti doit être en EDT (UTC-4)");
+});
+
+test("Sauvegarde : le nom de fichier ET le texte de la notification sont datés dans le fuseau d'Haïti — sinon un déclenchement manuel (\"Tester la sauvegarde\") entre 20h et minuit heure d'Haïti nomme le fichier avec la date de DEMAIN", () => {
+  assert.match(serverSrc, /const nomFichier = `backup-\$\{new Date\(\)\.toLocaleDateString\('en-CA',\s*\{\s*timeZone:\s*FUSEAU_HAITI\s*\}\)\}\.json`;/, "le nom de fichier de sauvegarde doit utiliser FUSEAU_HAITI (format en-CA = AAAA-MM-JJ)");
+  assert.match(serverSrc, /Sauvegarde automatique du \$\{new Date\(\)\.toLocaleDateString\('fr-FR',\s*\{\s*timeZone:\s*FUSEAU_HAITI\s*\}\)\}/, "le texte de la notification de sauvegarde doit aussi utiliser FUSEAU_HAITI");
+});
+
 test("PUT /api/episodes/:id lit le corps en snake_case (service_choisi, type_patient, ong_partenaire, numero_lot, verrouille_facture, date_suspension, mois_report) — sinon l'assignation à un lot de facturation, le changement de service/ONG/type, la suspension et le report au mois suivant réussissaient (200 OK) sans jamais rien écrire en base", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
   for (const champ of ['service_choisi', 'type_patient', 'ong_partenaire', 'numero_lot', 'verrouille_facture', 'date_suspension', 'mois_report']) {
@@ -1050,11 +1077,16 @@ test("Sauvegarde automatique : une table illisible ne fait plus échouer la sauv
 // avec un `supabase` injecté. Le bloc est contigu dans server.js (statutVersFlat -> fin de
 // episodesVersFlatEnLot), donc rien n'est recopié ici : c'est le VRAI code qui est testé.
 function chargerLecteursEpisodes(supabase) {
+  // FUSEAU_HAITI (11/09) est déclaré tout en haut du fichier, bien avant ce bloc — assemblerEpisodeFlat
+  // (dateHeure) le lit désormais, donc l'eval isolé ci-dessous doit l'avoir en portée lui aussi.
+  const debutFuseau = serverSrc.indexOf("const FUSEAU_HAITI = 'America/Port-au-Prince';");
+  assert.ok(debutFuseau !== -1, "constante FUSEAU_HAITI introuvable dans server.js");
+  const declarationFuseau = serverSrc.slice(debutFuseau, serverSrc.indexOf('\n', debutFuseau));
   const debut = serverSrc.indexOf('function statutVersFlat(ep) {');
   const marqueurFin = serverSrc.indexOf('async function episodesVersFlatEnLot');
   const fin = serverSrc.indexOf('\n}', serverSrc.indexOf('return episodes.map(ep => {', marqueurFin)) + 2;
   assert.ok(debut !== -1 && marqueurFin > debut && fin > marqueurFin, "bloc de lecture des épisodes introuvable dans server.js");
-  const code = serverSrc.slice(debut, fin);
+  const code = `${declarationFuseau}\n${serverSrc.slice(debut, fin)}`;
   return new Function('supabase', 'console', `${code}\nreturn { episodeVersFlat, episodesVersFlatEnLot };`)(
     supabase,
     { ...console, error: () => {} }, // les avertissements "dossier introuvable" sont attendus ici
