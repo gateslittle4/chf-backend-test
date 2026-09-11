@@ -140,6 +140,15 @@ async function aPermission(userId, cle) {
 // à la fois. L'ancienne URL onrender.com reste acceptée en plus, pour ne pas casser l'accès
 // pendant la transition vers le nouveau domaine.
 const ORIGINE_FRONTEND = process.env.FRONTEND_URL || 'https://chf-app2.onrender.com';
+
+// Ce serveur (Render) tourne en UTC, jamais à l'heure d'Haïti — un calcul de date "du jour" fait
+// ICI sans préciser le fuseau donne la date UTC, pas celle d'Haïti (audit du 11/09, suite à un
+// dossier ouvert un soir dont dateHeure affichait le lendemain). America/Port-au-Prince gère aussi
+// le changement d'heure (Haïti suit le calendrier DST américain : UTC-5 en hiver, UTC-4 en été) —
+// jamais un décalage fixe "-4" en dur, qui serait faux une bonne partie de l'année. Le navigateur,
+// lui, n'a jamais ce problème (son fuseau local EST celui d'Haïti) : voir jourLocal()/moisLocal()
+// côté chf-app2 (utils/helpers.js), qui résolvent le même besoin autrement, côté client.
+const FUSEAU_HAITI = 'America/Port-au-Prince';
 app.use(cors({
   origin: (origin, callback) => {
     // Pas d'en-tête Origin (curl, health check Render, appel serveur à serveur) : toujours
@@ -601,7 +610,7 @@ function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
     // Distingue Consultation de Vente comptoir (Achat Express) — les deux ont
     // estHospitalisation: false, seul voie_entree ('consultation' vs 'vente_comptoir') les sépare.
     voieEntree: ep.voie_entree,
-    dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR'),
+    dateHeure: new Date(ep.date_ouverture).toLocaleDateString('fr-FR', { timeZone: FUSEAU_HAITI }),
     timestamp: new Date(ep.date_ouverture).getTime(),
     totalGlobal,
     // '9999-12-31' = la même convention "sans exeat" que le navigateur : trie ces dossiers en fin
@@ -2596,7 +2605,10 @@ async function sauvegarderVersStorage() {
     if (erreurCreation) throw new Error(`Création du bucket : ${erreurCreation.message}`);
   }
 
-  const nomFichier = `backup-${new Date().toISOString().slice(0, 10)}.json`;
+  // en-CA donne nativement le format YYYY-MM-DD ; timeZone: FUSEAU_HAITI (pas .toISOString(), qui
+  // ne connaît que l'UTC) pour qu'un déclenchement manuel entre 20h et minuit heure d'Haïti (le
+  // "Tester la sauvegarde" d'Esdras) ne nomme pas le fichier avec la date de DEMAIN.
+  const nomFichier = `backup-${new Date().toLocaleDateString('en-CA', { timeZone: FUSEAU_HAITI })}.json`;
   // Gardé pour la copie hors Supabase plus bas (envoyerCopieHorsSupabase) : sérialiser deux fois la même
   // sauvegarde (une pour Storage, une pour l'email) risquerait de produire deux fichiers
   // légèrement différents si un appel concurrent modifiait `contenu` entre les deux — improbable
@@ -2754,7 +2766,7 @@ async function envoyerCopieHorsSupabase(nomFichier, contenuBuffer) {
         from: 'Sauvegarde CHF <onboarding@resend.dev>',
         to: [destinataire],
         subject: `Sauvegarde CHF — ${nomFichier}`,
-        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR')} envoyée sur Backblaze B2 (bucket "${process.env.B2_BUCKET_NAME}").\n\nPas de pièce jointe cette fois — regarde/télécharge le fichier directement depuis ton tableau de bord Backblaze si besoin.`,
+        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR', { timeZone: FUSEAU_HAITI })} envoyée sur Backblaze B2 (bucket "${process.env.B2_BUCKET_NAME}").\n\nPas de pièce jointe cette fois — regarde/télécharge le fichier directement depuis ton tableau de bord Backblaze si besoin.`,
       }),
     });
   } catch (e) {
