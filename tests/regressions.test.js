@@ -361,14 +361,25 @@ test("POST /api/fiches calcule numero_fiche lui-même (MAX+1 depuis la base, jam
 // Retour d'Esdras (23/08) : URGENT — cette route n'existait pas du tout. "🗑️ Supprimer" côté client
 // ne retirait la fiche que de l'état React local (+ restitution de stock) ; la fiche ET son
 // paiement restaient en base pour toujours, donc réapparaissaient au moindre rechargement de page.
-test("DELETE /api/fiches/:id existe, exige dossier_annuler, supprime les paiements liés (fiche_id) AVANT la fiche elle-même, et reste idempotente (fiche déjà absente = succès, pas une erreur)", () => {
-  const bloc = blocRoutePermission("app.delete('/api/fiches/:id'", "// Route : récupération du catalogue");
+test("DELETE /api/fiches/:id existe, exige dossier_annuler, met les paiements liés (fiche_id) à la corbeille AVANT la fiche elle-même, et reste idempotente (fiche déjà absente = succès, pas une erreur)", () => {
+  const bloc = blocRoutePermission("app.delete('/api/fiches/:id'", "// Restauration d'une fiche mise à la corbeille");
   assert.match(bloc, /aPermission\(req\.user\.id, 'dossier_annuler'\)/, "doit exiger la permission dossier_annuler (même permission que le bouton côté client)");
-  const posPaiements = bloc.indexOf("from('paiements').delete()");
-  const posFiche = bloc.indexOf("from('fiches').delete()");
-  assert.ok(posPaiements !== -1, "doit supprimer les paiements liés à cette fiche (fiche_id)");
-  assert.ok(posFiche !== -1 && posPaiements < posFiche, "doit supprimer les paiements AVANT la fiche — sinon un paiement pourrait rester orphelin si la 2e suppression échoue");
+  // Corbeille 30 jours (10/09) : plus un vrai DELETE mais un UPDATE de supprime_le — la ligne
+  // reste en base, purgée pour de bon seulement après 30 jours (purgerCorbeilleDossiers()).
+  assert.doesNotMatch(bloc, /from\('fiches'\)\.delete\(\)|from\('paiements'\)\.delete\(\)/, "ne doit plus jamais faire un vrai DELETE ici — c'est justement ce qui rendait la restauration impossible");
+  const posPaiements = bloc.indexOf("from('paiements').update({ supprime_le: maintenant })");
+  const posFiche = bloc.indexOf("from('fiches').update({ supprime_le: maintenant })");
+  assert.ok(posPaiements !== -1, "doit mettre à la corbeille les paiements liés à cette fiche (fiche_id)");
+  assert.ok(posFiche !== -1 && posPaiements < posFiche, "doit traiter les paiements AVANT la fiche — sinon un paiement pourrait rester orphelin si la 2e étape échoue");
+  assert.match(bloc, /\.eq\('fiche_id', req\.params\.id\)\.is\('supprime_le', null\)/, "ne doit jamais re-marquer un paiement déjà à la corbeille pour une autre raison, avec sa propre date");
   assert.match(bloc, /if \(!fiche\) return res\.status\(200\)\.json\(\{ success: true \}\);/, "une fiche déjà supprimée doit renvoyer un succès, pas une erreur — nécessaire pour une relecture idempotente depuis la file hors ligne");
+});
+
+test("POST /api/fiches/:id/restaurer existe, exige dossier_annuler, et ne restaure que les paiements marqués au MÊME instant que la fiche (jamais ceux mis à la corbeille séparément)", () => {
+  const bloc = blocRoutePermission("app.post('/api/fiches/:id/restaurer'", "// ============================================================");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'dossier_annuler'\)/);
+  assert.match(bloc, /if \(!fiche\.supprime_le\) return res\.status\(400\)/, "doit refuser de restaurer une fiche qui n'est pas à la corbeille");
+  assert.match(bloc, /\.eq\('fiche_id', req\.params\.id\)\.eq\('supprime_le', horodatageSuppression\)/, "doit restaurer uniquement les paiements marqués au MÊME horodatage que la fiche");
 });
 
 test("PUT /api/catalog/:type exige permissions_gerer pour 'permissions', catalogue_gerer sinon (medicaments/actes déjà rejetés en 410 avant d'arriver ici)", () => {
@@ -1102,7 +1113,11 @@ function faireFauxSupabase(donnees, compteur) {
       const etat = { eq: [], in: null, notNull: null, order: null };
       const lignes = () => {
         let r = (donnees[table] || []).slice();
-        for (const [col, val] of etat.eq) r = r.filter(l => l[col] === val);
+        // "estIs" (10/09, colonnes supprime_le) : .is(col, null) doit aussi matcher une ligne où
+        // la colonne est simplement ABSENTE (undefined) — le jeu de test ci-dessous ne pose
+        // jamais supprime_le sur ses lignes, exactement comme une vraie ligne jamais mise à la
+        // corbeille. Un .eq(col, val) classique ('===' strict) resterait, lui, correct tel quel.
+        for (const [col, val, estIs] of etat.eq) r = r.filter(l => estIs ? (l[col] ?? null) === val : l[col] === val);
         if (etat.in) r = r.filter(l => etat.in.valeurs.includes(l[etat.in.colonne]));
         if (etat.notNull) r = r.filter(l => l[etat.notNull] !== null && l[etat.notNull] !== undefined);
         if (etat.order) r = r.sort((a, b) => String(a[etat.order]).localeCompare(String(b[etat.order])));
@@ -1110,7 +1125,8 @@ function faireFauxSupabase(donnees, compteur) {
       };
       const api = {
         select: () => api,
-        eq: (col, val) => { etat.eq.push([col, val]); return api; },
+        eq: (col, val) => { etat.eq.push([col, val, false]); return api; },
+        is: (col, val) => { etat.eq.push([col, val, true]); return api; },
         in: (col, valeurs) => {
           // Simule la limite réelle : PostgREST met tous les ids dans l'URL, qui a une longueur
           // maximale. Sans découpage en lots, la requête échouerait en production (414) — ici elle
@@ -1257,7 +1273,7 @@ test("Lecture groupée : aucune ligne perdue même si le serveur plafonne les r�
         return r;
       };
       const api = {
-        select: () => api, eq: () => api, not: (c) => { etat.notNull = c; return api; }, order: () => api,
+        select: () => api, eq: () => api, is: () => api, not: (c) => { etat.notNull = c; return api; }, order: () => api,
         in: (col, valeurs) => { etat.in = { colonne: col, valeurs }; return api; },
         range: (d, f) => Promise.resolve({ data: lignes().slice(d, Math.min(f + 1, d + PLAFOND_SERVEUR)), error: null }),
       };
@@ -1544,10 +1560,90 @@ test("Corbeille catalogue : purgerCorbeilleCatalogue ne supprime pour de bon qu'
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /const JOURS_CORBEILLE_CATALOGUE = 30;/);
   const blocFonction = src.slice(src.indexOf('async function purgerCorbeilleCatalogue'), src.indexOf("cron.schedule('0 6 * * *', async () => {\n  try {\n    const resultat = await purgerCorbeilleCatalogue"));
-  assert.match(blocFonction, /for \(const type of \['medicaments', 'actes'\]\)/, "seuls medicaments/actes sont concernés par cette purge — pas les dossiers/fiches/pièces jointes/partenaires ONG (pas encore de colonne supprime_le en base pour eux)");
+  assert.match(blocFonction, /for \(const type of \['medicaments', 'actes'\]\)/, "seuls medicaments/actes sont concernés par CETTE fonction — dossiers/fiches/pièces jointes ont leur propre purgerCorbeilleDossiers() séparée (voir plus bas), partenaires ONG n'ont encore aucune route de suppression");
   assert.match(blocFonction, /i\.supprimeLe && new Date\(i\.supprimeLe\)\.getTime\(\) < limite/, "ne doit purger que les articles dont supprimeLe date de plus de 30 jours, jamais les autres");
   assert.match(blocFonction, /supabase\.rpc\('supprimer_article_catalogue', \{ p_type: type, p_id: item\.id \}\)/, "doit réutiliser la RPC déjà en prod (ancien mécanisme de suppression directe), pas une nouvelle fonction non déployée");
   assert.match(src, /app\.post\('\/api\/admin\/purger-corbeille-catalogue'/, "un déclenchement manuel doit exister, comme pour la sauvegarde");
+});
+
+// ============================================================
+// CORBEILLE DOSSIERS/FICHES/PIÈCES JOINTES — phase 2 (10/09, retour d'Esdras : "corrige la
+// corbeille"). Les colonnes supprime_le existaient depuis le 01/09 (sql/corbeille_30_jours.sql)
+// mais rien ne les écrivait ni ne les lisait : chaque suppression restait un vrai DELETE
+// définitif. Les 3 vraies routes de suppression utilisateur (episodes, fiches,
+// pieces-jointes — jamais les .delete() internes de rollback d'une correction ratée, qui
+// suppriment des lignes créées l'instant d'avant dans la MÊME requête et n'ont donc aucune
+// raison d'aller à la corbeille) deviennent des UPDATE, avec restauration et purge à 30 jours.
+// ============================================================
+
+test("DELETE /api/episodes/:id met le dossier à la corbeille (UPDATE, plus un vrai DELETE) et cascade manuellement vers ses fiches/paiements non déjà supprimés séparément", () => {
+  const bloc = blocRoutePermission("app.delete('/api/episodes/:id'", "// Restauration d'un dossier mis à la corbeille");
+  assert.doesNotMatch(bloc, /from\('episodes'\)\.delete\(\)/, "ne doit plus jamais faire un vrai DELETE — c'est justement ce qui a rendu la restauration impossible");
+  assert.match(bloc, /from\('episodes'\)\.update\(\{ supprime_le: maintenant \}\)\.eq\('id', req\.params\.id\)\.select\(\)/, "doit vérifier qu'une ligne a réellement été affectée");
+  assert.match(bloc, /if \(!episodeMaj \|\| episodeMaj\.length === 0\) return res\.status\(404\)/, "un dossier introuvable doit répondre 404, pas un faux succès");
+  assert.match(bloc, /from\('fiches'\)\.update\(\{ supprime_le: maintenant \}\)\.eq\('episode_id', req\.params\.id\)\.is\('supprime_le', null\)/, "doit cascader vers les fiches de CET épisode, en ignorant celles déjà à la corbeille séparément (leur propre date ne doit jamais être écrasée)");
+  assert.match(bloc, /from\('paiements'\)\.update\(\{ supprime_le: maintenant \}\)\.eq\('episode_id', req\.params\.id\)\.is\('supprime_le', null\)/, "même cascade pour les paiements — ON DELETE CASCADE en base ne se déclenche que sur un vrai DELETE, qu'on ne fait plus");
+  // La distinction de permission selon le statut (brouillon vs archivé) doit survivre ce
+  // changement — c'était le tout premier correctif de sécurité de cette route.
+  assert.match(bloc, /aPermission\(req\.user\.id, 'facturation_supprimer'\)/);
+});
+
+test("POST /api/episodes/:id/restaurer restaure le dossier ET seulement les fiches/paiements marqués au MÊME instant que lui (jamais une fiche supprimée séparément avant ou après)", () => {
+  const bloc = blocRoutePermission("app.post('/api/episodes/:id/restaurer'", "// Liste des dossiers à la corbeille");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'facturation_supprimer'\)/, "même permission que la suppression d'un dossier archivé — restaurer est au moins aussi sensible");
+  assert.match(bloc, /if \(!episode\.supprime_le\) return res\.status\(400\)/, "doit refuser de restaurer un dossier qui n'est pas à la corbeille");
+  assert.match(bloc, /const horodatageSuppression = episode\.supprime_le;/);
+  assert.match(bloc, /\.eq\('episode_id', req\.params\.id\)\.eq\('supprime_le', horodatageSuppression\)/g, "doit filtrer sur le MÊME horodatage — pas juste episode_id, sinon une fiche supprimée séparément plus tôt reviendrait par erreur");
+});
+
+test("GET /api/episodes/corbeille liste les dossiers à la corbeille avec le nom du patient et la date de suppression, réservé à facturation_supprimer", () => {
+  const bloc = blocRoutePermission("app.get('/api/episodes/corbeille'", "// ============================================================\n// DOSSIER / ÉPISODE / FICHES");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'facturation_supprimer'\)/);
+  assert.match(bloc, /\.not\('supprime_le', 'is', null\)/, "doit lister UNIQUEMENT les dossiers à la corbeille, jamais les actifs");
+  assert.match(bloc, /nomPatient: nomParDossier\.get\(e\.dossier_id\) \|\| null, supprimeLe: e\.supprime_le/);
+});
+
+test("DELETE /api/dossiers/:id/pieces-jointes/:fichierId met la pièce jointe à la corbeille SANS toucher au fichier réel dans Storage — restaurer une ligne dont le fichier a déjà disparu serait inutile", () => {
+  const bloc = blocRoutePermission("app.delete('/api/dossiers/:id/pieces-jointes/:fichierId'", "// Restauration d'une pièce jointe mise à la corbeille");
+  assert.doesNotMatch(bloc, /storage\.from\(BUCKET_PIECES_JOINTES\)\.remove/, "le fichier ne doit plus être retiré de Storage ICI — seulement à la purge définitive après 30 jours");
+  assert.doesNotMatch(bloc, /from\('pieces_jointes'\)\.delete\(\)/, "ne doit plus faire un vrai DELETE");
+  assert.match(bloc, /from\('pieces_jointes'\)\.update\(\{ supprime_le: new Date\(\)\.toISOString\(\) \}\)\.eq\('id', req\.params\.fichierId\)\.select\(\)/);
+  assert.match(bloc, /if \(!pieceMaj \|\| pieceMaj\.length === 0\) return res\.status\(404\)/);
+});
+
+test("POST /api/dossiers/:id/pieces-jointes/:fichierId/restaurer annule juste la marque — le fichier n'a jamais quitté Storage, rien d'autre à refaire", () => {
+  const bloc = blocRoutePermission("app.post('/api/dossiers/:id/pieces-jointes/:fichierId/restaurer'", "app.get('/api/dossiers/:id/episodes-ouverts'");
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/);
+  assert.match(bloc, /if \(!piece\.supprime_le\) return res\.status\(400\)/);
+  assert.doesNotMatch(bloc, /storage/i, "aucune opération Storage à la restauration — le fichier physique n'a jamais bougé");
+});
+
+test("purgerCorbeilleDossiers() fait un VRAI DELETE après 30 jours (déclenche enfin la cascade base de données) et retire le fichier Storage des pièces jointes purgées", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /const JOURS_CORBEILLE_DOSSIERS = 30;/);
+  const blocFonction = src.slice(src.indexOf('async function purgerCorbeilleDossiers'), src.indexOf('const JOURS_TRACES_DECREMENT_STOCK'));
+  assert.match(blocFonction, /from\('episodes'\)\.delete\(\)\.lt\('supprime_le', limite\)\.not\('supprime_le', 'is', null\)/, "les dossiers expirés doivent subir un vrai DELETE — c'est ce qui déclenche enfin la cascade base vers fiches/paiements");
+  assert.match(blocFonction, /from\('fiches'\)\.delete\(\)\.lt\('supprime_le', limite\)\.not\('supprime_le', 'is', null\)/, "les fiches supprimées indépendamment (leur épisode n'a jamais été supprimé) doivent être purgées séparément");
+  assert.match(blocFonction, /storage\.from\(BUCKET_PIECES_JOINTES\)\.remove\(\[piece\.storage_path\]\)/, "le fichier réel ne doit disparaître de Storage qu'ICI, à la purge définitive");
+  assert.match(blocFonction, /if \(!erreurSuppr\) resultats\.piecesJointes\+\+;/, "un fichier déjà absent de Storage ne doit jamais empêcher de nettoyer la ligne elle-même");
+  assert.match(src, /app\.post\('\/api\/admin\/purger-corbeille-dossiers'/, "un déclenchement manuel doit exister, comme pour la corbeille catalogue");
+  const blocCron = src.slice(src.indexOf("cron.schedule('0 6 * * *'", src.indexOf('purgerInvitationsAnciennes')), src.indexOf("app.post('/api/admin/purger-corbeille-catalogue'"));
+  assert.match(blocCron, /await purgerCorbeilleDossiers\(\)/, "doit tourner dans le même cron quotidien que les autres purges, dans son propre try/catch indépendant");
+});
+
+test("Les lectures qui alimentent l'écran (dossiers/épisodes, fiches d'un épisode, pièces jointes, paiements) excluent toutes les lignes à la corbeille — sinon un dossier 'supprimé' réapparaîtrait", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // episodeVersFlat (chemin unitaire) ET episodesVersFlatEnLot (chemin groupé) doivent filtrer
+  // À L'IDENTIQUE — sinon les deux chemins ne produiraient plus le même résultat (voir le
+  // commentaire au-dessus d'assemblerEpisodeFlat : "ne jamais dupliquer cette logique ailleurs").
+  assert.match(src, /from\('fiches'\)\.select\('\*'\)\.eq\('episode_id', ep\.id\)\.is\('supprime_le', null\)/, "episodeVersFlat (chemin unitaire)");
+  assert.match(src, /from\('fiches'\)\.select\('\*'\)\.in\('episode_id', lot\)\.is\('supprime_le', null\)/, "episodesVersFlatEnLot (chemin groupé)");
+  const blocEpisodes = src.slice(src.indexOf("app.get('/api/episodes', async"), src.indexOf("app.post('/api/episodes', async"));
+  assert.match(blocEpisodes, /from\('episodes'\)\.select\('\*'\)\.is\('supprime_le', null\)/, "GET /api/episodes (liste principale, alimente Archives)");
+  const blocPieces = blocRoutePermission("app.get('/api/dossiers/:id/pieces-jointes'", "app.post('/api/dossiers/:id/pieces-jointes'");
+  assert.match(blocPieces, /from\('pieces_jointes'\)\.select\('\*'\)\.eq\('dossier_id', req\.params\.id\)\.is\('supprime_le', null\)/);
+  const blocPaiements = src.slice(src.indexOf("app.get('/api/paiements', async"), src.indexOf("app.post('/api/paiements', async"));
+  assert.match(blocPaiements, /from\('paiements'\)\.select\('\*'\)\.is\('supprime_le', null\)/, "GET /api/paiements (caisse, rapprochement, rapports partenaires)");
 });
 
 // Retour d'Esdras (01/09) : bébé enregistré au néonat sous un nom temporaire ("Bébé + nom de la

@@ -539,7 +539,7 @@ async function episodeVersFlat(ep) {
   if (erreurDossier) console.error(`⚠️ episodeVersFlat: dossier introuvable pour l'épisode ${ep.id} (dossier_id=${ep.dossier_id}) :`, erreurDossier.message);
   // .order('id') en second : départage deux fiches créées à la même seconde, pour que cette
   // version unitaire et la version groupée (episodesVersFlatEnLot) donnent le MÊME ordre.
-  const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).order('date_creation').order('id');
+  const { data: fiches } = await supabase.from('fiches').select('*').eq('episode_id', ep.id).is('supprime_le', null).order('date_creation').order('id');
   // Audit financier (24/08, "on ne peut pas se permettre l'erreur") : un paiement ANNULÉ (fraude/
   // erreur corrigée par la direction) laissait quand même sa fiche compter dans totalGlobal — les
   // rapports de revenus (Statistiques/AnalyticsPanel, Direction, Archives...) restaient faussés
@@ -699,7 +699,7 @@ async function episodesVersFlatEnLot(episodes) {
     // Même tri que la version unitaire (date_creation, départagé par id) : le tri est global ici,
     // mais regrouper en préservant l'ordre de parcours laisse chaque épisode avec SES fiches dans
     // ce même ordre.
-    lireParLotsDIds(idsEpisodes, lot => supabase.from('fiches').select('*').in('episode_id', lot).order('date_creation').order('id')),
+    lireParLotsDIds(idsEpisodes, lot => supabase.from('fiches').select('*').in('episode_id', lot).is('supprime_le', null).order('date_creation').order('id')),
     // episode_id est sélectionné en plus de fiche_id (la version unitaire n'en a pas besoin,
     // elle filtre déjà sur un seul épisode) — c'est lui qui permet de reconstituer, en mémoire,
     // le même Set par épisode.
@@ -811,7 +811,7 @@ app.get('/api/episodes', async (req, res) => {
     // des épisodes EN SILENCE (les plus anciens auraient simplement disparu des rapports, sans
     // erreur) — le reste du correctif n'y aurait rien changé, puisque tout part de cette lecture.
     const episodes = await lireToutesLesPages(
-      () => supabase.from('episodes').select('*').order('date_ouverture', { ascending: false }).order('id'));
+      () => supabase.from('episodes').select('*').is('supprime_le', null).order('date_ouverture', { ascending: false }).order('id'));
     res.json(await episodesVersFlatEnLot(episodes));
   } catch (e) {
     // lireParLotsDIds relaie l'erreur Supabase plutôt que de renvoyer une liste incomplète en
@@ -968,9 +968,65 @@ app.delete('/api/episodes/:id', async (req, res) => {
       return res.status(403).json({ error: "Permission 'facturation_supprimer' requise pour supprimer un dossier déjà archivé." });
     }
   }
-  const { error } = await supabase.from('episodes').delete().eq('id', req.params.id);
+  // Corbeille 30 jours (retour d'Esdras, 01/09 : "j'aime pas trop suppression irréversible") —
+  // phase 2, jamais branchée jusqu'ici malgré les colonnes déjà en place (voir
+  // sql/corbeille_30_jours.sql). Un UPDATE de supprime_le au lieu d'un vrai DELETE : la ligne
+  // reste en base, purgée pour de bon seulement après 30 jours (voir purgerCorbeilleDossiers()).
+  // fiches/paiements de CET épisode suivent avec le MÊME horodatage (le vrai DELETE cascadait
+  // déjà automatiquement vers eux au niveau base — episodes.dossier_id/fiches.episode_id/
+  // paiements.episode_id sont ON DELETE CASCADE — un simple UPDATE ne déclenche pas cette
+  // cascade, donc il faut la refaire à la main ici). .is('supprime_le', null) : ne touche jamais
+  // une fiche déjà mise à la corbeille séparément plus tôt pour une autre raison, avec sa propre
+  // date — cette date sert de repère exact pour distinguer, à la restauration, ce qui a été
+  // supprimé AVEC ce dossier de ce qui l'a été indépendamment (voir la route de restauration).
+  const maintenant = new Date().toISOString();
+  const { data: episodeMaj, error } = await supabase.from('episodes').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
   if (error) return res.status(500).json({ error: error.message });
+  if (!episodeMaj || episodeMaj.length === 0) return res.status(404).json({ error: 'Dossier introuvable.' });
+  await supabase.from('fiches').update({ supprime_le: maintenant }).eq('episode_id', req.params.id).is('supprime_le', null).select();
+  await supabase.from('paiements').update({ supprime_le: maintenant }).eq('episode_id', req.params.id).is('supprime_le', null).select();
   res.json({ success: true });
+});
+
+// Restauration d'un dossier mis à la corbeille — même permission que sa suppression (un
+// utilisateur qui peut supprimer un dossier archivé peut aussi annuler ce geste). Ne restaure
+// QUE les fiches/paiements dont supprime_le correspond EXACTEMENT à celui de l'épisode — ceux-là
+// ont été mis à la corbeille EN MÊME TEMPS que lui (par la cascade ci-dessus), jamais une fiche
+// supprimée séparément avant ou après pour une raison qui n'a rien à voir.
+app.post('/api/episodes/:id/restaurer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'facturation_supprimer'))) {
+    return res.status(403).json({ error: "Permission 'facturation_supprimer' requise pour restaurer un dossier." });
+  }
+  const { data: episode, error: erreurLecture } = await supabase.from('episodes').select('supprime_le').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!episode) return res.status(404).json({ error: 'Dossier introuvable.' });
+  if (!episode.supprime_le) return res.status(400).json({ error: "Ce dossier n'est pas à la corbeille." });
+  const horodatageSuppression = episode.supprime_le;
+  const { data: episodeRestaure, error } = await supabase.from('episodes').update({ supprime_le: null }).eq('id', req.params.id).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!episodeRestaure || episodeRestaure.length === 0) return res.status(404).json({ error: 'Dossier introuvable.' });
+  await supabase.from('fiches').update({ supprime_le: null }).eq('episode_id', req.params.id).eq('supprime_le', horodatageSuppression).select();
+  await supabase.from('paiements').update({ supprime_le: null }).eq('episode_id', req.params.id).eq('supprime_le', horodatageSuppression).select();
+  res.json({ success: true });
+});
+
+// Liste des dossiers à la corbeille — alimente l'onglet "🗑️ Corbeille" d'Archives, même
+// principe que la corbeille du catalogue (GrilleEdition.js) : montrer ce qui reste avant la
+// purge définitive à 30 jours, avec la possibilité de restaurer avant.
+app.get('/api/episodes/corbeille', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'facturation_supprimer'))) {
+    return res.status(403).json({ error: "Permission 'facturation_supprimer' requise pour voir la corbeille." });
+  }
+  const { data: episodes, error } = await supabase
+    .from('episodes').select('id, dossier_id, supprime_le').not('supprime_le', 'is', null).order('supprime_le', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const dossierIds = [...new Set((episodes || []).map(e => e.dossier_id))];
+  const { data: dossiers, error: erreurDossiers } = dossierIds.length > 0
+    ? await supabase.from('dossiers').select('id, nom').in('id', dossierIds)
+    : { data: [], error: null };
+  if (erreurDossiers) return res.status(500).json({ error: erreurDossiers.message });
+  const nomParDossier = new Map((dossiers || []).map(d => [d.id, d.nom]));
+  res.json((episodes || []).map(e => ({ id: e.id, nomPatient: nomParDossier.get(e.dossier_id) || null, supprimeLe: e.supprime_le })));
 });
 
 // ============================================================
@@ -1155,7 +1211,7 @@ async function assurerBucketPiecesJointes() {
 
 app.get('/api/dossiers/:id/pieces-jointes', async (req, res) => {
   const { data, error } = await supabase
-    .from('pieces_jointes').select('*').eq('dossier_id', req.params.id).order('date_ajout', { ascending: false });
+    .from('pieces_jointes').select('*').eq('dossier_id', req.params.id).is('supprime_le', null).order('date_ajout', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -1214,10 +1270,30 @@ app.delete('/api/dossiers/:id/pieces-jointes/:fichierId', async (req, res) => {
     .from('pieces_jointes').select('storage_path').eq('id', req.params.fichierId).eq('dossier_id', req.params.id).maybeSingle();
   if (erreurPiece) return res.status(500).json({ error: erreurPiece.message });
   if (!piece) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
-  const { error: erreurSuppressionFichier } = await supabase.storage.from(BUCKET_PIECES_JOINTES).remove([piece.storage_path]);
-  if (erreurSuppressionFichier) return res.status(500).json({ error: erreurSuppressionFichier.message });
-  const { error } = await supabase.from('pieces_jointes').delete().eq('id', req.params.fichierId);
+  // Corbeille 30 jours (phase 2) — le VRAI fichier dans Storage n'est PLUS supprimé ici : une
+  // ligne restaurée pointant vers un fichier déjà effacé serait inutile. Le fichier n'est retiré
+  // de Storage qu'à la purge définitive après 30 jours (purgerCorbeilleDossiers ci-dessous), en
+  // même temps que la ligne.
+  const { data: pieceMaj, error } = await supabase.from('pieces_jointes').update({ supprime_le: new Date().toISOString() }).eq('id', req.params.fichierId).select();
   if (error) return res.status(500).json({ error: error.message });
+  if (!pieceMaj || pieceMaj.length === 0) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+  res.json({ success: true });
+});
+
+// Restauration d'une pièce jointe mise à la corbeille — le fichier physique n'a jamais quitté
+// Storage (voir ci-dessus), donc rien à refaire que d'annuler la marque.
+app.post('/api/dossiers/:id/pieces-jointes/:fichierId/restaurer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
+  }
+  const { data: piece, error: erreurPiece } = await supabase
+    .from('pieces_jointes').select('supprime_le').eq('id', req.params.fichierId).eq('dossier_id', req.params.id).maybeSingle();
+  if (erreurPiece) return res.status(500).json({ error: erreurPiece.message });
+  if (!piece) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
+  if (!piece.supprime_le) return res.status(400).json({ error: "Cette pièce jointe n'est pas à la corbeille." });
+  const { data: pieceRestauree, error } = await supabase.from('pieces_jointes').update({ supprime_le: null }).eq('id', req.params.fichierId).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!pieceRestauree || pieceRestauree.length === 0) return res.status(404).json({ error: 'Pièce jointe introuvable.' });
   res.json({ success: true });
 });
 
@@ -1520,16 +1596,41 @@ app.delete('/api/fiches/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_annuler'))) {
     return res.status(403).json({ error: "Permission 'dossier_annuler' requise pour supprimer une fiche." });
   }
-  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('id').eq('id', req.params.id).maybeSingle();
+  // .is('supprime_le', null) plutôt que juste .select('id') : une fiche déjà à la corbeille
+  // (supprimée une 1re fois, rejeu de la file hors ligne) doit rester idempotente, pas se
+  // retrouver avec un supprime_le "rafraîchi" à chaque nouvel essai.
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('id').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!fiche) return res.status(200).json({ success: true }); // déjà supprimée (idempotent — utile pour une relecture de la file hors ligne)
 
-  const { error: erreurPaiements } = await supabase.from('paiements').delete().eq('fiche_id', req.params.id);
+  // Corbeille 30 jours (phase 2, même principe que /api/episodes/:id ci-dessus) — UPDATE au lieu
+  // de DELETE, cascade manuelle vers les paiements de CETTE fiche (paiements.fiche_id est ON
+  // DELETE CASCADE en base, mais seulement pour un vrai DELETE).
+  const maintenant = new Date().toISOString();
+  const { error: erreurPaiements } = await supabase.from('paiements').update({ supprime_le: maintenant }).eq('fiche_id', req.params.id).is('supprime_le', null);
   if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
 
-  const { error: erreurFiche } = await supabase.from('fiches').delete().eq('id', req.params.id);
+  const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
   if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
 
+  res.json({ success: true });
+});
+
+// Restauration d'une fiche mise à la corbeille — même logique que /api/episodes/:id/restaurer :
+// ne restaure que les paiements dont supprime_le correspond exactement à celui de la fiche.
+app.post('/api/fiches/:id/restaurer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'dossier_annuler'))) {
+    return res.status(403).json({ error: "Permission 'dossier_annuler' requise pour restaurer une fiche." });
+  }
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('supprime_le').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!fiche) return res.status(404).json({ error: 'Fiche introuvable.' });
+  if (!fiche.supprime_le) return res.status(400).json({ error: "Cette fiche n'est pas à la corbeille." });
+  const horodatageSuppression = fiche.supprime_le;
+  const { data: ficheRestauree, error } = await supabase.from('fiches').update({ supprime_le: null }).eq('id', req.params.id).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!ficheRestauree || ficheRestauree.length === 0) return res.status(404).json({ error: 'Fiche introuvable.' });
+  await supabase.from('paiements').update({ supprime_le: null }).eq('fiche_id', req.params.id).eq('supprime_le', horodatageSuppression).select();
   res.json({ success: true });
 });
 
@@ -1697,7 +1798,7 @@ app.get('/api/paiements', async (req, res) => {
   // comptes. `.order('id')` en second rend le tri total, obligatoire dès qu'on pagine.
   try {
     res.json(await lireToutesLesPages(
-      () => supabase.from('paiements').select('*').order('date_paiement', { ascending: false }).order('id')));
+      () => supabase.from('paiements').select('*').is('supprime_le', null).order('date_paiement', { ascending: false }).order('id')));
   } catch (e) {
     console.error('GET /api/paiements: lecture paginée échouée :', e.message);
     res.status(500).json({ error: e.message });
@@ -2811,9 +2912,10 @@ cron.schedule('0 6 * * *', async () => {
 // il pose seulement un champ supprimeLe (via definir_champs_catalogue_lot, déjà en prod, aucune
 // migration SQL nécessaire pour cette partie). Ce cron fait le ménage réel après 30 jours, via la
 // RPC supprimer_article_catalogue qui existe déjà (c'était l'ancien mécanisme de suppression
-// directe). Seuls medicaments/actes sont concernés ici — les autres suppressions de l'app
-// (dossiers, fiches, pièces jointes, partenaires ONG) ont besoin de nouvelles colonnes en base
-// (voir sql/corbeille_30_jours.sql) et ne sont pas encore branchées.
+// directe). Seuls medicaments/actes sont concernés ici — dossiers/fiches/pièces jointes ont leur
+// propre fonction de purge, purgerCorbeilleDossiers() juste plus bas (branchée le 10/09) ;
+// partenaires ONG a la colonne supprime_le mais aucune route ne les supprime encore aujourd'hui,
+// rien à purger tant que cette fonctionnalité n'existe pas.
 const JOURS_CORBEILLE_CATALOGUE = 30;
 async function purgerCorbeilleCatalogue() {
   const resultats = { medicaments: 0, actes: 0 };
@@ -2827,6 +2929,50 @@ async function purgerCorbeilleCatalogue() {
       if (!erreurSuppr) resultats[type]++;
     }
   }
+  return resultats;
+}
+
+// Corbeille dossiers/fiches/pièces jointes — phase 2 (10/09), enfin branchée : les colonnes
+// supprime_le existaient depuis le 01/09 (sql/corbeille_30_jours.sql) mais rien ne les purgeait
+// ni ne les restaurait. Un vrai DELETE ici (contrairement aux routes de suppression, qui posent
+// juste supprime_le) — les dossiers/épisodes purgés cascadent automatiquement vers leurs
+// fiches/paiements (ON DELETE CASCADE en base, qui ne se déclenche que sur un vrai DELETE) ; les
+// fiches purgées indépendamment (jamais rattachées à un épisode lui-même purgé) cascadent vers
+// LEURS paiements de la même façon. Les pièces jointes perdent aussi leur fichier réel dans
+// Storage — SEULEMENT ici, à la purge définitive (la suppression initiale, elle, laisse le
+// fichier intact exprès : voir la route DELETE pieces-jointes plus haut).
+const JOURS_CORBEILLE_DOSSIERS = 30;
+async function purgerCorbeilleDossiers() {
+  const limite = new Date(Date.now() - JOURS_CORBEILLE_DOSSIERS * 86400000).toISOString();
+  const resultats = { episodes: 0, fiches: 0, piecesJointes: 0 };
+
+  const { data: episodesPurges, error: erreurEpisodes } = await supabase
+    .from('episodes').delete().lt('supprime_le', limite).not('supprime_le', 'is', null).select('id');
+  if (erreurEpisodes) throw erreurEpisodes;
+  resultats.episodes = (episodesPurges || []).length;
+
+  // Fiches restées seules à la corbeille (leur épisode n'a lui-même jamais été supprimé) —
+  // celles liées à un épisode déjà purgé ci-dessus sont déjà parties par cascade, cette requête
+  // ne retrouve alors plus rien pour elles (0 ligne affectée, jamais une erreur).
+  const { data: fichesPurgees, error: erreurFiches } = await supabase
+    .from('fiches').delete().lt('supprime_le', limite).not('supprime_le', 'is', null).select('id');
+  if (erreurFiches) throw erreurFiches;
+  resultats.fiches = (fichesPurgees || []).length;
+
+  const { data: piecesAPurger, error: erreurLecturePieces } = await supabase
+    .from('pieces_jointes').select('id, storage_path').lt('supprime_le', limite).not('supprime_le', 'is', null);
+  if (erreurLecturePieces) throw erreurLecturePieces;
+  for (const piece of (piecesAPurger || [])) {
+    // Best-effort sur le fichier, même philosophie que partout ailleurs dans ce fichier : un
+    // fichier déjà absent de Storage (incident antérieur, retrait manuel) ne doit jamais
+    // empêcher de nettoyer la ligne elle-même — sinon la corbeille grossirait indéfiniment sur
+    // ce seul cas.
+    const { error: erreurStorage } = await supabase.storage.from(BUCKET_PIECES_JOINTES).remove([piece.storage_path]);
+    if (erreurStorage) console.warn(`⚠️ Purge corbeille : fichier Storage introuvable/erreur pour ${piece.storage_path} — ligne supprimée quand même (${erreurStorage.message}).`);
+    const { error: erreurSuppr } = await supabase.from('pieces_jointes').delete().eq('id', piece.id);
+    if (!erreurSuppr) resultats.piecesJointes++;
+  }
+
   return resultats;
 }
 
@@ -2879,6 +3025,14 @@ cron.schedule('0 6 * * *', async () => {
   } catch (e) {
     console.error('❌ Échec de la purge des invitations périmées :', e.message);
   }
+  // Purge indépendante des précédentes — un échec ici ne doit jamais empêcher le reste.
+  try {
+    const resultat = await purgerCorbeilleDossiers();
+    const total = resultat.episodes + resultat.fiches + resultat.piecesJointes;
+    if (total > 0) console.log(`🗑️ Corbeille dossiers purgée : ${resultat.episodes} dossier(s), ${resultat.fiches} fiche(s), ${resultat.piecesJointes} pièce(s) jointe(s).`);
+  } catch (e) {
+    console.error('❌ Échec de la purge de la corbeille dossiers :', e.message);
+  }
 });
 
 // Déclenchement manuel — pour vérifier tout de suite sans attendre 6h UTC.
@@ -2888,6 +3042,20 @@ app.post('/api/admin/purger-corbeille-catalogue', async (req, res) => {
   }
   try {
     const resultat = await purgerCorbeilleCatalogue();
+    res.json({ success: true, ...resultat });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Déclenchement manuel — même principe que ci-dessus, pour la corbeille dossiers/fiches/pièces
+// jointes.
+app.post('/api/admin/purger-corbeille-dossiers', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'facturation_supprimer'))) {
+    return res.status(403).json({ error: "Permission 'facturation_supprimer' requise." });
+  }
+  try {
+    const resultat = await purgerCorbeilleDossiers();
     res.json({ success: true, ...resultat });
   } catch (e) {
     res.status(500).json({ error: e.message });

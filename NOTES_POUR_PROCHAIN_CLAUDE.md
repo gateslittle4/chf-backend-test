@@ -44,24 +44,28 @@ restauration.
 
 ---
 
-# 🔴 CORBEILLE 30 JOURS — phase 2 jamais branchée (constaté le 11/09)
+# ✅ CORBEILLE 30 JOURS — phase 2 branchée le 12/09 (retour d'Esdras : "corrige la corbeille")
 
-La colonne `supprime_le` existe sur 5 tables (`episodes`, `fiches`, `paiements`, `pieces_jointes`,
-`ong_partenaires`) depuis le 01/09, mais **`supprime_le` apparaît 0 fois dans `server.js`**.
-Aucune route ne l'écrit, aucune requête ne la filtre.
+Détail complet dans les notes de `chf-app2` (section tout en haut). Résumé côté backend :
 
-Toutes les suppressions sont physiques et immédiates : **L971** (`episodes`), **L1219**
-(`pieces_jointes`), **L1527/L1530** (`paiements`/`fiches`), **L1970** (paiement de dépôt),
-**L2063-2065** (nettoyage en cascade).
+Les 3 vraies routes de suppression utilisateur (`DELETE /api/episodes/:id`, `DELETE
+/api/fiches/:id`, `DELETE /api/dossiers/:id/pieces-jointes/:fichierId`) posent maintenant
+`supprime_le` au lieu d'un vrai DELETE, avec cascade manuelle vers les enfants (episodes→fiches→
+paiements, fiches→paiements) puisqu'un simple UPDATE ne déclenche pas le `ON DELETE CASCADE` de la
+base. 3 routes `POST .../restaurer` en miroir — ne restaurent que les enfants au MÊME horodatage
+que le parent (jamais un enfant supprimé séparément). Nouvelle fonction `purgerCorbeilleDossiers()`
+dans le même cron 6h UTC que la corbeille catalogue, déclenchement manuel via `POST
+/api/admin/purger-corbeille-dossiers`.
 
-Seul `purgerCorbeilleCatalogue()` existe — c'est la phase 1 (médicaments/actes), qui elle
-fonctionne. Un commentaire du code affirme que les colonnes `supprime_le` « servent encore » :
-**il est périmé.**
+**Piège à ne pas réintroduire** : les `.delete()` internes de rollback (L1970, L2063-2065 dans
+l'ancienne numérotation — correction de type de patient ratée, qui supprime des lignes créées
+l'instant d'avant dans la MÊME requête) sont restés de vrais DELETE, volontairement. Un brouillon
+jamais visible côté utilisateur n'a aucune raison d'aller à la corbeille.
 
-Conséquence : un mauvais clic détruit un dossier patient et son historique de facturation, sans
-récupération. C'est l'inverse de ce qu'Esdras avait demandé. **Attend son feu vert** (la question
-lui a été posée le 11/09, sans réponse pour l'instant) — ça change la sémantique de suppression
-sur 5 tables, ne pas le faire unilatéralement.
+`ong_partenaires` a toujours la colonne `supprime_le` mais aucune route ne les supprime — rien à
+purger tant que cette fonctionnalité n'existe pas.
+
+Tests : 161/161 (7 nouveaux).
 
 ---
 
