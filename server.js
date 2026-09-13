@@ -1572,8 +1572,13 @@ app.post('/api/fiches', async (req, res) => {
 });
 
 app.get('/api/fiches/episode/:episodeId', async (req, res) => {
+  // .is('supprime_le', null) manquait ici (trouvé le 13/09 en testant la corbeille dossiers avec un
+  // compte réel) — cette route sert à ROUVRIR un dossier dans le Calculateur pour continuer à le
+  // facturer (voir AppHospitaliere.js, GestionOng.js) : une fiche mise à la corbeille par erreur, une
+  // fois le dossier rouvert, réapparaissait dans les totaux comme si de rien n'était. Même classe de
+  // bug que celui du 24/08 juste en dessous (paiement annulé compté quand même), sur le même écran.
   const { data, error } = await supabase
-    .from('fiches').select('*').eq('episode_id', req.params.episodeId).order('date_creation');
+    .from('fiches').select('*').eq('episode_id', req.params.episodeId).is('supprime_le', null).order('date_creation');
   if (error) return res.status(500).json({ error: error.message });
   // Même correctif que episodeVersFlat (24/08, audit financier) : marque chaque fiche dont le
   // paiement associé a été annulé, pour que le Calculateur/Fiche Patient (qui consomme cette route

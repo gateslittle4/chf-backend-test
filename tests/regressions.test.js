@@ -1644,6 +1644,11 @@ test("Les lectures qui alimentent l'écran (dossiers/épisodes, fiches d'un épi
   assert.match(blocPieces, /from\('pieces_jointes'\)\.select\('\*'\)\.eq\('dossier_id', req\.params\.id\)\.is\('supprime_le', null\)/);
   const blocPaiements = src.slice(src.indexOf("app.get('/api/paiements', async"), src.indexOf("app.post('/api/paiements', async"));
   assert.match(blocPaiements, /from\('paiements'\)\.select\('\*'\)\.is\('supprime_le', null\)/, "GET /api/paiements (caisse, rapprochement, rapports partenaires)");
+  // Trouvé le 13/09 en testant la corbeille avec un compte réel (rôle direction) : cette route
+  // n'avait pas ce filtre — une fiche mise à la corbeille réapparaissait dans les totaux dès qu'on
+  // rouvrait le dossier dans le Calculateur (AppHospitaliere.js, GestionOng.js).
+  const blocFichesEpisode = src.slice(src.indexOf("app.get('/api/fiches/episode/:episodeId'"), src.indexOf("app.post('/api/catalog/:type/item'"));
+  assert.match(blocFichesEpisode, /from\('fiches'\)\.select\('\*'\)\.eq\('episode_id', req\.params\.episodeId\)\.is\('supprime_le', null\)/, "GET /api/fiches/episode/:episodeId (réouverture d'un dossier pour continuer à le facturer)");
 });
 
 // Retour d'Esdras (01/09) : bébé enregistré au néonat sous un nom temporaire ("Bébé + nom de la
