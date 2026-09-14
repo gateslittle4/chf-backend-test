@@ -1979,3 +1979,70 @@ test("miroir serveur PERMISSIONS_PAR_DEFAUT : audit_voir présent pour direction
   assert.doesNotMatch(ligne('archiviste'), /'fiche_patient_modifier'/, "archiviste consulte le dossier, ne le modifie pas");
   assert.doesNotMatch(ligne('visiteur'), /'fiche_patient_modifier'/, "visiteur ne modifie jamais rien");
 });
+
+// Restauration depuis une sauvegarde automatique (13/09) — jusqu'ici la sauvegarde s'écrivait
+// fidèlement chaque nuit mais RIEN ne savait la relire ; le seul "Restore" existant (côté chf-app2)
+// attendait un tout autre format et affichait "réussi" même à 0 ligne écrite. Testé pour de vrai le
+// 13/09 (schéma jetable dans un schéma Postgres séparé, données réelles copiées, perte simulée,
+// restauration, comptage table par table — voir NOTES_POUR_PROCHAIN_CLAUDE.md) : ces tests
+// verrouillent seulement la FORME du code (ordre, jamais d'écrasement, jamais de "success" muet),
+// pas un remplacement du test réel.
+const blocRestauration = serverSrc.slice(
+  serverSrc.indexOf('const ORDRE_RESTAURATION'),
+  serverSrc.indexOf("const PORT = process.env.PORT")
+);
+
+test("ORDRE_RESTAURATION respecte la chaîne de dépendances FK dossiers→episodes→fiches→paiements, et précise la bonne clé primaire pour catalog/invitations/decrements_stock_appliques", () => {
+  const ordreDesTables = [...blocRestauration.matchAll(/\['(\w+)', '(\w+)'\]/g)].map(m => [m[1], m[2]]);
+  const noms = ordreDesTables.map(([t]) => t);
+  assert.deepEqual(new Set(noms).size, noms.length, "aucune table listée deux fois");
+  assert.deepEqual(
+    new Set(noms),
+    new Set(['dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
+      'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
+      'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations']),
+    "doit couvrir exactement les 17 tables de TABLES_A_SAUVEGARDER — un oubli ici ne serait jamais restauré"
+  );
+  const position = (t) => noms.indexOf(t);
+  assert.ok(position('dossiers') < position('episodes'), "episodes dépend de dossiers");
+  assert.ok(position('episodes') < position('fiches'), "fiches dépend d'episodes");
+  assert.ok(position('fiches') < position('paiements'), "paiements dépend d'episodes ET de fiches — placé après fiches suffit");
+  assert.ok(position('episodes') < position('paiements'));
+  assert.ok(position('dossiers') < position('pieces_jointes'), "pieces_jointes dépend de dossiers");
+  assert.ok(position('episodes') < position('transferts_service'), "transferts_service dépend d'episodes");
+  assert.ok(position('episodes') < position('demandes_exoneration'), "demandes_exoneration dépend d'episodes");
+  const parPk = Object.fromEntries(ordreDesTables);
+  assert.equal(parPk.catalog, 'type');
+  assert.equal(parPk.invitations, 'token');
+  assert.equal(parPk.decrements_stock_appliques, 'local_id');
+  for (const t of noms.filter(t => !['catalog', 'invitations', 'decrements_stock_appliques'].includes(t))) {
+    assert.equal(parPk[t], 'id', `${t} devrait utiliser "id" comme clé primaire`);
+  }
+});
+
+test("restaurerDepuisSauvegarde n'écrase jamais une ligne déjà présente : lecture des ids existants AVANT toute insertion, jamais d'upsert", () => {
+  assert.doesNotMatch(blocRestauration, /\.upsert\(/, "un upsert écraserait une ligne déjà là avec le contenu (peut-être périmé) de la sauvegarde — seul un insert des lignes manquantes est sûr");
+  assert.match(blocRestauration, /idsExistants/, "doit déterminer ce qui existe déjà avant d'insérer");
+  assert.match(blocRestauration, /aInserer = lignes\.filter\(l => !idsExistants\.has/, "ne doit insérer QUE les lignes dont l'id n'existe pas déjà");
+});
+
+test("restaurerDepuisSauvegarde relit le nombre de lignes RÉELLEMENT insérées (jamais une confiance aveugle dans l'absence d'erreur) et retente ligne par ligne un lot refusé en bloc", () => {
+  assert.match(blocRestauration, /\.insert\(lot\)\.select\(colonneId\)/, "doit relire ce qui a vraiment été écrit, même piège que le reste du projet (audit du 31/08)");
+  assert.match(blocRestauration, /\.insert\(\[ligne\]\)\.select\(colonneId\)/, "un lot entier refusé (souvent une seule ligne fautive) doit être retenté ligne par ligne, pas abandonné en bloc");
+  assert.match(blocRestauration, /decouperEnLots/, "doit découper en lots — une clause IN ou un insert avec des milliers de lignes dépasserait les limites de PostgREST");
+});
+
+test("GET /api/admin/sauvegardes et POST /api/admin/restaurer-sauvegarde exigent tous les deux sauvegarde_gerer — la restauration est au moins aussi sensible que la sauvegarde elle-même", () => {
+  const blocListe = serverSrc.slice(serverSrc.indexOf("app.get('/api/admin/sauvegardes'"), serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"));
+  assert.match(blocListe, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/);
+  const blocRestaurer = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"), serverSrc.indexOf("const PORT = process.env.PORT"));
+  assert.match(blocRestaurer, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/);
+  assert.match(blocRestaurer, /if \(!fichier\) return res\.status\(400\)/, "jamais de restauration \"à l'aveugle\" sur un fichier implicite — l'admin doit choisir explicitement lequel");
+});
+
+test("POST /api/admin/restaurer-sauvegarde ne renvoie JAMAIS un champ success générique — l'appelant doit lire le rapport détaillé, jamais un simple toast de succès (c'est exactement le bug d'origine)", () => {
+  const blocRestaurer = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"), serverSrc.indexOf("const PORT = process.env.PORT"));
+  assert.doesNotMatch(blocRestaurer, /res\.json\(\{\s*success:\s*true/, "pas de \"success: true\" générique — c'est exactement ce qui affichait un faux succès à 0 ligne écrite avant le 13/09");
+  assert.match(blocRestaurer, /res\.json\(\{ fichier, rapport, totalInsere, totalEnEchec \}\)/);
+  assert.match(blocRestaurer, /Ce fichier ne ressemble pas à une sauvegarde automatique/, "doit rejeter clairement un fichier qui n'a le format d'aucune des 17 tables, plutôt que de restaurer silencieusement 0 ligne");
+});

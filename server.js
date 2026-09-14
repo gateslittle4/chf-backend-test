@@ -3119,6 +3119,127 @@ app.get('/api/admin/derniere-sauvegarde', async (req, res) => {
   }
 });
 
+// ============================================================
+// RESTAURATION DEPUIS UNE SAUVEGARDE AUTOMATIQUE (13/09) — jusqu'ici la sauvegarde s'écrivait
+// fidèlement chaque nuit (voir sauvegarderVersStorage ci-dessus, confirmé fonctionnel le 11/09),
+// mais RIEN ne savait la relire : le seul bouton "Restore" côté app (AppHospitaliere.js) attendait
+// un format totalement différent (l'ancien export manuel chiffré, { verifications, ongTargets,
+// medicaments, actes } — sans même paiements) et affichait "Restauration terminée" même quand 0
+// ligne avait été touchée. Testé pour de vrai le 13/09 : base Supabase jetable + vraie sauvegarde
+// tirée du bucket + comptage table par table (voir NOTES_POUR_PROCHAIN_CLAUDE.md).
+//
+// Ordre de restauration : respecte les FK entre les 17 tables sauvegardées (recoupé le 13/09 dans
+// information_schema.table_constraints) — dossiers→episodes→fiches→paiements est la seule vraie
+// chaîne ; pieces_jointes/transferts_service/demandes_exoneration dépendent chacune d'UNE seule
+// des 4 précédentes, jamais entre elles ; les 10 autres tables n'ont aucune dépendance. Clé
+// primaire précisée quand ce n'est pas "id" (catalog: type, invitations: token,
+// decrements_stock_appliques: local_id).
+const ORDRE_RESTAURATION = [
+  ['dossiers', 'id'], ['episodes', 'id'], ['fiches', 'id'], ['paiements', 'id'],
+  ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
+  ['catalog', 'type'], ['cloture_caisse', 'id'], ['ong_partenaires', 'id'], ['users', 'id'],
+  ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
+  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'],
+];
+const TAILLE_LOT_RESTAURATION = 500;
+
+function decouperEnLots(tableau, taille) {
+  const lots = [];
+  for (let i = 0; i < tableau.length; i += taille) lots.push(tableau.slice(i, i + taille));
+  return lots;
+}
+
+// Restaure UNIQUEMENT ce qui manque — jamais un vrai retour dans le temps (rien n'écrase une ligne
+// déjà présente, même si son contenu a changé depuis la sauvegarde) : Supabase (PostgREST, pas une
+// connexion SQL directe) ne permet pas d'ouvrir une vraie transaction multi-tables ici, donc
+// écraser serait risquer de perdre une modification plus récente que le fichier pour un gain nul —
+// une ligne déjà là aujourd'hui est forcément plus récente ou identique à celle de la sauvegarde
+// (le fichier date d'hier soir au plus tôt). N'affirme JAMAIS un succès sans l'avoir vérifié :
+// chaque insertion relit le nombre de lignes RÉELLEMENT écrites (même piège que le reste du projet,
+// audit du 31/08). Un lot entier refusé (souvent une seule ligne fautive, ex: contrainte violée) est
+// retenté ligne par ligne — sinon une seule mauvaise ligne bloquerait les 499 bonnes du même lot,
+// même philosophie que "une sauvegarde partielle vaut mieux que pas de sauvegarde" plus haut.
+async function restaurerDepuisSauvegarde(contenu) {
+  const rapport = [];
+  for (const [table, colonneId] of ORDRE_RESTAURATION) {
+    const lignes = contenu[table];
+    if (!Array.isArray(lignes) || lignes.length === 0) {
+      rapport.push({ table, lignesSauvegarde: 0, dejaPresentes: 0, inserees: 0, lignesEnEchec: [] });
+      continue;
+    }
+    try {
+      const idsSauvegarde = lignes.map(l => l[colonneId]).filter(v => v !== null && v !== undefined);
+      const idsExistants = new Set();
+      for (const lot of decouperEnLots(idsSauvegarde, TAILLE_LOT_RESTAURATION)) {
+        const { data, error } = await supabase.from(table).select(colonneId).in(colonneId, lot);
+        if (error) throw new Error(`Lecture des lignes déjà présentes : ${error.message}`);
+        (data || []).forEach(r => idsExistants.add(r[colonneId]));
+      }
+      const aInserer = lignes.filter(l => !idsExistants.has(l[colonneId]));
+
+      let inserees = 0;
+      const lignesEnEchec = [];
+      for (const lot of decouperEnLots(aInserer, TAILLE_LOT_RESTAURATION)) {
+        if (lot.length === 0) continue;
+        const { data, error } = await supabase.from(table).insert(lot).select(colonneId);
+        if (!error) { inserees += (data || []).length; continue; }
+        for (const ligne of lot) {
+          const { data: d2, error: e2 } = await supabase.from(table).insert([ligne]).select(colonneId);
+          if (e2) lignesEnEchec.push({ id: ligne[colonneId], erreur: e2.message });
+          else inserees += (d2 || []).length;
+        }
+      }
+      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes: idsExistants.size, inserees, lignesEnEchec });
+    } catch (e) {
+      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes: 0, inserees: 0, lignesEnEchec: [{ id: null, erreur: e.message }] });
+    }
+  }
+  return rapport;
+}
+
+// Liste les sauvegardes disponibles dans Storage — alimente le sélecteur côté app (jamais une
+// restauration "à l'aveugle" sur la dernière en date sans que l'admin choisisse explicitement).
+app.get('/api/admin/sauvegardes', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
+    return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
+  }
+  const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json((fichiers || [])
+    .filter(f => f.name.startsWith('backup-'))
+    .sort((a, b) => b.name.localeCompare(a.name))
+    .map(f => ({ nom: f.name, taille: (f.metadata && f.metadata.size) || null, creeLe: f.created_at || null })));
+});
+
+app.post('/api/admin/restaurer-sauvegarde', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
+    return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
+  }
+  const { fichier } = req.body;
+  if (!fichier) return res.status(400).json({ error: 'fichier requis (voir GET /api/admin/sauvegardes).' });
+  console.log(`🧪 Restauration depuis sauvegarde demandée par ${req.user.email || req.user.id} : ${fichier}`);
+  try {
+    const { data: blob, error: erreurTelechargement } = await supabase.storage.from(BUCKET_SAUVEGARDES).download(fichier);
+    if (erreurTelechargement) throw new Error(`Téléchargement : ${erreurTelechargement.message}`);
+    const texte = await blob.text();
+    let contenu;
+    try { contenu = JSON.parse(texte); }
+    catch (e) { throw new Error("Le fichier n'est pas un JSON valide."); }
+    if (!contenu || typeof contenu !== 'object' || !ORDRE_RESTAURATION.some(([table]) => Array.isArray(contenu[table]))) {
+      throw new Error("Ce fichier ne ressemble pas à une sauvegarde automatique (aucune des tables attendues n'y figure).");
+    }
+    const rapport = await restaurerDepuisSauvegarde(contenu);
+    const totalInsere = rapport.reduce((s, r) => s + r.inserees, 0);
+    const totalEnEchec = rapport.reduce((s, r) => s + r.lignesEnEchec.length, 0);
+    console.log(`${totalEnEchec > 0 ? '⚠️' : '✅'} Restauration ${fichier} : ${totalInsere} ligne(s) insérée(s), ${totalEnEchec} en échec.`);
+    // Pas de champ "success" générique volontairement — l'appelant DOIT lire rapport/totalInsere/
+    // totalEnEchec, jamais afficher "réussi" sans avoir vraiment regardé ce qui a été écrit.
+    res.json({ fichier, rapport, totalInsere, totalEnEchec });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Backend CHF demarré sur le port ${PORT}`);
