@@ -10,27 +10,36 @@ découvrir trop tard.
 
 ---
 
-# 🚨 CHANTIER N°1 (état au 11/09) — LA SAUVEGARDE NE PEUT PAS ÊTRE RESTAURÉE
+# ✅ CHANTIER N°1 — RÉSOLU LE 13-14/09 : LA SAUVEGARDE SE RESTAURE VRAIMENT MAINTENANT
 
-C'est **le seul vrai blocage** pour la mise en production à l'hôpital. Détail complet dans les
+C'était **le seul vrai blocage** pour la mise en production à l'hôpital. Détail complet dans les
 notes de `chf-app2` (section tout en haut). Résumé côté backend :
 
 `sauvegarderVersStorage()` (~L2579) écrit chaque nuit un dump des 17 tables vers Supabase Storage
-et Backblaze B2. L'écriture est **confirmée fonctionnelle** par Esdras le 11/09.
+et Backblaze B2 — écriture confirmée fonctionnelle par Esdras le 11/09, inchangée.
 
-**Rien ne sait relire ce fichier.** Le seul mécanisme de restauration existant est le bouton
-« 📤 Restore » de l'app (`chf-app2/app/AppHospitaliere.js` L1105), qui attend un format totalement
-différent (`{ verifications, ongTargets, medicaments, actes }` — l'ancien export manuel chiffré).
-Nourri avec un fichier de sauvegarde automatique, il restaure **0 ligne** et affiche un **toast de
-succès**. Simulé et vérifié, pas supposé.
+Ce qui manquait : **rien ne savait relire ce fichier.** L'ancien bouton « 📤 Restore » attendait un
+format totalement différent (l'ancien export manuel chiffré) et affichait un toast de succès même
+à 0 ligne écrite.
 
-À construire : une restauration qui lit le format serveur, réinsère les tables dans l'ordre des
-dépendances (`dossiers` → `episodes` → `fiches` → `paiements`, puis le reste), ne duplique pas
-l'existant, et **ne dit jamais « réussi » quand 0 ligne a été écrite**.
+Construit le 13/09 : `restaurerDepuisSauvegarde()` (~fin de server.js, avant `app.listen`) — insère
+UNIQUEMENT ce qui manque (jamais d'upsert), dans l'ordre `dossiers → episodes → fiches → paiements`
+puis les tables sans dépendance, relit le nombre de lignes RÉELLEMENT écrites, retente ligne par
+ligne un lot refusé en bloc. Routes `GET /api/admin/sauvegardes` (liste) et
+`POST /api/admin/restaurer-sauvegarde` (restaure le fichier choisi, renvoie un rapport détaillé —
+aucun champ `success` générique). Câblé côté chf-app2 : nouveau bouton « 🗄️ Restaurer sauvegarde
+auto » (`components/RestaurationSauvegarde.js`), l'ancien « 📤 Restore » reste pour l'export manuel
+chiffré (fonctionnalité distincte, inchangée).
 
-**Puis la tester pour de vrai** : base Supabase jetable + vraie sauvegarde tirée du bucket +
-comparaison du compte de lignes table par table. Un backup qu'on n'a jamais restauré ne protège
-personne — c'est exactement l'erreur qui a été commise ici pendant des semaines.
+**Testé pour de vrai, pas en théorie** : branching Supabase indisponible (hors plan Pro) et limite
+de 2 projets gratuits déjà atteinte → schéma Postgres jetable (`restauration_test`) créé dans le
+MÊME projet, 17 tables répliquées à l'identique depuis `information_schema`/`pg_constraint`, vraies
+données de production copiées dedans (32 dossiers, 27 épisodes, 68 fiches, 70 paiements...), perte
+simulée (suppression en cascade d'un dossier avec 5 épisodes), restauration, comptage ligne par
+ligne — récupération exacte, aucune erreur de contrainte. Schéma supprimé ensuite, aucun impact sur
+la vraie base à aucun moment.
+
+Tests : 166/166 (backend), 583/583 (frontend). Poussé et déployé le 14/09.
 
 ## Ce qui est déjà propre (ne pas refaire ce travail)
 
