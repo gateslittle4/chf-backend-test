@@ -1312,6 +1312,50 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   res.json(data);
 });
 
+// Solde du dossier = somme des soldes_restants de ses épisodes (dernier paiement non annulé)
+app.get('/api/dossiers/:id/solde', async (req, res) => {
+  const dossierId = req.params.id;
+
+  // Récupérer tous les épisodes du dossier
+  const { data: episodes, error: errEpisodes } = await supabase
+    .from('episodes').select('id').eq('dossier_id', dossierId);
+  if (errEpisodes) return res.status(500).json({ error: errEpisodes.message });
+
+  if (!episodes || episodes.length === 0) {
+    return res.json({ solde_total: 0, episodes_count: 0, detailParEpisode: [] });
+  }
+
+  let soldeTotal = 0;
+  const detailParEpisode = [];
+
+  for (const ep of episodes) {
+    // Pour chaque épisode, récupérer le dernier paiement non annulé
+    const { data: paiement, error: errPaiement } = await supabase
+      .from('paiements')
+      .select('solde_restant')
+      .eq('episode_id', ep.id)
+      .or('annule.eq.false,annule.is.null')
+      .order('date_paiement', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (errPaiement) return res.status(500).json({ error: errPaiement.message });
+
+    const solde = (paiement && paiement.solde_restant) || 0;
+    soldeTotal += solde;
+    detailParEpisode.push({
+      episode_id: ep.id,
+      solde: solde
+    });
+  }
+
+  res.json({
+    solde_total: soldeTotal,
+    episodes_count: episodes.length,
+    detailParEpisode: detailParEpisode
+  });
+});
+
 // Création d'un épisode — règle anti-doublon appliquée ICI, pas seulement à l'écran.
 // ⚠️ Chemin distinct de POST /api/episodes (route de compatibilité plus haut) : les deux routes
 // ne peuvent pas partager le même chemin+méthode, sinon Express n'exécute jamais que la première
