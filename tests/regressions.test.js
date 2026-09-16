@@ -1850,8 +1850,14 @@ test("PUT /api/dossiers/:id refuse toute valeur de sexe autre que 'M', 'F' ou vi
 });
 
 test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne peut jamais répartir homme/femme", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('function assemblerEpisodeFlat'), serverSrc.indexOf('function assemblerEpisodeFlat') + 3000);
+  // Fenêtre volontairement large : cette fonction est très commentée et a déjà grossi (dossierId
+  // ajouté le 16/09 pour la recherche hors ligne), une découpe trop courte ferait échouer ce test
+  // sans qu'aucun comportement n'ait changé.
+  const bloc = serverSrc.slice(serverSrc.indexOf('function assemblerEpisodeFlat'), serverSrc.indexOf('function assemblerEpisodeFlat') + 5000);
   assert.match(bloc, /sexe: dossier\?\.sexe \|\| null,/);
+  // dossierId (16/09) : sans lui, la copie locale du navigateur (LOG_VERIF_KEY) ne permet pas de
+  // retrouver le DOSSIER d'un patient — la recherche hors ligne de chf-app2 en dépend.
+  assert.match(bloc, /dossierId: ep\.dossier_id,/);
 });
 
 // ============================================================

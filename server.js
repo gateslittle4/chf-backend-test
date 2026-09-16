@@ -591,6 +591,13 @@ function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
 
   return {
     id: ep.id,
+    // dossierId (16/09) : le dossier auquel appartient cet épisode. Absent jusqu'ici — la liste
+    // renvoyée par GET /api/episodes est la copie locale (LOG_VERIF_KEY) qui sert de repli hors
+    // ligne côté navigateur, et sans cet identifiant elle ne permettait pas de retrouver le DOSSIER
+    // d'un patient, seulement ses épisodes. Nécessaire à la recherche hors ligne (retour d'Esdras :
+    // "je n'arrive pas à chercher des dossiers sans net"). Voir utils/rechercheHorsLigne.js
+    // (chf-app2). Purement additif : aucun écran existant ne lit ce champ.
+    dossierId: ep.dossier_id,
     nomPatient: dossier?.nom, dateNaissance: dossier?.date_naissance,
     // sexe (02/09) : seul champ dossier ajouté ici pour un rapport (MSPP, répartition homme/femme
     // des examens) — poids/conjoint restent volontairement absents de cette liste, lus seulement
