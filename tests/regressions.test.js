@@ -2052,3 +2052,31 @@ test("POST /api/admin/restaurer-sauvegarde ne renvoie JAMAIS un champ success g�
   assert.match(blocRestaurer, /res\.json\(\{ fichier, rapport, totalInsere, totalEnEchec \}\)/);
   assert.match(blocRestaurer, /Ce fichier ne ressemble pas à une sauvegarde automatique/, "doit rejeter clairement un fichier qui n'a le format d'aucune des 17 tables, plutôt que de restaurer silencieusement 0 ligne");
 });
+
+// ============================================================
+// server.js dit "Copiez .env.example vers .env" quand une variable manque — mais ce fichier
+// n'avait JAMAIS existé dans le dépôt (constaté le 24/09, quand Esdras a voulu travailler
+// depuis VS Code). Quelqu'un qui clone le projet tombe donc sur une consigne qui renvoie vers
+// un fichier absent, sans aucun moyen de savoir quelles variables remplir. Ce test garde
+// .env.example aligné sur ce que le code lit vraiment : ajouter un process.env.X sans
+// l'ajouter au modèle fait échouer la suite.
+// ============================================================
+
+test(".env.example documente TOUTES les variables d'environnement lues par server.js", () => {
+  const modele = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  const documentees = [...modele.matchAll(/^([A-Z0-9_]+)=/gm)].map(m => m[1]);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const lues = [...new Set([...src.matchAll(/process\.env\.([A-Z0-9_]+)/g)].map(m => m[1]))];
+  const manquantes = lues.filter(v => !documentees.includes(v));
+  assert.deepStrictEqual(manquantes, [],
+    `Variables lues par server.js mais absentes de .env.example : ${manquantes.join(', ')} — ajoute-les au modèle, sinon personne ne peut faire tourner le projet ailleurs qu'en production.`);
+});
+
+test(".env.example ne contient JAMAIS de vraie valeur — c'est un modèle, et il est commité sur GitHub", () => {
+  const modele = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  // Une clé Supabase/Firebase réelle est un JWT (eyJ...) ; une clé Resend commence par re_ ;
+  // la clé de service Firebase est un JSON contenant "private_key".
+  assert.doesNotMatch(modele, /eyJ[A-Za-z0-9_-]{10,}/, "ressemble à un vrai jeton JWT (clé Supabase ou Firebase)");
+  assert.doesNotMatch(modele, /re_[A-Za-z0-9_-]{10,}/, "ressemble à une vraie clé Resend");
+  assert.doesNotMatch(modele, /"private_key"/, "contient une vraie clé privée Firebase");
+});
