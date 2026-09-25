@@ -233,10 +233,12 @@ app.post('/portail-patient/recherche', async (req, res) => {
   // prochaines recherches (n'accumule plus contre le compteur ci-dessus).
   tentativesPortailPatient.delete(cle);
 
-  const { data: episodes } = await supabase.from('episodes').select('id').eq('dossier_id', dossier.id);
+  // .is('supprime_le', null) (25/09) : une visite ou une fiche mise à la corbeille ne doit jamais
+  // réapparaître au patient comme s'il l'avait réellement reçue.
+  const { data: episodes } = await supabase.from('episodes').select('id').eq('dossier_id', dossier.id).is('supprime_le', null);
   const episodeIds = (episodes || []).map(e => e.id);
   const { data: fiches } = episodeIds.length === 0 ? { data: [] } : await supabase
-    .from('fiches').select('date_creation, raw_state').in('episode_id', episodeIds)
+    .from('fiches').select('date_creation, raw_state').in('episode_id', episodeIds).is('supprime_le', null)
     .order('date_creation', { ascending: false }).limit(5);
 
   const historique = (fiches || []).map(f => ({
@@ -804,7 +806,7 @@ app.get('/api/episodes/:id/solde-depot', async (req, res) => {
   }
   const { data: paiements, error } = await supabase
     .from('paiements').select('mode, montant, details').eq('episode_id', req.params.id)
-    .or('annule.eq.false,annule.is.null');
+    .or('annule.eq.false,annule.is.null').is('supprime_le', null);
   if (error) return res.status(500).json({ error: error.message });
   res.json(calculerSoldeDepot(paiements));
 });
@@ -1191,7 +1193,7 @@ app.put('/api/dossiers/:id', async (req, res) => {
 // (payé / solde restant / jamais facturé) sans recalculer côté serveur — le front décide de l'affichage.
 app.get('/api/dossiers/:id/historique', async (req, res) => {
   const { data: episodes, error } = await supabase
-    .from('episodes').select('*').eq('dossier_id', req.params.id).order('date_ouverture', { ascending: false });
+    .from('episodes').select('*').eq('dossier_id', req.params.id).is('supprime_le', null).order('date_ouverture', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
   // Retour d'Esdras (26/08) : "les infirmiers et archivistes vont avoir accès à Fiche Patient, ils
   // ne peuvent pas voir si le patient a un solde ou statut de paiement" — vérifié UNE fois pour
@@ -1210,11 +1212,11 @@ app.get('/api/dossiers/:id/historique', async (req, res) => {
     // Fiche Patient (très consulté par l'archiviste).
     const { data: paiements } = await supabase
       .from('paiements').select('*').eq('episode_id', ep.id)
-      .or('annule.eq.false,annule.is.null')
+      .or('annule.eq.false,annule.is.null').is('supprime_le', null)
       .order('date_paiement', { ascending: false });
     // Intervention (accouchement/césarienne/chirurgie) : jamais une donnée financière, toujours
     // incluse même sans fiche_patient_voir_finances — voir extraireIntervention ci-dessus.
-    const { data: fiches } = await supabase.from('fiches').select('raw_state, date_creation').eq('episode_id', ep.id);
+    const { data: fiches } = await supabase.from('fiches').select('raw_state, date_creation').eq('episode_id', ep.id).is('supprime_le', null);
     const intervention = extraireIntervention(fiches);
     const fichesDetail = extraireFichesDetail(fiches);
     if (!peutVoirFinances) return { ...ep, dernierPaiement: null, intervention, fichesDetail };
@@ -1332,7 +1334,7 @@ app.post('/api/dossiers/:id/pieces-jointes/:fichierId/restaurer', async (req, re
 // Épisodes ouverts d'un dossier — la question centrale du flux anti-doublon
 app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   const { data, error } = await supabase
-    .from('episodes').select('*').eq('dossier_id', req.params.id).eq('statut', 'ouvert');
+    .from('episodes').select('*').eq('dossier_id', req.params.id).eq('statut', 'ouvert').is('supprime_le', null);
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -1343,7 +1345,7 @@ app.get('/api/dossiers/:id/solde', async (req, res) => {
 
   // Récupérer tous les épisodes du dossier
   const { data: episodes, error: errEpisodes } = await supabase
-    .from('episodes').select('id').eq('dossier_id', dossierId);
+    .from('episodes').select('id').eq('dossier_id', dossierId).is('supprime_le', null);
   if (errEpisodes) return res.status(500).json({ error: errEpisodes.message });
 
   if (!episodes || episodes.length === 0) {
@@ -1360,6 +1362,7 @@ app.get('/api/dossiers/:id/solde', async (req, res) => {
       .select('solde_restant')
       .eq('episode_id', ep.id)
       .or('annule.eq.false,annule.is.null')
+      .is('supprime_le', null)
       .order('date_paiement', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -1408,8 +1411,12 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     if (existant) return res.status(200).json(existant);
   }
 
+  // .is('supprime_le', null) (25/09, audit avant mise en production) : un épisode mis à la corbeille
+  // (hospitalisation créée par erreur, puis supprimée) restait compté comme "ouvert" — le patient
+  // ne pouvait alors plus JAMAIS être hospitalisé (BLOCAGE_HOSPITALISATION, sans contournement
+  // possible) tant que la purge à 30 jours ne l'avait pas fait disparaître.
   const { data: episodesOuverts, error: erreurRecherche } = await supabase
-    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert');
+    .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert').is('supprime_le', null);
   if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
 
   const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
@@ -1577,7 +1584,7 @@ app.patch('/api/episodes/:id/lit', async (req, res) => {
 
   if (lit) {
     const { data: occupants, error: erreurOccupants } = await supabase
-      .from('episodes').select('id').eq('service', episode.service).eq('lit', lit).eq('statut', 'ouvert').neq('id', req.params.id);
+      .from('episodes').select('id').eq('service', episode.service).eq('lit', lit).eq('statut', 'ouvert').neq('id', req.params.id).is('supprime_le', null);
     if (erreurOccupants) return res.status(500).json({ error: erreurOccupants.message });
     if (occupants && occupants.length > 0) return res.status(409).json({ error: `${lit} est déjà occupé par un autre patient de ${episode.service}.` });
   }
@@ -1906,10 +1913,15 @@ app.post('/api/paiements', async (req, res) => {
   // la définition utilisée partout : Créances (DashboardCaisse), statut et plafond de
   // remboursement (Fiche Patient), solde affiché au Calculateur, et le remboursement ci-dessous.
   // Un paiement ANNULÉ ne doit jamais servir de référence (24/08, audit financier).
+  // .is('supprime_le', null) (25/09, audit avant mise en production) : depuis la corbeille 30 jours
+  // (12/09), supprimer une fiche ne fait plus disparaître ses paiements, elle les MARQUE — mais
+  // cette lecture ne regardait pas la marque. Une fiche à crédit supprimée restait donc la
+  // référence du solde : la dette effacée continuait d'être due, et se reportait sur chaque
+  // nouveau paiement de l'épisode (voir le report juste en dessous).
   const lireSoldeEpisode = async (episodeId) => {
     const { data, error } = await supabase
       .from('paiements').select('solde_restant').eq('episode_id', episodeId)
-      .or('annule.eq.false,annule.is.null')
+      .or('annule.eq.false,annule.is.null').is('supprime_le', null)
       .order('date_paiement', { ascending: false }).limit(1).maybeSingle();
     if (error) throw new Error(error.message);
     return (data && data.solde_restant) || 0;
@@ -2128,7 +2140,7 @@ app.post('/api/episodes/:id/transferer-partenaire', async (req, res) => {
   const detailsAudit = { motif: motif.trim(), autorise_par: autorise_par.trim(), ong_partenaire };
 
   const { data: paiements, error: erreurPaiements } = await supabase
-    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null');
+    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null').is('supprime_le', null);
   if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
   const { soldeDepot } = calculerSoldeDepot(paiements);
 
@@ -2174,12 +2186,12 @@ app.post('/api/episodes/:id/rembourser-transferer-partenaire', async (req, res) 
   if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
   if (!episode) return res.status(404).json({ error: "Épisode introuvable." });
 
-  const { data: fiches, error: erreurFiches } = await supabase.from('fiches').select('*').eq('episode_id', episode.id).in('id', fiche_ids);
+  const { data: fiches, error: erreurFiches } = await supabase.from('fiches').select('*').eq('episode_id', episode.id).in('id', fiche_ids).is('supprime_le', null);
   if (erreurFiches) return res.status(500).json({ error: erreurFiches.message });
   if ((fiches || []).length !== fiche_ids.length) return res.status(400).json({ error: "Une ou plusieurs fiches sélectionnées n'appartiennent pas à cet épisode." });
 
   const { data: paiementsEpisode, error: erreurPaiementsEpisode } = await supabase
-    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null');
+    .from('paiements').select('*').eq('episode_id', episode.id).or('annule.eq.false,annule.is.null').is('supprime_le', null);
   if (erreurPaiementsEpisode) return res.status(500).json({ error: erreurPaiementsEpisode.message });
 
   // Validé AVANT de toucher à quoi que ce soit : le paiement "encaissable ou à crédit" d'origine
@@ -2757,6 +2769,10 @@ const TABLES_A_SAUVEGARDER = [
   'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
   'invitations',
 ];
+// Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
+// information_schema.table_constraints — mêmes valeurs que ORDRE_RESTAURATION plus bas). Sert au
+// tri TOTAL qu'exige la lecture paginée de la sauvegarde (voir lireToutesLesPages).
+const CLE_PRIMAIRE_SAUVEGARDE = { catalog: 'type', decrements_stock_appliques: 'local_id', invitations: 'token' };
 
 async function sauvegarderVersStorage() {
   const contenu = { genere_le: new Date().toISOString() };
@@ -2766,9 +2782,16 @@ async function sauvegarderVersStorage() {
   // infiniment mieux que pas de sauvegarde du tout, à condition que le trou soit annoncé (il
   // l'est : dans le fichier lui-même, dans les logs, et dans l'alerte WhatsApp quotidienne).
   const tablesEnEchec = [];
+  // Lecture PAGINÉE (25/09, audit avant mise en production) : un simple select('*') s'arrêtait au
+  // plafond de lignes de Supabase (1000 par défaut) SANS erreur — dès qu'une table le dépassait
+  // (audit_log en premier, puis paiements/fiches), la sauvegarde n'en gardait qu'une partie, en
+  // silence, et la restauration aurait rendu une base amputée. Même piège que celui corrigé le
+  // 31/08 pour GET /api/episodes, qui avait épargné la sauvegarde.
   for (const table of TABLES_A_SAUVEGARDER) {
-    const { data, error } = await supabase.from(table).select('*');
-    if (error) {
+    let data;
+    try {
+      data = await lireToutesLesPages(() => supabase.from(table).select('*').order(CLE_PRIMAIRE_SAUVEGARDE[table] || 'id'));
+    } catch (error) {
       console.error(`⚠️ Sauvegarde : table "${table}" illisible — ${error.message}`);
       tablesEnEchec.push(`${table} (${error.message})`);
       continue;

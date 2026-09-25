@@ -1,3 +1,43 @@
+# ✅ AUDIT AVANT MISE EN PRODUCTION DU 1er OCTOBRE (25/09)
+
+Retour d'Esdras : *"vérifie s'il n'y a pas d'erreur ou de bug, fais un test complet de l'app avant
+la production"*. `server.js` relu en entier ; 2 familles de bugs corrigées.
+
+**1. Sauvegarde automatique tronquée à 1000 lignes par table, en silence.**
+`sauvegarderVersStorage()` lisait chaque table d'un seul `select('*')` — le plafond de lignes de
+Supabase (1000) coupe la réponse SANS erreur. Au 25/09 : `audit_log` = 476 lignes, donc aucune
+sauvegarde encore amputée, mais ça serait arrivé dans les premiers jours d'usage réel. Passe
+maintenant par `lireToutesLesPages`, trié sur la vraie clé primaire (`CLE_PRIMAIRE_SAUVEGARDE` :
+`catalog`→`type`, `invitations`→`token`, `decrements_stock_appliques`→`local_id`, sinon `id` —
+recoupé dans `information_schema` le 25/09). Test qui EXÉCUTE la fonction contre une fausse base
+plafonnée à 1000 lignes (2500 lignes attendues dans le fichier).
+
+**2. Lectures qui ignoraient la corbeille (`supprime_le`)**, oubliées lors du branchement de la
+phase 2 le 12/09 :
+- **Solde de crédit** (`lireSoldeEpisode`, POST /api/paiements) : le paiement d'une fiche à crédit
+  mise à la corbeille restait la référence du solde → la dette supprimée restait due et se
+  reportait sur chaque nouveau paiement. Idem solde de dépôt, `/api/dossiers/:id/solde` (État de
+  compte), historique Fiche Patient, et les 2 routes de transfert partenaire.
+- **Épisodes « ouverts »** (création d'épisode, `/episodes-ouverts`, lits occupés) : une
+  hospitalisation supprimée bloquait toute nouvelle hospitalisation du patient pendant 30 jours
+  (`BLOCAGE_HOSPITALISATION`, sans contournement).
+- **Portail patient** : montrait au patient des visites/fiches supprimées.
+
+Règle à retenir : **toute nouvelle lecture d'`episodes`, `fiches` ou `paiements` doit filtrer
+`.is('supprime_le', null)`** — sauf les recherches d'idempotence par `local_id` (un rejeu doit
+retrouver la ligne même supprimée) et les routes de corbeille elles-mêmes. Des tests verrouillent
+les lectures de paiements « non annulés » et les recherches d'épisodes « ouverts ».
+
+La corbeille était vide en production au 25/09 : aucune donnée à rattraper.
+
+Tests : 6 ajoutés (181 au total, 0 échec), vérifiés en échec sur l'ancien `server.js`.
+
+**⚠️ Sur un PC Windows** : Git (`core.autocrlf=true`) convertit les fichiers en CRLF, et 6 tests
+qui lisent le source avec des regex échouent alors à tort. Lancer les tests sur une copie en LF
+(`git -c core.autocrlf=false clone ...`) avant de conclure à une régression.
+
+---
+
 # ✅ RATTRAPAGE DE SAUVEGARDE AU RÉVEIL DU SERVEUR (25/09)
 
 **Constat qui a déclenché ce chantier** : en listant le bucket `sauvegardes-automatiques` le
@@ -162,7 +202,7 @@ n'est sauvegardée nulle part. C'était déjà arrivé à 5 tables (audit du 31/
 
 # 📋 REPÈRES
 
-- **Tests** : `npm test` → 153 / 153, aucun échec attendu. Un échec = une régression réelle.
+- **Tests** : `npm test` → 181 / 181, aucun échec attendu. Un échec = une régression réelle.
 - **Render** : backend `srv-da0j3f7lk1mc7382rm0g` (web service), app2
   `srv-da175dpt0dsc73b5lj70` (static site). Workspace `tea-d9h2bivlk1mc738tli3g`. `autoDeploy`
   actif sur `main` dans les deux.

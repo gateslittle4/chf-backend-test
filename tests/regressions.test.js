@@ -2192,3 +2192,131 @@ test("Le minuteur de 6h UTC et le rattrapage au réveil appellent la MÊME fonct
   const iRattrapage = serverSrc.indexOf('async function rattraperSauvegardeAuDemarrage');
   assert.ok(iFonction !== -1 && iFonction < iCron && iCron < iRattrapage, "la fonction partagée doit être déclarée avant ses 2 appelants");
 });
+
+// ============================================================================================
+// Audit avant mise en production (25/09) — 2 familles de bugs trouvées en relisant server.js en
+// entier, juste avant le lancement du 1er octobre.
+// ============================================================================================
+
+// 1. La sauvegarde automatique lisait chaque table d'un seul select('*') : Supabase plafonne une
+// réponse à 1000 lignes SANS erreur. Au-delà (audit_log en premier), la sauvegarde gardait une
+// partie de la table en silence. Ce test EXÉCUTE sauvegarderVersStorage() extrait de server.js
+// contre une fausse base qui applique ce plafond, exactement comme PostgREST.
+function chargerSauvegarderVersStorage(tables) {
+  const extraireLigne = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n', i));
+  };
+  const extraireBloc = (debutTexte, finTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf(finTexte, i) + finTexte.length);
+  };
+  const code = [
+    extraireLigne("const FUSEAU_HAITI = 'America/Port-au-Prince';"),
+    extraireLigne('const TAILLE_PAGE_LECTURE = '),
+    extraireBloc('async function lireToutesLesPages(', '\n}'),
+    extraireBloc('const TABLES_A_SAUVEGARDER = [', '];'),
+    extraireLigne('const CLE_PRIMAIRE_SAUVEGARDE = '),
+    extraireLigne("const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';"),
+    extraireBloc('async function sauvegarderVersStorage() {', '\n}'),
+  ].join('\n');
+
+  const PLAFOND_POSTGREST = 1000;
+  const colonnesDeTri = {};
+  let fichierEnvoye = null;
+  const supabase = {
+    from: (table) => {
+      const lignes = tables[table] || [];
+      const requete = {
+        select: () => requete,
+        order: (colonne) => { (colonnesDeTri[table] = colonnesDeTri[table] || []).push(colonne); return requete; },
+        range: async (debut, fin) => ({ data: lignes.slice(debut, Math.min(fin + 1, debut + PLAFOND_POSTGREST)), error: null }),
+        // Une requête attendue telle quelle (sans .range) : PostgREST renvoie au plus 1000 lignes.
+        then: (resoudre) => resoudre({ data: lignes.slice(0, PLAFOND_POSTGREST), error: null }),
+      };
+      return requete;
+    },
+    storage: {
+      listBuckets: async () => ({ data: [{ name: 'sauvegardes-automatiques' }], error: null }),
+      from: () => ({
+        upload: async (_nom, buffer) => { fichierEnvoye = JSON.parse(buffer.toString()); return { error: null }; },
+        list: async () => ({ data: [], error: null }),
+        remove: async () => ({ error: null }),
+      }),
+    },
+  };
+  const sauvegarderVersStorage = new Function('supabase', `${code}\nreturn sauvegarderVersStorage;`)(supabase);
+  return { sauvegarderVersStorage, colonnesDeTri, fichierEnvoye: () => fichierEnvoye };
+}
+
+test("Sauvegarde automatique : une table de PLUS de 1000 lignes est sauvegardée EN ENTIER (le plafond Supabase la tronquait en silence)", async () => {
+  const auditLog = Array.from({ length: 2500 }, (_, i) => ({ id: `a-${String(i).padStart(5, '0')}` }));
+  const { sauvegarderVersStorage, fichierEnvoye } = chargerSauvegarderVersStorage({ audit_log: auditLog, paiements: [{ id: 'p1' }] });
+  const resultat = await sauvegarderVersStorage();
+  assert.strictEqual(fichierEnvoye().audit_log.length, 2500, "les 2500 lignes d'audit_log doivent être dans le fichier, pas seulement les 1000 premières");
+  assert.strictEqual(resultat.nombreLignes.audit_log, 2500);
+  assert.strictEqual(new Set(fichierEnvoye().audit_log.map(l => l.id)).size, 2500, "aucune ligne dupliquée ni sautée d'une page à l'autre");
+});
+
+test("Sauvegarde automatique : chaque table est lue avec un tri TOTAL sur sa vraie clé primaire (obligatoire pour paginer sans doublon ni trou)", async () => {
+  const { sauvegarderVersStorage, colonnesDeTri } = chargerSauvegarderVersStorage({});
+  await sauvegarderVersStorage();
+  assert.deepStrictEqual(colonnesDeTri.catalog, ['type'], "catalog n'a pas de colonne id : sa clé primaire est type");
+  assert.deepStrictEqual(colonnesDeTri.invitations, ['token']);
+  assert.deepStrictEqual(colonnesDeTri.decrements_stock_appliques, ['local_id']);
+  assert.deepStrictEqual(colonnesDeTri.paiements, ['id']);
+  // Même clé que la restauration : les deux doivent rester d'accord sur l'identité d'une ligne.
+  const debutOrdre = serverSrc.indexOf('const ORDRE_RESTAURATION = [');
+  const ordreRestauration = serverSrc.slice(debutOrdre, serverSrc.indexOf('];', debutOrdre));
+  for (const [table, cle] of [['catalog', 'type'], ['invitations', 'token'], ['decrements_stock_appliques', 'local_id']]) {
+    assert.ok(ordreRestauration.includes(`['${table}', '${cle}']`), `ORDRE_RESTAURATION doit utiliser la même clé pour ${table}`);
+  }
+});
+
+// 2. Corbeille 30 jours (12/09) : supprimer une fiche ou un dossier ne supprime plus ses lignes,
+// il pose supprime_le. Plusieurs lectures ne regardaient pas cette marque :
+//   - le solde de crédit d'un épisode (dernier paiement non annulé) lisait encore le paiement d'une
+//     fiche à crédit supprimée : la dette effacée restait due ET se reportait sur chaque nouveau
+//     paiement (POST /api/paiements) ;
+//   - la recherche d'épisodes ouverts comptait un épisode supprimé : une hospitalisation créée par
+//     erreur puis supprimée bloquait pour 30 jours toute nouvelle hospitalisation du patient
+//     (BLOCAGE_HOSPITALISATION, sans contournement possible).
+test("Corbeille : toute lecture de paiements « non annulés » (soldes, dépôts, transferts partenaire) ignore aussi les paiements mis à la corbeille", () => {
+  const lectures = [...serverSrc.matchAll(/\.or\('annule\.eq\.false,annule\.is\.null'\)[^;]*;/g)].map(m => m[0]);
+  assert.ok(lectures.length >= 6, `attendu au moins 6 lectures de paiements non annulés, trouvé ${lectures.length}`);
+  for (const lecture of lectures) {
+    assert.match(lecture, /\.is\('supprime_le', null\)/, `lecture de paiements sans filtre corbeille : ${lecture.slice(0, 120)}`);
+  }
+});
+
+test("Corbeille : le solde de crédit d'un épisode (lireSoldeEpisode, source du report de dette) ignore les paiements mis à la corbeille", () => {
+  const debut = serverSrc.indexOf('const lireSoldeEpisode = async (episodeId) => {');
+  assert.ok(debut !== -1, 'lireSoldeEpisode introuvable');
+  assert.match(serverSrc.slice(debut, serverSrc.indexOf('};', debut)), /\.is\('supprime_le', null\)/);
+});
+
+test("Corbeille : un épisode mis à la corbeille ne compte jamais comme « ouvert » (anti-doublon, blocage hospitalisation, lits occupés)", () => {
+  const lectures = [...serverSrc.matchAll(/\.from\('episodes'\)\.select\([^;]*\.eq\('statut', 'ouvert'\)[^;]*;/g)].map(m => m[0]);
+  assert.ok(lectures.length >= 3, `attendu au moins 3 recherches d'épisodes ouverts, trouvé ${lectures.length}`);
+  for (const lecture of lectures) {
+    assert.match(lecture, /\.is\('supprime_le', null\)/, `recherche d'épisodes ouverts sans filtre corbeille : ${lecture.slice(0, 120)}`);
+  }
+});
+
+test("Corbeille : l'historique de la Fiche Patient, le solde du dossier et le portail patient n'affichent jamais un épisode ou une fiche mis à la corbeille", () => {
+  const blocRoute = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `route introuvable : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n});', i));
+  };
+  const historique = blocRoute("app.get('/api/dossiers/:id/historique'");
+  assert.match(historique, /\.from\('episodes'\)\.select\('\*'\)\.eq\('dossier_id', req\.params\.id\)\.is\('supprime_le', null\)/);
+  assert.match(historique, /\.from\('fiches'\)[^;]*\.is\('supprime_le', null\)/);
+  const solde = blocRoute("app.get('/api/dossiers/:id/solde'");
+  assert.match(solde, /\.from\('episodes'\)\.select\('id'\)\.eq\('dossier_id', dossierId\)\.is\('supprime_le', null\)/);
+  const portail = blocRoute("app.post('/portail-patient/recherche'");
+  assert.match(portail, /\.from\('episodes'\)[^;]*\.is\('supprime_le', null\)/);
+  assert.match(portail, /\.from\('fiches'\)[^;]*\.is\('supprime_le', null\)/);
+});
