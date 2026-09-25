@@ -2080,3 +2080,46 @@ test(".env.example ne contient JAMAIS de vraie valeur — c'est un modèle, et i
   assert.doesNotMatch(modele, /re_[A-Za-z0-9_-]{10,}/, "ressemble à une vraie clé Resend");
   assert.doesNotMatch(modele, /"private_key"/, "contient une vraie clé privée Firebase");
 });
+
+// ============================================================
+// Doublons (25/09, avant la mise en production à l'hôpital). Audit de TOUTES les routes de
+// création : /api/episodes était la seule à n'avoir aucune protection d'idempotence, alors
+// qu'elle est empruntée par Achat Express — donc par la file d'attente hors ligne. Une vente
+// dont la requête atteignait le serveur mais dont la réponse se perdait (coupure réseau) était
+// rejouée au retour d'internet et créait un second dossier avec sa fiche.
+// ============================================================
+
+test("POST /api/episodes est idempotente : elle vérifie local_id AVANT d'insérer, l'écrit en base, et rattrape la collision 23505 de deux rejeux simultanés", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const debut = src.indexOf("app.post('/api/episodes'");
+  assert.ok(debut > 0, "route POST /api/episodes introuvable");
+  const corps = src.slice(debut, src.indexOf("app.put('/api/episodes/:id'", debut));
+  assert.match(corps, /\.eq\('local_id', d\.local_id\)/, "doit chercher un épisode déjà créé avec ce local_id");
+  assert.match(corps, /local_id: d\.local_id \|\| null/, "doit ÉCRIRE local_id : sans ça, la recherche ne trouve jamais rien et l'index unique ne protège rien");
+  assert.match(corps, /=== '23505'/, "doit rattraper la collision d'index unique (deux rejeux en parallèle)");
+});
+
+test("TOUTE route de création empruntée par la file d'attente hors ligne protège contre le rejeu — recensement exhaustif, pour qu'une nouvelle route ne rouvre pas le trou", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const lignes = src.split('\n');
+  // Routes atteignables depuis la file d'attente hors ligne (api/supabase.js et
+  // api/apiDossierEpisode.js côté app) : celles qui enregistrent une donnée métier créée par
+  // quelqu'un à l'écran. Les routes d'administration (invitations, comptes) n'y passent jamais.
+  const aProteger = [
+    '/api/dossiers', '/api/dossiers/:dossierId/episodes', '/api/episodes',
+    '/api/fiches', '/api/paiements', '/api/depenses-caisse', '/api/requisitions',
+  ];
+  const sansProtection = [];
+  for (const route of aProteger) {
+    const debut = lignes.findIndex(l => l.trim().startsWith(`app.post('${route}'`));
+    assert.ok(debut >= 0, `route ${route} introuvable — le test ne vérifie plus rien`);
+    let fin = lignes.length;
+    for (let j = debut + 1; j < lignes.length; j++) {
+      if (/^app\.(post|get|put|delete|patch)\(/.test(lignes[j].trim())) { fin = j; break; }
+    }
+    const corps = lignes.slice(debut, fin).join('\n');
+    if (!/\.eq\('local_id'/.test(corps)) sansProtection.push(route);
+  }
+  assert.deepStrictEqual(sansProtection, [],
+    `Routes de création sans protection anti-rejeu : ${sansProtection.join(', ')} — un rejeu de la file d'attente hors ligne y créerait un doublon.`);
+});

@@ -845,6 +845,18 @@ app.post('/api/episodes', async (req, res) => {
   if (!d.nom_patient || !String(d.nom_patient).trim()) {
     return res.status(400).json({ error: "Le nom du patient est requis pour créer un dossier." });
   }
+
+  // Idempotence — même principe que /api/dossiers, /api/fiches, /api/paiements et
+  // /api/dossiers/:dossierId/episodes. Cette route-ci était la SEULE route de création à ne pas
+  // l'avoir (constaté le 25/09, avant la mise en production à l'hôpital), alors qu'elle est
+  // empruntée par Achat Express — donc par la file d'attente hors ligne. Une vente comptoir dont
+  // la requête atteignait le serveur mais dont la réponse se perdait (coupure réseau au mauvais
+  // moment, courant en Haïti) était rejouée au retour d'internet et créait un SECOND dossier,
+  // avec sa fiche : un doublon de vente, visible dans le registre et dans les archives.
+  if (d.local_id) {
+    const { data: dejaCree } = await supabase.from('episodes').select('*').eq('local_id', d.local_id).maybeSingle();
+    if (dejaCree) return res.status(200).json(await episodeVersFlat(dejaCree));
+  }
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
@@ -868,9 +880,22 @@ app.post('/api/episodes', async (req, res) => {
       voie_entree: d.voie_entree || 'consultation', service: d.service_choisi || 'Général',
       type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null,
       statut: flatVersStatut(d.status), est_hospitalisation: !!d.est_hospitalisation,
+      // Sans cette colonne renseignée, la vérification d'idempotence ci-dessus ne trouve jamais
+      // rien et l'index unique episodes_local_id_unique ne protège rien : les deux ne servent
+      // qu'ensemble.
+      local_id: d.local_id || null,
     })
     .select().single();
-  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+  if (erreurEpisode) {
+    // Deux rejeux simultanés peuvent passer la vérification ci-dessus en même temps (la lecture
+    // et l'insertion ne sont pas atomiques) : c'est l'index unique en base qui tranche, et 23505
+    // signifie alors que l'autre a gagné la course — on renvoie son résultat plutôt qu'une erreur.
+    if (erreurEpisode.code === '23505' && d.local_id) {
+      const { data: dejaCree } = await supabase.from('episodes').select('*').eq('local_id', d.local_id).maybeSingle();
+      if (dejaCree) return res.status(200).json(await episodeVersFlat(dejaCree));
+    }
+    return res.status(500).json({ error: erreurEpisode.message });
+  }
 
   if (Array.isArray(d.fiches) && d.fiches.length > 0) {
     // Avant : le résultat de cette insertion n'était jamais vérifié — un échec ici laissait
