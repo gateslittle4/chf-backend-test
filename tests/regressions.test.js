@@ -2320,3 +2320,98 @@ test("Corbeille : l'historique de la Fiche Patient, le solde du dossier et le po
   assert.match(portail, /\.from\('episodes'\)[^;]*\.is\('supprime_le', null\)/);
   assert.match(portail, /\.from\('fiches'\)[^;]*\.is\('supprime_le', null\)/);
 });
+
+// 3. Restauration : les ids déjà en base étaient cherchés par `.in(colonneId, lot)` avec des lots de
+// 500 — tous DANS l'URL (~19 ko pour 500 UUID), au-delà de ce qu'accepte PostgREST. Dès qu'une table
+// dépassait quelques centaines de lignes, sa restauration échouait en bloc. Ce test EXÉCUTE
+// restaurerDepuisSauvegarde() extrait de server.js contre une fausse base qui, comme la vraie,
+// refuse une URL trop longue et plafonne ses réponses à 1000 lignes.
+function chargerRestaurerDepuisSauvegarde(base) {
+  const extraireLigne = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n', i));
+  };
+  const extraireBloc = (debutTexte, finTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf(finTexte, i) + finTexte.length);
+  };
+  const code = [
+    extraireLigne('const TAILLE_PAGE_LECTURE = '),
+    extraireBloc('async function lireToutesLesPages(', '\n}'),
+    extraireBloc('const ORDRE_RESTAURATION = [', '];'),
+    extraireLigne('const TAILLE_LOT_RESTAURATION = '),
+    extraireBloc('function decouperEnLots(', '\n}'),
+    extraireBloc('async function restaurerDepuisSauvegarde(contenu) {', '\n}'),
+  ].join('\n');
+
+  const LONGUEUR_MAX_URL = 8000;
+  const PLAFOND_POSTGREST = 1000;
+  const supabase = {
+    from: (table) => {
+      const lignes = (base[table] = base[table] || []);
+      let colonne = null;
+      let filtreIn = null;
+      const reponse = () => {
+        if (filtreIn && filtreIn.join(',').length > LONGUEUR_MAX_URL) {
+          return { data: null, error: { message: '414 URI Too Long' } };
+        }
+        const retenues = filtreIn ? lignes.filter(l => filtreIn.includes(l[colonne])) : lignes;
+        return { data: retenues.map(l => ({ [colonne]: l[colonne] })), error: null };
+      };
+      const requete = {
+        select: (c) => { colonne = c; return requete; },
+        in: (c, valeurs) => { colonne = c; filtreIn = valeurs; return requete; },
+        order: () => requete,
+        range: async (debut, fin) => {
+          const r = reponse();
+          return r.error ? r : { data: r.data.slice(debut, Math.min(fin + 1, debut + PLAFOND_POSTGREST)), error: null };
+        },
+        then: (resoudre) => { const r = reponse(); resoudre(r.error ? r : { data: r.data.slice(0, PLAFOND_POSTGREST), error: null }); },
+        insert: (nouvelles) => ({
+          select: async (c) => { lignes.push(...nouvelles); return { data: nouvelles.map(l => ({ [c]: l[c] })), error: null }; },
+        }),
+      };
+      return requete;
+    },
+  };
+  return new Function('supabase', `${code}\nreturn restaurerDepuisSauvegarde;`)(supabase);
+}
+
+test("Restauration : une table de plusieurs milliers de lignes se restaure (les ids passaient dans l'URL et dépassaient sa longueur maximale)", async () => {
+  const uuid = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+  const sauvegarde = Array.from({ length: 1500 }, (_, i) => ({ id: uuid(i), montant: i }));
+  // 700 lignes encore en base (dont une partie au-delà du plafond de 1000 lignes par réponse une
+  // fois qu'on y ajoute des lignes plus récentes que la sauvegarde) : seules les 800 autres manquent.
+  const base = { paiements: [...sauvegarde.slice(0, 700), ...Array.from({ length: 900 }, (_, i) => ({ id: uuid(100000 + i), montant: 0 }))] };
+  const restaurerDepuisSauvegarde = chargerRestaurerDepuisSauvegarde(base);
+  const rapport = await restaurerDepuisSauvegarde({ paiements: sauvegarde });
+  const ligne = rapport.find(r => r.table === 'paiements');
+  assert.deepStrictEqual(ligne.lignesEnEchec, [], `aucune erreur attendue : ${JSON.stringify(ligne.lignesEnEchec).slice(0, 200)}`);
+  assert.strictEqual(ligne.dejaPresentes, 700, "les 700 lignes encore en base doivent être reconnues comme présentes");
+  assert.strictEqual(ligne.inserees, 800, "seules les 800 lignes manquantes doivent être réinsérées");
+  assert.strictEqual(base.paiements.length, 1600 + 800, "aucune ligne existante ne doit être dupliquée");
+});
+
+test("Restauration : plus aucun `.in()` sur les ids de la sauvegarde — leur nombre n'est pas borné, l'URL finirait toujours par être trop longue", () => {
+  const debut = serverSrc.indexOf('async function restaurerDepuisSauvegarde(contenu) {');
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', debut));
+  const codeSansCommentaires = bloc.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(codeSansCommentaires, /\.in\(/);
+  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\(table\)\.select\(colonneId\)\.order\(colonneId\)\)/);
+});
+
+test("GET /api/episodes/corbeille : épisodes lus page par page et noms des dossiers lus par lots (jamais tous les ids dans une seule URL)", () => {
+  const debut = serverSrc.indexOf("app.get('/api/episodes/corbeille'");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n});', debut));
+  assert.match(bloc, /lireToutesLesPages\(/);
+  assert.match(bloc, /lireParLotsDIds\(dossierIds,/);
+  assert.doesNotMatch(bloc, /\.in\('id', dossierIds\)/);
+});
+
+test("GET /api/requisitions est paginée (tri total) — au-delà de 1000 réquisitions, les plus anciennes disparaissaient en silence du rapport", () => {
+  const debut = serverSrc.indexOf("app.get('/api/requisitions'");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n});', debut));
+  assert.match(bloc, /lireToutesLesPages\(\s*\(\) => supabase\.from\('requisitions'\)\.select\('\*'\)\.order\('date_requisition', \{ ascending: false \}\)\.order\('id'\)\)/);
+});

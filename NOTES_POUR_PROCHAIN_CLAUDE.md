@@ -30,7 +30,20 @@ les lectures de paiements « non annulés » et les recherches d'épisodes « ou
 
 La corbeille était vide en production au 25/09 : aucune donnée à rattraper.
 
-Tests : 6 ajoutés (181 au total, 0 échec), vérifiés en échec sur l'ancien `server.js`.
+**3. Restauration de sauvegarde bloquée au-delà de quelques centaines de lignes.**
+`restaurerDepuisSauvegarde()` cherchait les lignes déjà en base avec `.in(colonneId, lot)` par lots
+de 500 ids — tous DANS l'URL (~19 ko pour 500 UUID), au-delà de la limite de PostgREST : la
+restauration d'une table un peu remplie échouait en bloc, le jour même où on en aurait eu besoin.
+Lit maintenant toute la colonne clé page par page (`lireToutesLesPages`), sans aucun id dans
+l'URL. Même famille corrigée dans `GET /api/episodes/corbeille` (lots de 200 via
+`lireParLotsDIds`) et `GET /api/requisitions` (paginée).
+
+Règle à retenir : **jamais de `.in()` sur une liste d'ids dont la taille n'est pas bornée** —
+passer par `lireParLotsDIds`. **Jamais de liste complète sans `lireToutesLesPages`.**
+
+Tests : 10 ajoutés (185 au total, 0 échec), vérifiés en échec sur l'ancien `server.js` — dont 2
+qui EXÉCUTENT la sauvegarde et la restauration contre une fausse base qui applique, comme la
+vraie, le plafond de 1000 lignes et la limite de longueur d'URL.
 
 **⚠️ Sur un PC Windows** : Git (`core.autocrlf=true`) convertit les fichiers en CRLF, et 6 tests
 qui lisent le source avec des regex échouent alors à tort. Lancer les tests sur une copie en LF
@@ -202,7 +215,7 @@ n'est sauvegardée nulle part. C'était déjà arrivé à 5 tables (audit du 31/
 
 # 📋 REPÈRES
 
-- **Tests** : `npm test` → 181 / 181, aucun échec attendu. Un échec = une régression réelle.
+- **Tests** : `npm test` → 185 / 185, aucun échec attendu. Un échec = une régression réelle.
 - **Render** : backend `srv-da0j3f7lk1mc7382rm0g` (web service), app2
   `srv-da175dpt0dsc73b5lj70` (static site). Workspace `tea-d9h2bivlk1mc738tli3g`. `autoDeploy`
   actif sur `main` dans les deux.

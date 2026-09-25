@@ -1051,16 +1051,21 @@ app.get('/api/episodes/corbeille', async (req, res) => {
   if (!(await aPermission(req.user.id, 'facturation_supprimer'))) {
     return res.status(403).json({ error: "Permission 'facturation_supprimer' requise pour voir la corbeille." });
   }
-  const { data: episodes, error } = await supabase
-    .from('episodes').select('id, dossier_id, supprime_le').not('supprime_le', 'is', null).order('supprime_le', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  const dossierIds = [...new Set((episodes || []).map(e => e.dossier_id))];
-  const { data: dossiers, error: erreurDossiers } = dossierIds.length > 0
-    ? await supabase.from('dossiers').select('id, nom').in('id', dossierIds)
-    : { data: [], error: null };
-  if (erreurDossiers) return res.status(500).json({ error: erreurDossiers.message });
-  const nomParDossier = new Map((dossiers || []).map(d => [d.id, d.nom]));
-  res.json((episodes || []).map(e => ({ id: e.id, nomPatient: nomParDossier.get(e.dossier_id) || null, supprimeLe: e.supprime_le })));
+  // Lectures paginées et par lots (25/09, audit avant mise en production) : la liste des épisodes
+  // était plafonnée en silence à 1000 lignes, et un seul .in() mettait TOUS les ids de dossiers
+  // dans l'URL — une corbeille bien remplie (30 jours de suppressions) aurait fini par dépasser la
+  // limite de longueur, et l'onglet Corbeille aurait cessé de s'afficher. Voir TAILLE_LOT_IDS.
+  let episodes, dossiers;
+  try {
+    episodes = await lireToutesLesPages(() => supabase
+      .from('episodes').select('id, dossier_id, supprime_le').not('supprime_le', 'is', null).order('supprime_le', { ascending: false }).order('id'));
+    const dossierIds = [...new Set(episodes.map(e => e.dossier_id))];
+    dossiers = await lireParLotsDIds(dossierIds, lot => supabase.from('dossiers').select('id, nom').in('id', lot).order('id'));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  const nomParDossier = new Map(dossiers.map(d => [d.id, d.nom]));
+  res.json(episodes.map(e => ({ id: e.id, nomPatient: nomParDossier.get(e.dossier_id) || null, supprimeLe: e.supprime_le })));
 });
 
 // ============================================================
@@ -2487,9 +2492,14 @@ app.get('/api/requisitions', async (req, res) => {
   if (!(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'analytics_voir')) && !(await aPermission(req.user.id, 'requisitions_voir'))) {
     return res.status(403).json({ error: "Permission 'stock_gerer', 'analytics_voir' ou 'requisitions_voir' requise." });
   }
-  const { data, error } = await supabase.from('requisitions').select('*').order('date_requisition', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // Paginée (25/09, audit avant mise en production) : sans ça, au-delà de 1000 réquisitions, les
+  // plus anciennes disparaissaient en silence du rapport "médicaments par service".
+  try {
+    res.json(await lireToutesLesPages(
+      () => supabase.from('requisitions').select('*').order('date_requisition', { ascending: false }).order('id')));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Ajoute du stock à UN médicament de façon atomique (voir fonction_maj_stock_medicament.sql) —
@@ -3318,14 +3328,21 @@ async function restaurerDepuisSauvegarde(contenu) {
       continue;
     }
     try {
-      const idsSauvegarde = lignes.map(l => l[colonneId]).filter(v => v !== null && v !== undefined);
+      // Ids déjà en base : lus EN ENTIER, page par page, colonne clé seule (25/09, audit avant mise
+      // en production). Avant : un `.in(colonneId, lot)` par lot de 500 ids — tous DANS l'URL, soit
+      // ~19 ko pour 500 UUID, au-delà de ce qu'acceptent PostgREST/son proxy (voir TAILLE_LOT_IDS,
+      // qui s'en tient à 200). Le jour où une table dépassait 500 lignes, sa restauration échouait
+      // en bloc — précisément le jour où on en aurait eu besoin. Lire toute la colonne n'a aucune
+      // limite de taille d'URL, et reste léger (une seule colonne, 500 lignes par requête).
       const idsExistants = new Set();
-      for (const lot of decouperEnLots(idsSauvegarde, TAILLE_LOT_RESTAURATION)) {
-        const { data, error } = await supabase.from(table).select(colonneId).in(colonneId, lot);
-        if (error) throw new Error(`Lecture des lignes déjà présentes : ${error.message}`);
-        (data || []).forEach(r => idsExistants.add(r[colonneId]));
+      try {
+        const existants = await lireToutesLesPages(() => supabase.from(table).select(colonneId).order(colonneId));
+        existants.forEach(r => idsExistants.add(r[colonneId]));
+      } catch (error) {
+        throw new Error(`Lecture des lignes déjà présentes : ${error.message}`);
       }
       const aInserer = lignes.filter(l => !idsExistants.has(l[colonneId]));
+      const dejaPresentes = lignes.length - aInserer.length;
 
       let inserees = 0;
       const lignesEnEchec = [];
@@ -3339,7 +3356,7 @@ async function restaurerDepuisSauvegarde(contenu) {
           else inserees += (d2 || []).length;
         }
       }
-      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes: idsExistants.size, inserees, lignesEnEchec });
+      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes, inserees, lignesEnEchec });
     } catch (e) {
       rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes: 0, inserees: 0, lignesEnEchec: [{ id: null, erreur: e.message }] });
     }
