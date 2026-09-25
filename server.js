@@ -2956,13 +2956,14 @@ async function envoyerCopieHorsSupabase(nomFichier, contenuBuffer) {
   }
 }
 
-// Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Ne bloque jamais le
-// serveur si ça échoue (ex: bucket pas encore créé, quota Storage) — juste journalisé, à vérifier
-// dans les logs Render au besoin. Déclenchement manuel possible via POST /api/admin/backup-manuel.
-cron.schedule('0 6 * * *', async () => {
+// Corps de la sauvegarde quotidienne, partagé par les DEUX déclencheurs : le minuteur de 6h UTC
+// ci-dessous, et le rattrapage au démarrage juste après. Ne lève jamais : tout échec est journalisé
+// et signalé par WhatsApp, mais ne doit ni arrêter le serveur ni empêcher le second déclencheur de
+// réessayer plus tard.
+async function executerSauvegardeQuotidienne(origine) {
   try {
     const resultat = await sauvegarderVersStorage();
-    console.log(`✅ Sauvegarde automatique : ${resultat.fichier}`, resultat.nombreLignes);
+    console.log(`✅ Sauvegarde automatique (${origine}) : ${resultat.fichier}`, resultat.nombreLignes);
     // Une sauvegarde PARTIELLE réussit techniquement mais laisse un trou : sans alerte, personne
     // ne saurait qu'une table n'est plus protégée, parfois pendant des mois.
     if (resultat.tablesEnEchec && resultat.tablesEnEchec.length > 0) {
@@ -2979,12 +2980,62 @@ cron.schedule('0 6 * * *', async () => {
       await envoyerCallMeBot(`⚠️ CHF : sauvegarde Supabase faite, mais la copie par email a échoué (${e.message}).`);
     }
   } catch (e) {
-    console.error('❌ Échec de la sauvegarde automatique :', e.message);
+    console.error(`❌ Échec de la sauvegarde automatique (${origine}) :`, e.message);
     // Retour d'Esdras (29/08) : seul moyen de savoir qu'une sauvegarde a échoué jusqu'ici était de
     // lire les logs Render, que personne ne regarde — une alerte WhatsApp directe comble ce trou.
     await envoyerCallMeBot(`⚠️ CHF : la sauvegarde automatique a échoué (${e.message}). Vérifie les logs Render.`);
   }
-});
+}
+
+// Tous les jours à 6h UTC (~1h-2h du matin en Haïti, hors heures de pointe). Déclenchement manuel
+// possible via POST /api/admin/backup-manuel.
+cron.schedule('0 6 * * *', () => executerSauvegardeQuotidienne('minuteur 6h UTC'));
+
+// ============================================================
+// RATTRAPAGE AU DÉMARRAGE (25/09) — le minuteur ci-dessus ne suffit pas, et on l'a payé cher.
+//
+// Ce service tourne sur le plan gratuit de Render, qui éteint le processus après ~15 minutes sans
+// visite. Le minuteur vit DANS ce processus : quand il s'éteint, le minuteur meurt avec lui. Et
+// 6h UTC, c'est 1h-2h du matin en Haïti — précisément l'heure où personne n'utilise l'app, donc
+// où le serveur est garanti éteint. Constaté le 25/09 en listant le bucket : UNE SEULE sauvegarde
+// automatique depuis le 2 septembre. Toutes les autres venaient d'un clic manuel d'Esdras.
+//
+// Le serveur se réveille en revanche dès que quelqu'un ouvre l'app. On en profite : s'il n'existe
+// aucune sauvegarde datée d'aujourd'hui (heure d'Haïti), on la fait maintenant. Ça donne une
+// sauvegarde par jour d'utilisation réelle, sans rien payer et sans dépendre d'un service externe.
+//
+// Ce n'est pas un remplacement parfait d'un vrai minuteur : un jour sans aucune utilisation n'a
+// pas de sauvegarde. Mais un jour sans utilisation est aussi un jour sans nouvelle donnée.
+const DELAI_RATTRAPAGE_DEMARRAGE_MS = 30000;
+
+async function sauvegardeDuJourExisteDeja() {
+  // Même format de nom que sauvegarderVersStorage (en-CA = YYYY-MM-DD), et même fuseau : comparer
+  // avec la date UTC ferait rater/refaire une sauvegarde entre 20h et minuit heure d'Haïti.
+  const aujourdhui = new Date().toLocaleDateString('en-CA', { timeZone: FUSEAU_HAITI });
+  const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
+  if (error) throw new Error(error.message);
+  return (fichiers || []).some(f => f.name === `backup-${aujourdhui}.json`);
+}
+
+async function rattraperSauvegardeAuDemarrage() {
+  try {
+    if (await sauvegardeDuJourExisteDeja()) {
+      console.log('↩️ Sauvegarde du jour déjà présente — rien à rattraper au démarrage.');
+      return;
+    }
+    console.log('⏰ Aucune sauvegarde pour aujourd\'hui — rattrapage au réveil du serveur...');
+    await executerSauvegardeQuotidienne('rattrapage au réveil');
+  } catch (e) {
+    // Un bucket injoignable au démarrage ne doit jamais empêcher le serveur de servir l'app :
+    // le prochain réveil réessaiera, et le minuteur de 6h reste en place de son côté.
+    console.error('❌ Rattrapage de sauvegarde impossible au démarrage :', e.message);
+  }
+}
+
+// Décalé de 30 secondes : le serveur répond d'abord aux requêtes qui l'ont réveillé (quelqu'un
+// attend devant son écran), la sauvegarde complète des 17 tables vient ensuite. unref() pour que
+// ce minuteur n'empêche jamais le processus de s'arrêter proprement.
+setTimeout(rattraperSauvegardeAuDemarrage, DELAI_RATTRAPAGE_DEMARRAGE_MS).unref();
 
 // ============================================================
 // CORBEILLE CATALOGUE (medicaments/actes) — retour d'Esdras (01/09) : "j'aime pas trop
