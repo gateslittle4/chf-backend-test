@@ -966,9 +966,10 @@ test("envoyerCallMeBot lit CALLMEBOT_PHONE/CALLMEBOT_APIKEY depuis les variables
   assert.match(bloc, /catch \(e\) \{\s*\n\s*console\.warn\('CallMeBot : envoi échoué —', e\.message\);\s*\n\s*\}/, "une erreur réseau/API ne doit jamais remonter à l'appelant");
 });
 
-test("cron de sauvegarde automatique envoie une alerte CallMeBot en cas d'échec, en plus du log console existant", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'"), serverSrc.indexOf("app.post('/api/admin/backup-manuel'"));
-  assert.match(bloc, /console\.error\('❌ Échec de la sauvegarde automatique :', e\.message\);/, "le log existant doit rester (logs Render toujours utiles)");
+test("la sauvegarde quotidienne envoie une alerte CallMeBot en cas d'échec, en plus du log console existant — partagé par le minuteur 6h UTC ET le rattrapage au réveil (25/09)", () => {
+  const debut = serverSrc.indexOf('async function executerSauvegardeQuotidienne');
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf("cron.schedule('0 6 * * *'", debut));
+  assert.match(bloc, /console\.error\(`❌ Échec de la sauvegarde automatique \(\$\{origine\}\) :`, e\.message\);/, "le log existant doit rester (logs Render toujours utiles)");
   assert.match(bloc, /await envoyerCallMeBot\(`⚠️ CHF : la sauvegarde automatique a échoué/);
 });
 
@@ -1069,8 +1070,9 @@ test("Sauvegarde automatique : une table illisible ne fait plus échouer la sauv
   assert.doesNotMatch(bloc, /if \(error\) throw new Error\(`Lecture de/, "l'ancien comportement tout-ou-rien ne doit plus exister : une seule table en défaut privait de TOUTE sauvegarde");
   assert.match(bloc, /contenu\._tables_en_echec = tablesEnEchec/, "le trou doit être inscrit dans le fichier de sauvegarde lui-même");
   assert.match(bloc, /throw new Error\(`Aucune table n'a pu être lue/, "si RIEN n'est lisible, il faut quand même échouer franchement");
-  const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'"), serverSrc.indexOf('// Déclenchement manuel'));
-  assert.match(blocCron, /resultat\.tablesEnEchec && resultat\.tablesEnEchec\.length > 0/, "une sauvegarde partielle doit déclencher une alerte WhatsApp, sinon le trou reste invisible des mois");
+  const debutFonction = serverSrc.indexOf('async function executerSauvegardeQuotidienne');
+  const blocFonction = serverSrc.slice(debutFonction, serverSrc.indexOf("cron.schedule('0 6 * * *'", debutFonction));
+  assert.match(blocFonction, /resultat\.tablesEnEchec && resultat\.tablesEnEchec\.length > 0/, "une sauvegarde partielle doit déclencher une alerte WhatsApp, sinon le trou reste invisible des mois");
 });
 
 // ============================================================================================
@@ -1915,11 +1917,12 @@ test("La notification email qui suit un envoi B2 réussi est SANS pièce jointe 
 });
 
 test("La copie hors Supabase (B2) de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
-  const blocCron = serverSrc.slice(serverSrc.indexOf("cron.schedule('0 6 * * *'", serverSrc.indexOf('async function sauvegarderVersStorage')), serverSrc.indexOf("// ============================================================\n// CORBEILLE CATALOGUE"));
+  const debutFonction = serverSrc.indexOf('async function executerSauvegardeQuotidienne', serverSrc.indexOf('async function sauvegarderVersStorage'));
+  const blocCron = serverSrc.slice(debutFonction, serverSrc.indexOf("cron.schedule('0 6 * * *'", debutFonction));
   assert.match(blocCron, /await envoyerCopieHorsSupabase\(resultat\.fichier, resultat\.contenuBuffer\);/);
   const iEmailCall = blocCron.indexOf('envoyerCopieHorsSupabase(');
   const iCatchEmail = blocCron.indexOf('} catch (e) {', iEmailCall);
-  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error('❌ Échec de la sauvegarde automatique"), "le catch de la copie hors Supabase doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
+  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error(`❌ Échec de la sauvegarde automatique"), "le catch de la copie hors Supabase doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
   assert.match(blocCron, /sauvegarde Supabase faite, mais la copie par email a échoué/, "le message d'alerte doit distinguer clairement les 2 échecs possibles");
 });
 
@@ -2122,4 +2125,70 @@ test("TOUTE route de création empruntée par la file d'attente hors ligne prot�
   }
   assert.deepStrictEqual(sansProtection, [],
     `Routes de création sans protection anti-rejeu : ${sansProtection.join(', ')} — un rejeu de la file d'attente hors ligne y créerait un doublon.`);
+});
+
+// ============================================================================================
+// Rattrapage de sauvegarde au réveil du serveur (25/09) — le service tourne sur le plan gratuit
+// de Render, qui éteint le processus après ~15 min sans visite. Le minuteur cron.schedule('0 6
+// * * *') vit DANS ce processus : constaté en listant le bucket le 25/09, UNE SEULE sauvegarde
+// automatique avait réellement été faite par le minuteur depuis le 2 septembre — 6h UTC est
+// justement l'heure où personne n'utilise l'app, donc où le serveur est garanti éteint.
+//
+// Ces tests EXÉCUTENT réellement sauvegardeDuJourExisteDeja() extrait de server.js, avec un faux
+// Storage en mémoire (même approche que chargerLecteursEpisodes plus haut) — pas une relecture.
+// ============================================================================================
+
+function chargerSauvegardeDuJourExisteDeja(fichiersBucket) {
+  const debutFuseau = serverSrc.indexOf("const FUSEAU_HAITI = 'America/Port-au-Prime'".replace('Prime', 'Prince'));
+  const declarationFuseau = serverSrc.slice(debutFuseau, serverSrc.indexOf('\n', debutFuseau));
+  const debutBucket = serverSrc.indexOf("const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';");
+  const declarationBucket = serverSrc.slice(debutBucket, serverSrc.indexOf('\n', debutBucket));
+  const debut = serverSrc.indexOf('async function sauvegardeDuJourExisteDeja() {');
+  const fin = serverSrc.indexOf('\n}', debut) + 2;
+  assert.ok(debutFuseau !== -1 && debutBucket !== -1 && debut !== -1, "sauvegardeDuJourExisteDeja introuvable dans server.js");
+  const code = `${declarationFuseau}\n${declarationBucket}\n${serverSrc.slice(debut, fin)}`;
+  const supabase = { storage: { from: () => ({ list: async () => ({ data: fichiersBucket, error: null }) }) } };
+  return new Function('supabase', `${code}\nreturn sauvegardeDuJourExisteDeja;`)(supabase);
+}
+
+test("sauvegardeDuJourExisteDeja : true seulement si le nom de fichier EXACT du jour (heure d'Haïti) est déjà dans le bucket", async () => {
+  const aujourdhuiHaiti = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Port-au-Prince' });
+  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([])(), false, "bucket vide -> pas de sauvegarde aujourd'hui");
+  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([{ name: 'backup-2026-09-15.json' }])(), false, "une VIEILLE sauvegarde ne compte pas pour aujourd'hui");
+  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([{ name: `backup-${aujourdhuiHaiti}.json` }])(), true, "le fichier du jour, au format exact produit par sauvegarderVersStorage, doit être reconnu");
+});
+
+test("sauvegardeDuJourExisteDeja propage l'erreur si le bucket est injoignable — c'est rattraperSauvegardeAuDemarrage qui doit l'avaler, pas cette fonction en silence", async () => {
+  const supabase = { storage: { from: () => ({ list: async () => ({ data: null, error: { message: 'bucket introuvable' } }) }) } };
+  const debut = serverSrc.indexOf('async function sauvegardeDuJourExisteDeja() {');
+  const fin = serverSrc.indexOf('\n}', debut) + 2;
+  const debutFuseau = serverSrc.indexOf("const FUSEAU_HAITI = 'America/Port-au-Prince';");
+  const declarationFuseau = serverSrc.slice(debutFuseau, serverSrc.indexOf('\n', debutFuseau));
+  const debutBucket = serverSrc.indexOf("const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';");
+  const declarationBucket = serverSrc.slice(debutBucket, serverSrc.indexOf('\n', debutBucket));
+  const fn = new Function('supabase', `${declarationFuseau}\n${declarationBucket}\n${serverSrc.slice(debut, fin)}\nreturn sauvegardeDuJourExisteDeja;`)(supabase);
+  await assert.rejects(fn(), /bucket introuvable/);
+});
+
+test("Le rattrapage au démarrage est câblé : décalé de 30s (le serveur répond d'abord aux requêtes qui l'ont réveillé), et unref() pour ne jamais empêcher un arrêt propre", () => {
+  assert.match(serverSrc, /const DELAI_RATTRAPAGE_DEMARRAGE_MS = 30000;/);
+  assert.match(serverSrc, /setTimeout\(rattraperSauvegardeAuDemarrage, DELAI_RATTRAPAGE_DEMARRAGE_MS\)\.unref\(\);/);
+});
+
+test("rattraperSauvegardeAuDemarrage n'appelle la sauvegarde QUE si aucune n'existe déjà pour aujourd'hui, et n'échoue jamais (le prochain réveil réessaiera)", () => {
+  const debut = serverSrc.indexOf('async function rattraperSauvegardeAuDemarrage() {');
+  const fin = serverSrc.indexOf('\n}', debut) + 2;
+  assert.ok(debut !== -1, "rattraperSauvegardeAuDemarrage introuvable");
+  const bloc = serverSrc.slice(debut, fin);
+  assert.match(bloc, /if \(await sauvegardeDuJourExisteDeja\(\)\) \{/, "doit vérifier AVANT de sauvegarder, pour ne jamais dupliquer le travail du minuteur de 6h");
+  assert.match(bloc, /await executerSauvegardeQuotidienne\('rattrapage au réveil'\);/, "doit réutiliser EXACTEMENT le même code que le minuteur — pas une 2e implémentation à maintenir");
+  assert.match(bloc, /\} catch \(e\) \{/, "une erreur (bucket injoignable au démarrage) ne doit jamais remonter et empêcher le serveur de démarrer");
+});
+
+test("Le minuteur de 6h UTC et le rattrapage au réveil appellent la MÊME fonction executerSauvegardeQuotidienne — une seule logique de sauvegarde à maintenir, pas deux qui peuvent diverger", () => {
+  assert.match(serverSrc, /cron\.schedule\('0 6 \* \* \*', \(\) => executerSauvegardeQuotidienne\('minuteur 6h UTC'\)\);/);
+  const iFonction = serverSrc.indexOf('async function executerSauvegardeQuotidienne');
+  const iCron = serverSrc.indexOf("cron.schedule('0 6 * * *'", iFonction);
+  const iRattrapage = serverSrc.indexOf('async function rattraperSauvegardeAuDemarrage');
+  assert.ok(iFonction !== -1 && iFonction < iCron && iCron < iRattrapage, "la fonction partagée doit être déclarée avant ses 2 appelants");
 });

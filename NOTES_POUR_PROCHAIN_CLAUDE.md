@@ -1,3 +1,45 @@
+# ✅ RATTRAPAGE DE SAUVEGARDE AU RÉVEIL DU SERVEUR (25/09)
+
+**Constat qui a déclenché ce chantier** : en listant le bucket `sauvegardes-automatiques` le
+25/09, une seule sauvegarde automatique réelle depuis le 2 septembre — toutes les autres dataient
+d'un clic manuel d'Esdras. Le minuteur `cron.schedule('0 6 * * *')` existait bien, mais :
+
+- le service tourne sur le **plan gratuit** de Render, qui éteint le processus après ~15 min sans
+  visite ;
+- le minuteur vit *dans* ce processus — quand il s'éteint, le minuteur meurt avec lui ;
+- 6h UTC, c'est 1h-2h du matin en Haïti : précisément l'heure où personne n'utilise l'app, donc où
+  le serveur est **garanti éteint**.
+
+**Correctif** : la logique de sauvegarde (autrefois écrite directement dans le corps du
+`cron.schedule`) est extraite dans `executerSauvegardeQuotidienne(origine)` — le paramètre `origine`
+sert uniquement à distinguer les deux appelants dans les logs Render. Les deux appelants :
+
+1. `cron.schedule('0 6 * * *', () => executerSauvegardeQuotidienne('minuteur 6h UTC'))` — inchangé
+   dans son intention, mais ne se déclenche en pratique que si le serveur est déjà réveillé à 6h
+   UTC (un déploiement récent, un utilisateur insomniaque…).
+2. **Nouveau** : `rattraperSauvegardeAuDemarrage()`, lancé 30s après le démarrage du processus
+   (`setTimeout(..., 30000).unref()` — décalé pour répondre d'abord aux requêtes qui ont réveillé
+   le serveur, `unref()` pour ne jamais empêcher un arrêt propre). Vérifie via
+   `sauvegardeDuJourExisteDeja()` (compare le nom de fichier attendu — `backup-YYYY-MM-DD.json`,
+   heure d'Haïti — à la liste du bucket) si une sauvegarde a déjà été faite aujourd'hui ; sinon,
+   appelle **exactement la même fonction** que le minuteur.
+
+Résultat pratique : une sauvegarde par jour d'utilisation réelle de l'app, gratuitement, sans
+dépendre d'un service externe pour réveiller le serveur. Ce n'est **pas** un vrai cron fiable — un
+jour sans aucune visite n'a pas de sauvegarde — mais un jour sans visite est aussi un jour sans
+nouvelle donnée à protéger.
+
+**Si un jour le plan passe en payant (Starter, ~7$/mois)** : le service ne s'éteint plus, le
+minuteur de 6h redevient fiable à lui seul, et ce rattrapage devient une redondance inoffensive —
+pas la peine de le retirer, `sauvegardeDuJourExisteDeja()` empêchera juste une double sauvegarde
+le jour où les deux se chevauchent.
+
+Tests : 5 ajoutés (175 au total, 0 échec), dont 2 qui EXÉCUTENT réellement
+`sauvegardeDuJourExisteDeja` extrait du fichier (même approche que `chargerLecteursEpisodes`) avec
+un faux Storage en mémoire — pas une relecture du code.
+
+---
+
 # 📍 OÙ SONT LES NOTES
 
 Le journal de bord complet des sessions Claude vit dans **l'autre dépôt** :
