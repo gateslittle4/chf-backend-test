@@ -1,3 +1,15 @@
+# 🔓 POSTE DE CAISSE OUVERT HORS LIGNE : REJEU IDEMPOTENT (28/09)
+
+`POST /api/catalog/:type/item` : si `item.id` existe déjà dans ce catalogue → 200
+`{ success, item, dejaEnregistre: true }`, sans appeler `ajouter_article_catalogue` (qui ajoute
+sans regarder). Motif : l'app met maintenant en file l'ouverture d'un poste de caisse faite hors
+ligne (voir la note du même jour dans chf-app2) ; une file peut rejouer une opération (réponse
+perdue, synchro interrompue) → postes en double. 200 et non 409 : un 4xx classerait le rejeu en
+"échec définitif" côté app. Test qui exécute la vraie route contre un faux Supabase (échoue sans
+le correctif). 188/0.
+
+---
+
 # 🧪 AUDIT HORS LIGNE AVANT LE 1er OCTOBRE (28/09, 2e session)
 
 Détail dans les notes de chf-app2 (entrée du même nom). Côté serveur :
