@@ -1338,12 +1338,19 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
 });
 
 // Solde du dossier = somme des soldes_restants de ses épisodes (dernier paiement non annulé)
+// Audit du 28/09 avant la mise en production : donnée financière servie SANS contrôle, alors que
+// /historique et /solde-depot exigent 'fiche_patient_voir_finances' (même logique que l'audit du
+// 31/08 ci-dessus) — aligné. Et les épisodes/paiements mis à la corbeille (supprime_le) étaient
+// comptés dans le solde : exclus, comme partout ailleurs depuis le 25/09.
 app.get('/api/dossiers/:id/solde', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir_finances'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_voir_finances' requise." });
+  }
   const dossierId = req.params.id;
 
   // Récupérer tous les épisodes du dossier
   const { data: episodes, error: errEpisodes } = await supabase
-    .from('episodes').select('id').eq('dossier_id', dossierId);
+    .from('episodes').select('id').eq('dossier_id', dossierId).is('supprime_le', null);
   if (errEpisodes) return res.status(500).json({ error: errEpisodes.message });
 
   if (!episodes || episodes.length === 0) {
@@ -1359,6 +1366,7 @@ app.get('/api/dossiers/:id/solde', async (req, res) => {
       .from('paiements')
       .select('solde_restant')
       .eq('episode_id', ep.id)
+      .is('supprime_le', null)
       .or('annule.eq.false,annule.is.null')
       .order('date_paiement', { ascending: false })
       .limit(1)

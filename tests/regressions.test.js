@@ -2192,3 +2192,13 @@ test("Le minuteur de 6h UTC et le rattrapage au réveil appellent la MÊME fonct
   const iRattrapage = serverSrc.indexOf('async function rattraperSauvegardeAuDemarrage');
   assert.ok(iFonction !== -1 && iFonction < iCron && iCron < iRattrapage, "la fonction partagée doit être déclarée avant ses 2 appelants");
 });
+
+// Audit du 28/09 avant la mise en production : GET /api/dossiers/:id/solde servait une donnée
+// financière sans contrôle de permission (contrairement à /historique et /solde-depot), et comptait
+// les épisodes/paiements mis à la corbeille.
+test("GET /api/dossiers/:id/solde : exige 'fiche_patient_voir_finances' et ignore la corbeille", () => {
+  const debut = serverSrc.indexOf("app.get('/api/dossiers/:id/solde'");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\napp.', debut + 10));
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
+  assert.strictEqual((bloc.match(/\.is\('supprime_le', null\)/g) || []).length, 2, "épisodes ET paiements doivent exclure la corbeille");
+});
