@@ -1,3 +1,16 @@
+# 🧪 AUDIT HORS LIGNE AVANT LE 1er OCTOBRE (28/09, 2e session)
+
+Détail dans les notes de chf-app2 (entrée du même nom). Côté serveur :
+- Fusion de `claude/corbeille-sauvegarde-avant-prod` (25/09), jamais arrivée dans main : sauvegarde
+  paginée (tronquée à 1000 lignes avant !), corbeille exclue des lectures, restauration sans URL géante.
+- `GET /api/dossiers/liste-hors-ligne` : liste réduite des patients, recopiée par chaque appareil
+  pour la recherche hors ligne. Déclarée AVANT `/api/dossiers/:id`.
+- `GET /api/dossiers/:id/solde` : permission `fiche_patient_voir_finances` exigée, corbeille exclue.
+
+Tests : 187, 0 échec.
+
+---
+
 # 📌 POINT DE REPRISE — état au 28/09
 
 Tout est commité, fusionné et en ligne. **Lire d'abord le point de reprise en tête des notes de
