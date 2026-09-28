@@ -2202,3 +2202,226 @@ test("GET /api/dossiers/:id/solde : exige 'fiche_patient_voir_finances' et ignor
   assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
   assert.strictEqual((bloc.match(/\.is\('supprime_le', null\)/g) || []).length, 2, "épisodes ET paiements doivent exclure la corbeille");
 });
+
+// ============================================================================================
+// Audit avant mise en production (25/09) — 2 familles de bugs trouvées en relisant server.js en
+// entier, juste avant le lancement du 1er octobre.
+// ============================================================================================
+
+// 1. La sauvegarde automatique lisait chaque table d'un seul select('*') : Supabase plafonne une
+// réponse à 1000 lignes SANS erreur. Au-delà (audit_log en premier), la sauvegarde gardait une
+// partie de la table en silence. Ce test EXÉCUTE sauvegarderVersStorage() extrait de server.js
+// contre une fausse base qui applique ce plafond, exactement comme PostgREST.
+function chargerSauvegarderVersStorage(tables) {
+  const extraireLigne = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n', i));
+  };
+  const extraireBloc = (debutTexte, finTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf(finTexte, i) + finTexte.length);
+  };
+  const code = [
+    extraireLigne("const FUSEAU_HAITI = 'America/Port-au-Prince';"),
+    extraireLigne('const TAILLE_PAGE_LECTURE = '),
+    extraireBloc('async function lireToutesLesPages(', '\n}'),
+    extraireBloc('const TABLES_A_SAUVEGARDER = [', '];'),
+    extraireLigne('const CLE_PRIMAIRE_SAUVEGARDE = '),
+    extraireLigne("const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';"),
+    extraireBloc('async function sauvegarderVersStorage() {', '\n}'),
+  ].join('\n');
+
+  const PLAFOND_POSTGREST = 1000;
+  const colonnesDeTri = {};
+  let fichierEnvoye = null;
+  const supabase = {
+    from: (table) => {
+      const lignes = tables[table] || [];
+      const requete = {
+        select: () => requete,
+        order: (colonne) => { (colonnesDeTri[table] = colonnesDeTri[table] || []).push(colonne); return requete; },
+        range: async (debut, fin) => ({ data: lignes.slice(debut, Math.min(fin + 1, debut + PLAFOND_POSTGREST)), error: null }),
+        // Une requête attendue telle quelle (sans .range) : PostgREST renvoie au plus 1000 lignes.
+        then: (resoudre) => resoudre({ data: lignes.slice(0, PLAFOND_POSTGREST), error: null }),
+      };
+      return requete;
+    },
+    storage: {
+      listBuckets: async () => ({ data: [{ name: 'sauvegardes-automatiques' }], error: null }),
+      from: () => ({
+        upload: async (_nom, buffer) => { fichierEnvoye = JSON.parse(buffer.toString()); return { error: null }; },
+        list: async () => ({ data: [], error: null }),
+        remove: async () => ({ error: null }),
+      }),
+    },
+  };
+  const sauvegarderVersStorage = new Function('supabase', `${code}\nreturn sauvegarderVersStorage;`)(supabase);
+  return { sauvegarderVersStorage, colonnesDeTri, fichierEnvoye: () => fichierEnvoye };
+}
+
+test("Sauvegarde automatique : une table de PLUS de 1000 lignes est sauvegardée EN ENTIER (le plafond Supabase la tronquait en silence)", async () => {
+  const auditLog = Array.from({ length: 2500 }, (_, i) => ({ id: `a-${String(i).padStart(5, '0')}` }));
+  const { sauvegarderVersStorage, fichierEnvoye } = chargerSauvegarderVersStorage({ audit_log: auditLog, paiements: [{ id: 'p1' }] });
+  const resultat = await sauvegarderVersStorage();
+  assert.strictEqual(fichierEnvoye().audit_log.length, 2500, "les 2500 lignes d'audit_log doivent être dans le fichier, pas seulement les 1000 premières");
+  assert.strictEqual(resultat.nombreLignes.audit_log, 2500);
+  assert.strictEqual(new Set(fichierEnvoye().audit_log.map(l => l.id)).size, 2500, "aucune ligne dupliquée ni sautée d'une page à l'autre");
+});
+
+test("Sauvegarde automatique : chaque table est lue avec un tri TOTAL sur sa vraie clé primaire (obligatoire pour paginer sans doublon ni trou)", async () => {
+  const { sauvegarderVersStorage, colonnesDeTri } = chargerSauvegarderVersStorage({});
+  await sauvegarderVersStorage();
+  assert.deepStrictEqual(colonnesDeTri.catalog, ['type'], "catalog n'a pas de colonne id : sa clé primaire est type");
+  assert.deepStrictEqual(colonnesDeTri.invitations, ['token']);
+  assert.deepStrictEqual(colonnesDeTri.decrements_stock_appliques, ['local_id']);
+  assert.deepStrictEqual(colonnesDeTri.paiements, ['id']);
+  // Même clé que la restauration : les deux doivent rester d'accord sur l'identité d'une ligne.
+  const debutOrdre = serverSrc.indexOf('const ORDRE_RESTAURATION = [');
+  const ordreRestauration = serverSrc.slice(debutOrdre, serverSrc.indexOf('];', debutOrdre));
+  for (const [table, cle] of [['catalog', 'type'], ['invitations', 'token'], ['decrements_stock_appliques', 'local_id']]) {
+    assert.ok(ordreRestauration.includes(`['${table}', '${cle}']`), `ORDRE_RESTAURATION doit utiliser la même clé pour ${table}`);
+  }
+});
+
+// 2. Corbeille 30 jours (12/09) : supprimer une fiche ou un dossier ne supprime plus ses lignes,
+// il pose supprime_le. Plusieurs lectures ne regardaient pas cette marque :
+//   - le solde de crédit d'un épisode (dernier paiement non annulé) lisait encore le paiement d'une
+//     fiche à crédit supprimée : la dette effacée restait due ET se reportait sur chaque nouveau
+//     paiement (POST /api/paiements) ;
+//   - la recherche d'épisodes ouverts comptait un épisode supprimé : une hospitalisation créée par
+//     erreur puis supprimée bloquait pour 30 jours toute nouvelle hospitalisation du patient
+//     (BLOCAGE_HOSPITALISATION, sans contournement possible).
+test("Corbeille : toute lecture de paiements « non annulés » (soldes, dépôts, transferts partenaire) ignore aussi les paiements mis à la corbeille", () => {
+  const lectures = [...serverSrc.matchAll(/\.or\('annule\.eq\.false,annule\.is\.null'\)[^;]*;/g)].map(m => m[0]);
+  assert.ok(lectures.length >= 6, `attendu au moins 6 lectures de paiements non annulés, trouvé ${lectures.length}`);
+  for (const lecture of lectures) {
+    assert.match(lecture, /\.is\('supprime_le', null\)/, `lecture de paiements sans filtre corbeille : ${lecture.slice(0, 120)}`);
+  }
+});
+
+test("Corbeille : le solde de crédit d'un épisode (lireSoldeEpisode, source du report de dette) ignore les paiements mis à la corbeille", () => {
+  const debut = serverSrc.indexOf('const lireSoldeEpisode = async (episodeId) => {');
+  assert.ok(debut !== -1, 'lireSoldeEpisode introuvable');
+  assert.match(serverSrc.slice(debut, serverSrc.indexOf('};', debut)), /\.is\('supprime_le', null\)/);
+});
+
+test("Corbeille : un épisode mis à la corbeille ne compte jamais comme « ouvert » (anti-doublon, blocage hospitalisation, lits occupés)", () => {
+  const lectures = [...serverSrc.matchAll(/\.from\('episodes'\)\.select\([^;]*\.eq\('statut', 'ouvert'\)[^;]*;/g)].map(m => m[0]);
+  assert.ok(lectures.length >= 3, `attendu au moins 3 recherches d'épisodes ouverts, trouvé ${lectures.length}`);
+  for (const lecture of lectures) {
+    assert.match(lecture, /\.is\('supprime_le', null\)/, `recherche d'épisodes ouverts sans filtre corbeille : ${lecture.slice(0, 120)}`);
+  }
+});
+
+test("Corbeille : l'historique de la Fiche Patient, le solde du dossier et le portail patient n'affichent jamais un épisode ou une fiche mis à la corbeille", () => {
+  const blocRoute = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `route introuvable : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n});', i));
+  };
+  const historique = blocRoute("app.get('/api/dossiers/:id/historique'");
+  assert.match(historique, /\.from\('episodes'\)\.select\('\*'\)\.eq\('dossier_id', req\.params\.id\)\.is\('supprime_le', null\)/);
+  assert.match(historique, /\.from\('fiches'\)[^;]*\.is\('supprime_le', null\)/);
+  const solde = blocRoute("app.get('/api/dossiers/:id/solde'");
+  assert.match(solde, /\.from\('episodes'\)\.select\('id'\)\.eq\('dossier_id', dossierId\)\.is\('supprime_le', null\)/);
+  const portail = blocRoute("app.post('/portail-patient/recherche'");
+  assert.match(portail, /\.from\('episodes'\)[^;]*\.is\('supprime_le', null\)/);
+  assert.match(portail, /\.from\('fiches'\)[^;]*\.is\('supprime_le', null\)/);
+});
+
+// 3. Restauration : les ids déjà en base étaient cherchés par `.in(colonneId, lot)` avec des lots de
+// 500 — tous DANS l'URL (~19 ko pour 500 UUID), au-delà de ce qu'accepte PostgREST. Dès qu'une table
+// dépassait quelques centaines de lignes, sa restauration échouait en bloc. Ce test EXÉCUTE
+// restaurerDepuisSauvegarde() extrait de server.js contre une fausse base qui, comme la vraie,
+// refuse une URL trop longue et plafonne ses réponses à 1000 lignes.
+function chargerRestaurerDepuisSauvegarde(base) {
+  const extraireLigne = (debutTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf('\n', i));
+  };
+  const extraireBloc = (debutTexte, finTexte) => {
+    const i = serverSrc.indexOf(debutTexte);
+    assert.ok(i !== -1, `introuvable dans server.js : ${debutTexte}`);
+    return serverSrc.slice(i, serverSrc.indexOf(finTexte, i) + finTexte.length);
+  };
+  const code = [
+    extraireLigne('const TAILLE_PAGE_LECTURE = '),
+    extraireBloc('async function lireToutesLesPages(', '\n}'),
+    extraireBloc('const ORDRE_RESTAURATION = [', '];'),
+    extraireLigne('const TAILLE_LOT_RESTAURATION = '),
+    extraireBloc('function decouperEnLots(', '\n}'),
+    extraireBloc('async function restaurerDepuisSauvegarde(contenu) {', '\n}'),
+  ].join('\n');
+
+  const LONGUEUR_MAX_URL = 8000;
+  const PLAFOND_POSTGREST = 1000;
+  const supabase = {
+    from: (table) => {
+      const lignes = (base[table] = base[table] || []);
+      let colonne = null;
+      let filtreIn = null;
+      const reponse = () => {
+        if (filtreIn && filtreIn.join(',').length > LONGUEUR_MAX_URL) {
+          return { data: null, error: { message: '414 URI Too Long' } };
+        }
+        const retenues = filtreIn ? lignes.filter(l => filtreIn.includes(l[colonne])) : lignes;
+        return { data: retenues.map(l => ({ [colonne]: l[colonne] })), error: null };
+      };
+      const requete = {
+        select: (c) => { colonne = c; return requete; },
+        in: (c, valeurs) => { colonne = c; filtreIn = valeurs; return requete; },
+        order: () => requete,
+        range: async (debut, fin) => {
+          const r = reponse();
+          return r.error ? r : { data: r.data.slice(debut, Math.min(fin + 1, debut + PLAFOND_POSTGREST)), error: null };
+        },
+        then: (resoudre) => { const r = reponse(); resoudre(r.error ? r : { data: r.data.slice(0, PLAFOND_POSTGREST), error: null }); },
+        insert: (nouvelles) => ({
+          select: async (c) => { lignes.push(...nouvelles); return { data: nouvelles.map(l => ({ [c]: l[c] })), error: null }; },
+        }),
+      };
+      return requete;
+    },
+  };
+  return new Function('supabase', `${code}\nreturn restaurerDepuisSauvegarde;`)(supabase);
+}
+
+test("Restauration : une table de plusieurs milliers de lignes se restaure (les ids passaient dans l'URL et dépassaient sa longueur maximale)", async () => {
+  const uuid = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+  const sauvegarde = Array.from({ length: 1500 }, (_, i) => ({ id: uuid(i), montant: i }));
+  // 700 lignes encore en base (dont une partie au-delà du plafond de 1000 lignes par réponse une
+  // fois qu'on y ajoute des lignes plus récentes que la sauvegarde) : seules les 800 autres manquent.
+  const base = { paiements: [...sauvegarde.slice(0, 700), ...Array.from({ length: 900 }, (_, i) => ({ id: uuid(100000 + i), montant: 0 }))] };
+  const restaurerDepuisSauvegarde = chargerRestaurerDepuisSauvegarde(base);
+  const rapport = await restaurerDepuisSauvegarde({ paiements: sauvegarde });
+  const ligne = rapport.find(r => r.table === 'paiements');
+  assert.deepStrictEqual(ligne.lignesEnEchec, [], `aucune erreur attendue : ${JSON.stringify(ligne.lignesEnEchec).slice(0, 200)}`);
+  assert.strictEqual(ligne.dejaPresentes, 700, "les 700 lignes encore en base doivent être reconnues comme présentes");
+  assert.strictEqual(ligne.inserees, 800, "seules les 800 lignes manquantes doivent être réinsérées");
+  assert.strictEqual(base.paiements.length, 1600 + 800, "aucune ligne existante ne doit être dupliquée");
+});
+
+test("Restauration : plus aucun `.in()` sur les ids de la sauvegarde — leur nombre n'est pas borné, l'URL finirait toujours par être trop longue", () => {
+  const debut = serverSrc.indexOf('async function restaurerDepuisSauvegarde(contenu) {');
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', debut));
+  const codeSansCommentaires = bloc.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(codeSansCommentaires, /\.in\(/);
+  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\(table\)\.select\(colonneId\)\.order\(colonneId\)\)/);
+});
+
+test("GET /api/episodes/corbeille : épisodes lus page par page et noms des dossiers lus par lots (jamais tous les ids dans une seule URL)", () => {
+  const debut = serverSrc.indexOf("app.get('/api/episodes/corbeille'");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n});', debut));
+  assert.match(bloc, /lireToutesLesPages\(/);
+  assert.match(bloc, /lireParLotsDIds\(dossierIds,/);
+  assert.doesNotMatch(bloc, /\.in\('id', dossierIds\)/);
+});
+
+test("GET /api/requisitions est paginée (tri total) — au-delà de 1000 réquisitions, les plus anciennes disparaissaient en silence du rapport", () => {
+  const debut = serverSrc.indexOf("app.get('/api/requisitions'");
+  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n});', debut));
+  assert.match(bloc, /lireToutesLesPages\(\s*\(\) => supabase\.from\('requisitions'\)\.select\('\*'\)\.order\('date_requisition', \{ ascending: false \}\)\.order\('id'\)\)/);
+});
