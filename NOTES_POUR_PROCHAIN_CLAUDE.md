@@ -1,3 +1,20 @@
+# 📌 POINT DE REPRISE — état au 28/09
+
+Tout est commité, fusionné et en ligne. **Lire d'abord le point de reprise en tête des notes de
+`chf-app2`** : décisions en attente d'Esdras, et la contrainte n°1 du projet depuis le 28/09 —
+l'internet de l'hôpital tombe ~90% de la journée, tout doit fonctionner hors ligne d'abord.
+
+Côté serveur, ce que ça implique : toute nouvelle route de CRÉATION doit accepter un `local_id` et
+dédoublonner dessus (un test recense toutes les routes et échoue sinon) — la file d'attente hors
+ligne du navigateur rejoue les opérations au retour du réseau, parfois plusieurs fois. Et toute
+lecture (GET) est désormais copiée côté navigateur et resservie hors ligne : une route qui renvoie
+une donnée servant à DÉCIDER (anti-doublon, contrôle d'accès) doit être signalée côté app avec
+`sansCopieLocale` (voir `api/supabase.js`, `request()`).
+
+Tests : `npm test` → 175, 0 échec.
+
+---
+
 # ✅ RATTRAPAGE DE SAUVEGARDE AU RÉVEIL DU SERVEUR (25/09)
 
 **Constat qui a déclenché ce chantier** : en listant le bucket `sauvegardes-automatiques` le
