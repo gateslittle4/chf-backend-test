@@ -1828,6 +1828,17 @@ app.post('/api/catalog/:type/item', async (req, res) => {
   }
   const { item } = req.body;
   if (!item || typeof item !== 'object') return res.status(400).json({ error: 'item (objet) requis.' });
+  // Rejeu idempotent (28/09) : un poste de caisse ouvert HORS LIGNE part dans la file d'attente de
+  // l'app avec l'id de la session, et la file peut le renvoyer plus d'une fois (réponse perdue sur
+  // une connexion instable, synchronisation interrompue puis reprise). ajouter_article_catalogue
+  // ajoute sans regarder : chaque rejeu créait un poste de plus, en double. Un id déjà présent
+  // veut dire "déjà enregistré" — on renvoie l'article existant, sans rien écrire.
+  if (item.id !== undefined && item.id !== null && item.id !== '') {
+    const { data: ligne, error: erreurLecture } = await supabase.from('catalog').select('items').eq('type', type).maybeSingle();
+    if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+    const existant = (ligne?.items || []).find(a => a && a.id === item.id);
+    if (existant) return res.status(200).json({ success: true, item: existant, dejaEnregistre: true });
+  }
   const { data, error } = await supabase.rpc('ajouter_article_catalogue', { p_type: type, p_item: item });
   if (error) {
     if (error.code === '42883') {

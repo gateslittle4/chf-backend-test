@@ -2436,3 +2436,53 @@ test("GET /api/dossiers/liste-hors-ligne : paginée, colonnes réduites, déclar
   assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\('dossiers'\)\s*\.select\('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe'\)\.order\('id'\)\)/);
   assert.doesNotMatch(bloc, /adresse|select\('\*'\)/, "rien de plus que ce qu'il faut pour retrouver quelqu'un");
 });
+
+// Poste de caisse ouvert HORS LIGNE (28/09) : la file d'attente de l'app peut renvoyer la même
+// ouverture plusieurs fois (réponse perdue, synchronisation interrompue). Exécute la VRAIE route
+// (extraite de server.js) contre un faux Supabase : le rejeu du même id ne doit rien écrire.
+function routeAjoutArticle(catalogues) {
+  const debut = serverSrc.indexOf("app.post('/api/catalog/:type/item', async (req, res) => {");
+  const fin = serverSrc.indexOf("app.patch('/api/catalog/:type/champs'");
+  assert.ok(debut !== -1 && fin > debut, "route POST /api/catalog/:type/item introuvable");
+  const appelsRpc = [];
+  const supabase = {
+    from: (table) => ({
+      select: () => ({
+        eq: (_col, type) => ({
+          maybeSingle: async () => ({ data: catalogues[type] ? { items: catalogues[type] } : null, error: null }),
+        }),
+      }),
+    }),
+    rpc: async (nom, params) => {
+      appelsRpc.push({ nom, params });
+      catalogues[params.p_type] = [...(catalogues[params.p_type] || []), params.p_item];
+      return { data: params.p_item, error: null };
+    },
+  };
+  let gestionnaire;
+  const app = { post: (_chemin, fn) => { gestionnaire = fn; } };
+  const aPermission = async () => true;
+  new Function('app', 'supabase', 'aPermission', serverSrc.slice(debut, fin))(app, supabase, aPermission);
+  const appeler = async (type, item) => {
+    const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
+    await gestionnaire({ params: { type }, body: { item }, user: { id: 'u1' } }, res);
+    return res;
+  };
+  return { appeler, appelsRpc };
+}
+
+test("POST /api/catalog/:type/item : le rejeu d'un poste ouvert hors ligne (même id) n'ouvre PAS un 2e poste", async () => {
+  const catalogues = { sessions_caisse: [] };
+  const { appeler, appelsRpc } = routeAjoutArticle(catalogues);
+  const session = { id: 'sess-1', uid: 'u1', poste: 'jour', statut: 'ouverte', ouvertureISO: '2026-09-28T12:00:00.000Z' };
+  const r1 = await appeler('sessions_caisse', session);
+  assert.strictEqual(r1.code, 201);
+  const r2 = await appeler('sessions_caisse', session);
+  assert.strictEqual(r2.code, 200, "un rejeu n'est pas une erreur (sinon la file le classerait en échec définitif)");
+  assert.strictEqual(r2.corps.dejaEnregistre, true);
+  assert.strictEqual(appelsRpc.length, 1, "la fonction d'ajout ne doit être appelée qu'une fois");
+  assert.strictEqual(catalogues.sessions_caisse.length, 1, "un seul poste enregistré");
+  const r3 = await appeler('sessions_caisse', { ...session, id: 'sess-2' });
+  assert.strictEqual(r3.code, 201, "un AUTRE id reste un nouvel ajout");
+  assert.strictEqual(catalogues.sessions_caisse.length, 2);
+});
