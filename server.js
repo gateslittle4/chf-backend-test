@@ -1102,6 +1102,26 @@ app.get('/api/dossiers/recherche', async (req, res) => {
   res.json(data);
 });
 
+// Liste des patients pour la recherche HORS LIGNE (audit du 28/09 avant la mise en production).
+// Esdras : "on doit pouvoir chercher des personnes récentes hors ligne". Jusqu'ici, un appareil
+// hors ligne ne retrouvait un patient que s'il avait déjà une VISITE chargée sur cet appareil (la
+// copie locale ne contenait que les épisodes) : un dossier créé le matin par l'infirmier sur SA
+// tablette restait introuvable à la caisse pendant une coupure. Chaque appareil connecté recopie
+// maintenant cette liste (voir chf-app2, api/apiDossierEpisode.js, rafraichirListeHorsLigne).
+// Colonnes réduites au strict nécessaire pour RETROUVER quelqu'un (pas d'adresse, rien de
+// financier). Même accès que /api/dossiers/recherche (toute personne connectée), qui renvoie déjà
+// davantage. Paginée : un select unique s'arrêterait en silence à 1000 lignes.
+// ⚠️ Déclarée AVANT /api/dossiers/:id, sinon Express y verrait un dossier nommé "liste-hors-ligne".
+app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
+  try {
+    const dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
+      .select('id, numero_dossier, nom, date_naissance, telephone, sexe').order('id'));
+    res.json(dossiers);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' requise." });

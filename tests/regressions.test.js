@@ -2425,3 +2425,14 @@ test("GET /api/requisitions est paginée (tri total) — au-delà de 1000 réqui
   const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n});', debut));
   assert.match(bloc, /lireToutesLesPages\(\s*\(\) => supabase\.from\('requisitions'\)\.select\('\*'\)\.order\('date_requisition', \{ ascending: false \}\)\.order\('id'\)\)/);
 });
+
+// Audit du 28/09 : recherche de patients hors ligne — un dossier sans visite n'était jamais copié sur
+// les appareils, donc introuvable pendant une coupure.
+test("GET /api/dossiers/liste-hors-ligne : paginée, colonnes réduites, déclarée AVANT /api/dossiers/:id", () => {
+  const iListe = serverSrc.indexOf("app.get('/api/dossiers/liste-hors-ligne'");
+  const iParId = serverSrc.indexOf("app.get('/api/dossiers/:id'");
+  assert.ok(iListe !== -1 && iListe < iParId, "Express doit la voir avant la route /:id, sinon 'liste-hors-ligne' serait pris pour un id");
+  const bloc = serverSrc.slice(iListe, serverSrc.indexOf('\n});', iListe));
+  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\('dossiers'\)\s*\.select\('id, numero_dossier, nom, date_naissance, telephone, sexe'\)\.order\('id'\)\)/);
+  assert.doesNotMatch(bloc, /adresse|select\('\*'\)/, "rien de plus que ce qu'il faut pour retrouver quelqu'un");
+});
