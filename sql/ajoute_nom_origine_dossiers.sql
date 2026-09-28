@@ -15,7 +15,9 @@
 -- création). server.js gère déjà le cas où cette colonne n'existe pas encore (repli sur l'ancien
 -- insert, error.code 42703) — coller ce script active la fonctionnalité, ne casse rien avant.
 --
--- À coller dans Supabase → SQL Editor, dans le VRAI projet CHF (pas un projet de test).
+-- ✅ APPLIQUÉ en production le 28/09 (migration Supabase "ajoute_nom_origine_dossiers"), avec
+-- SET search_path ci-dessous : la version d'origine de ce script l'omettait et aurait retiré cette
+-- protection, posée entre-temps sur la fonction en production.
 
 ALTER TABLE dossiers ADD COLUMN IF NOT EXISTS nom_origine text;
 
@@ -31,6 +33,7 @@ UPDATE dossiers SET nom_origine = nom WHERE nom_origine IS NULL;
 CREATE OR REPLACE FUNCTION rechercher_dossiers_flou(p_nom text)
 RETURNS SETOF dossiers
 LANGUAGE sql STABLE
+SET search_path TO 'public'
 AS $$
   SELECT * FROM dossiers
   WHERE similarity(nom, p_nom) > 0.25 OR nom ILIKE '%' || p_nom || '%'

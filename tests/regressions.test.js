@@ -2433,6 +2433,6 @@ test("GET /api/dossiers/liste-hors-ligne : paginée, colonnes réduites, déclar
   const iParId = serverSrc.indexOf("app.get('/api/dossiers/:id'");
   assert.ok(iListe !== -1 && iListe < iParId, "Express doit la voir avant la route /:id, sinon 'liste-hors-ligne' serait pris pour un id");
   const bloc = serverSrc.slice(iListe, serverSrc.indexOf('\n});', iListe));
-  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\('dossiers'\)\s*\.select\('id, numero_dossier, nom, date_naissance, telephone, sexe'\)\.order\('id'\)\)/);
+  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\('dossiers'\)\s*\.select\('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe'\)\.order\('id'\)\)/);
   assert.doesNotMatch(bloc, /adresse|select\('\*'\)/, "rien de plus que ce qu'il faut pour retrouver quelqu'un");
 });

@@ -1108,14 +1108,15 @@ app.get('/api/dossiers/recherche', async (req, res) => {
 // copie locale ne contenait que les épisodes) : un dossier créé le matin par l'infirmier sur SA
 // tablette restait introuvable à la caisse pendant une coupure. Chaque appareil connecté recopie
 // maintenant cette liste (voir chf-app2, api/apiDossierEpisode.js, rafraichirListeHorsLigne).
-// Colonnes réduites au strict nécessaire pour RETROUVER quelqu'un (pas d'adresse, rien de
+// nom_origine (28/09) : un bébé renommé au retour du néonat doit rester retrouvable hors ligne
+// par son nom de naissance. Colonnes réduites au strict nécessaire pour RETROUVER quelqu'un (pas d'adresse, rien de
 // financier). Même accès que /api/dossiers/recherche (toute personne connectée), qui renvoie déjà
 // davantage. Paginée : un select unique s'arrêterait en silence à 1000 lignes.
 // ⚠️ Déclarée AVANT /api/dossiers/:id, sinon Express y verrait un dossier nommé "liste-hors-ligne".
 app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
   try {
     const dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
-      .select('id, numero_dossier, nom, date_naissance, telephone, sexe').order('id'));
+      .select('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe').order('id'));
     res.json(dossiers);
   } catch (error) {
     res.status(500).json({ error: error.message });
