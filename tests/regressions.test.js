@@ -2561,3 +2561,15 @@ test("POST /api/fiches : le rejeu d'une fiche déjà enregistrée (file hors lig
   assert.strictEqual(rejeu.code, 200, 'rejeu idempotent');
   assert.strictEqual(episodes[0].date_suspension, '2026-09-29T15:00:00Z', 'toujours suspendu');
 });
+
+// 30/09 : GET /api/ids-locaux — correspondances id local -> vrai id (file bloquée côté app).
+test("GET /api/ids-locaux : protégée (sous /api), format local_id filtré, 100 max, dossiers/épisodes/fiches seulement", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.get('/api/ids-locaux'");
+  assert.ok(i > src.indexOf("app.use('/api', verifyToken)"), 'doit être déclarée après verifyToken');
+  const bloc = src.slice(i, i + 1200);
+  assert.match(bloc, /\/\^local-\\d\+-\[a-z0-9\]\+\$\/\.test\(x\)/);
+  assert.match(bloc, /\.slice\(0, 100\)/);
+  assert.match(bloc, /\['dossiers', 'episodes', 'fiches'\]/);
+  assert.match(bloc, /select\('id, local_id'\)/);
+});
