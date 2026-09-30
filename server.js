@@ -1122,6 +1122,29 @@ app.get('/api/dossiers/recherche', async (req, res) => {
 // financier). Même accès que /api/dossiers/recherche (toute personne connectée), qui renvoie déjà
 // davantage. Paginée : un select unique s'arrêterait en silence à 1000 lignes.
 // ⚠️ Déclarée AVANT /api/dossiers/:id, sinon Express y verrait un dossier nommé "liste-hors-ligne".
+// 30/09 (test réel) : "correspondances" id local -> vrai id. Une fiche et son paiement mis en file
+// PENDANT qu'une synchronisation envoyait déjà le dossier et l'épisode dont ils dépendent restaient
+// bloqués pour toujours sur l'appareil : la correspondance local -> réel ne vivait que dans la
+// mémoire de CE cycle. L'app la garde maintenant sur l'appareil, et pour les files déjà bloquées
+// (ou un appareil qui a perdu cette mémoire) elle la redemande ici. Ne renvoie que des identifiants,
+// jamais de contenu ; format local_id vérifié ; 100 au plus par appel.
+app.get('/api/ids-locaux', async (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(x => x.trim())
+    .filter(x => /^local-\d+-[a-z0-9]+$/.test(x)).slice(0, 100);
+  if (ids.length === 0) return res.json({});
+  const correspondances = {};
+  try {
+    for (const table of ['dossiers', 'episodes', 'fiches']) {
+      const { data, error } = await supabase.from(table).select('id, local_id').in('local_id', ids);
+      if (error) throw error;
+      (data || []).forEach(r => { if (r.local_id && !correspondances[r.local_id]) correspondances[r.local_id] = r.id; });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  res.json(correspondances);
+});
+
 app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
   try {
     const dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
