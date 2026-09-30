@@ -71,6 +71,9 @@ const PERMISSIONS_PAR_DEFAUT = [
   // jamais accordé ici (Calcul Facture/Facturation exclus, c'est justement ce qu'on retire).
   { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier'] },
   { role: 'infirmier_chef', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier','rapport_chf_voir'] },
+  // 30/09 (Krystofia) : "il y aura quand même des docteurs qui vont créer des dossiers" — crée le
+  // dossier ET l'épisode, consulte/modifie la Fiche Patient, voit le statut de paiement et le solde.
+  { role: 'medecin', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
@@ -2733,7 +2736,7 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
 // lisible longtemps après coup. Donner les pleins pouvoirs par ce canal serait le maillon le plus
 // faible de toute la sécurité de l'app — un administrateur se crée à la main, depuis Gestion des
 // utilisateurs, avec un mot de passe que l'administrateur en place choisit lui-même.
-const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'visiteur'];
+const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'visiteur'];
 // Durées proposées à l'écran. Bornées ici aussi : le corps de la requête ne doit pas pouvoir
 // fabriquer un lien valable dix ans.
 const HEURES_VALIDITE_MAX = 168; // 7 jours
