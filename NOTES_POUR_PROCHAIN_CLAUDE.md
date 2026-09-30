@@ -1,3 +1,14 @@
+# 🚨 À DÉPLOYER AVANT L'APP : IDEMPOTENCE + FUSION DE MAIN (30/09)
+
+**État au 30/09 : `main` fusionné dans `fix/hors-ligne-robuste` (server.js, tests/regressions.test.js
+écrits dans le dossier) — NON commité, NON poussé, NON déployé.** `utils/idempotence.js`
+(en-tête Idempotency-Key, commit ba3a2a6) n'était PAS en production : le site tournait sur `main`.
+L'app (chf-app2, même date) envoie maintenant une clé sur TOUTE écriture et rejoue après 10 s sans
+réponse : ce backend doit être déployé EN PREMIER, sinon un rejeu peut créer un doublon.
+Étapes : commit, push `fix/hors-ligne-robuste`, PR → `main`, déployer sur Render ; vérifier que la
+table `requetes_idempotentes` existe (`sql/requetes_idempotentes.sql`, appliqué le 28/09).
+Tests : 197/197. Détails : NOTES_POUR_PROCHAIN_CLAUDE.md de chf-app2 (section du 30/09).
+
 # 🔓 POSTE DE CAISSE OUVERT HORS LIGNE : REJEU IDEMPOTENT (28/09)
 
 `POST /api/catalog/:type/item` : si `item.id` existe déjà dans ce catalogue → 200

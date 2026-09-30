@@ -2486,3 +2486,78 @@ test("POST /api/catalog/:type/item : le rejeu d'un poste ouvert hors ligne (mêm
   assert.strictEqual(r3.code, 201, "un AUTRE id reste un nouvel ajout");
   assert.strictEqual(catalogues.sessions_caisse.length, 2);
 });
+
+// Retour d'Esdras (29/09) : un dossier suspendu redevient ACTIF dès qu'une nouvelle fiche y est
+// enregistrée, où que ce soit. Fait dans POST /api/fiches (toutes les fiches passent par là).
+function routeCreationFiche(episodes, fichesExistantes = []) {
+  const debut = serverSrc.indexOf("async function reactiverEpisodeSuspendu(episodeId) {");
+  const fin = serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'");
+  assert.ok(debut !== -1 && fin > debut, "route POST /api/fiches introuvable");
+  const fiches = [...fichesExistantes];
+  const supabase = {
+    from: (table) => {
+      if (table === 'fiches') {
+        return {
+          select: () => ({
+            eq: (col, val) => ({
+              maybeSingle: async () => ({ data: fiches.find(f => f[col] === val) || null, error: null }),
+              order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: fiches.filter(f => f[col] === val).sort((a, b) => b.numero_fiche - a.numero_fiche)[0] || null, error: null }) }) }),
+            }),
+          }),
+          insert: (ligne) => ({ select: () => ({ single: async () => { const f = { id: 'fiche-' + (fiches.length + 1), ...ligne }; fiches.push(f); return { data: f, error: null }; } }) }),
+        };
+      }
+      if (table === 'episodes') {
+        return {
+          update: (maj) => {
+            const filtres = [];
+            const chaine = {
+              eq: (col, val) => { filtres.push(e => e[col] === val); return chaine; },
+              not: (col, _op, val) => { filtres.push(e => e[col] !== val); return chaine; },
+              select: () => chaine,
+              then: (resolve) => { episodes.filter(e => filtres.every(f => f(e))).forEach(e => Object.assign(e, maj)); resolve({ error: null }); },
+            };
+            return chaine;
+          },
+        };
+      }
+      throw new Error('table inattendue : ' + table);
+    },
+  };
+  let gestionnaire;
+  const app = { post: (_chemin, fn) => { gestionnaire = fn; }, get() {} };
+  const aPermission = async () => true;
+  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', serverSrc.slice(debut, fin).replace(/^[^]*?(?=app\.post\('\/api\/fiches')/, (m) => m))(app, supabase, aPermission, () => true);
+  const appeler = async (corps) => {
+    const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
+    await gestionnaire({ body: corps, user: { id: 'u1' } }, res);
+    return res;
+  };
+  return { appeler, fiches };
+}
+
+test("POST /api/fiches : une nouvelle fiche réactive un dossier suspendu, sans toucher un dossier archivé ni un dossier déjà actif", async () => {
+  const episodes = [
+    { id: 'suspendu', statut: 'ouvert', date_suspension: '2026-09-20T10:00:00Z' },
+    { id: 'archive', statut: 'ferme', date_suspension: '2026-09-20T10:00:00Z' },
+    { id: 'actif', statut: 'ouvert', date_suspension: null },
+  ];
+  const { appeler } = routeCreationFiche(episodes);
+  const r = await appeler({ episode_id: 'suspendu', cree_par: 'Caisse', local_id: 'local-1' });
+  assert.strictEqual(r.code, 201);
+  assert.strictEqual(episodes[0].date_suspension, null, "le dossier suspendu redevient actif");
+  await appeler({ episode_id: 'archive', cree_par: 'Caisse', local_id: 'local-2' });
+  assert.notStrictEqual(episodes[1].date_suspension, null, "un dossier archivé n'est pas réactivé");
+  await appeler({ episode_id: 'actif', cree_par: 'Caisse', local_id: 'local-3' });
+  assert.strictEqual(episodes[2].date_suspension, null);
+});
+
+test("POST /api/fiches : le rejeu d'une fiche déjà enregistrée (file hors ligne) ne réactive PAS un dossier suspendu depuis", async () => {
+  const episodes = [{ id: 'ep', statut: 'ouvert', date_suspension: null }];
+  const { appeler } = routeCreationFiche(episodes);
+  await appeler({ episode_id: 'ep', cree_par: 'Caisse', local_id: 'local-9' });
+  episodes[0].date_suspension = '2026-09-29T15:00:00Z'; // suspendu volontairement après la fiche
+  const rejeu = await appeler({ episode_id: 'ep', cree_par: 'Caisse', local_id: 'local-9' });
+  assert.strictEqual(rejeu.code, 200, 'rejeu idempotent');
+  assert.strictEqual(episodes[0].date_suspension, '2026-09-29T15:00:00Z', 'toujours suspendu');
+});

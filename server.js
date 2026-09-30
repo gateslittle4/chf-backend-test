@@ -1635,6 +1635,22 @@ app.patch('/api/episodes/:id/lit', async (req, res) => {
 
 // Fiches — rattachées à un épisode. Appelée depuis le Calculateur (caisse_travailler) ET
 // depuis l'approbation d'une exonération (demandes_repondre) — voir Demandes.js.
+// Retour d'Esdras (29/09) : un dossier suspendu redevient ACTIF dès qu'une nouvelle fiche y est
+// enregistrée, où que ce soit (Calculateur, Dossier/Épisode, fiche envoyée après une coupure).
+// Ici plutôt que dans chaque écran : toutes les fiches passent par cette route. Appelée seulement à
+// la vraie création d'une fiche, JAMAIS sur un rejeu idempotent — un rejeu tardif de la file hors
+// ligne ne doit pas réactiver un dossier suspendu volontairement depuis. Un dossier archivé
+// (statut 'ferme') ou reporté n'est pas touché. Sans effet sur la fiche si cette mise à jour échoue.
+async function reactiverEpisodeSuspendu(episodeId) {
+  try {
+    const { error } = await supabase.from('episodes').update({ date_suspension: null })
+      .eq('id', episodeId).eq('statut', 'ouvert').not('date_suspension', 'is', null).select();
+    if (error) console.error('Réactivation du dossier suspendu impossible :', error.message);
+  } catch (e) {
+    console.error('Réactivation du dossier suspendu impossible :', e.message);
+  }
+}
+
 app.post('/api/fiches', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
@@ -1675,7 +1691,10 @@ app.post('/api/fiches', async (req, res) => {
         raw_state: raw_state || {}, local_id: local_id || null,
         total_global: total_global || 0, breakdown: breakdown || {}, mode_paiement: mode_paiement || null,
       }).select().single();
-    if (!error) return res.status(201).json(data);
+    if (!error) {
+      await reactiverEpisodeSuspendu(episode_id);
+      return res.status(201).json(data);
+    }
 
     if (error.code === '23505') {
       if (local_id) {
