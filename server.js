@@ -70,7 +70,11 @@ const PERMISSIONS_PAR_DEFAUT = [
   // rapport_chf_voir déplacé vers infirmier_chef (nouveau rôle, ci-dessous) ; facturation_voir
   // jamais accordé ici (Calcul Facture/Facturation exclus, c'est justement ce qu'on retire).
   { role: 'infirmier', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier'] },
-  { role: 'infirmier_chef', permissions: ['dossier_creer','fiche_patient_voir','fiche_patient_modifier','rapport_chf_voir'] },
+  // 30/09 : + tous les accès du médecin (episode_creer, fiche_patient_voir_finances).
+  { role: 'infirmier_chef', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances','rapport_chf_voir'] },
+  // 30/09 (Krystofia) : "il y aura quand même des docteurs qui vont créer des dossiers" — crée le
+  // dossier ET l'épisode, consulte/modifie la Fiche Patient, voit le statut de paiement et le solde.
+  { role: 'medecin', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
@@ -1940,8 +1944,8 @@ app.delete('/api/catalog/:type/item/:id', async (req, res) => {
 // solde ou statut de paiement", retour d'Esdras du 26/08). caisse_travailler et
 // demandes_repondre ajoutés en plus de fiche_patient_voir_finances : Demandes.js (approbation
 // d'exonération) en a besoin sans que demandes_repondre implique nécessairement l'autre
-// permission. rapport_chf_voir volontairement EXCLU : infirmier_chef l'a aussi, et ne doit
-// justement jamais voir les paiements.
+// permission. rapport_chf_voir volontairement EXCLU (il ne montre aucun montant). Depuis le 30/09,
+// infirmier_chef et medecin voient les paiements via fiche_patient_voir_finances (choix explicite).
 app.get('/api/paiements', async (req, res) => {
   // caisse_voir (28/08) ajouté : le tableau de bord Caisse en lecture seule (visiteur) a besoin
   // des mêmes paiements que la version normale pour calculer sa ventilation/rapport partenaire.
@@ -2733,7 +2737,7 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
 // lisible longtemps après coup. Donner les pleins pouvoirs par ce canal serait le maillon le plus
 // faible de toute la sécurité de l'app — un administrateur se crée à la main, depuis Gestion des
 // utilisateurs, avec un mot de passe que l'administrateur en place choisit lui-même.
-const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'visiteur'];
+const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'visiteur'];
 // Durées proposées à l'écran. Bornées ici aussi : le corps de la requête ne doit pas pouvoir
 // fabriquer un lien valable dix ans.
 const HEURES_VALIDITE_MAX = 168; // 7 jours
