@@ -467,6 +467,11 @@ async function verifyToken(req, res, next) {
 
 // Application du middleware sur toutes les routes API
 app.use('/api', verifyToken);
+// Écritures idempotentes par clé (en-tête Idempotency-Key, audit hors ligne du 28/09) : une requête
+// abandonnée par l'app après 15 s puis rejouée ne s'applique jamais deux fois. Voir utils/idempotence.js
+// et sql/requetes_idempotentes.sql. APRÈS verifyToken : la clé est rangée par personne (req.user.id).
+const { creerMiddlewareIdempotence, purgerClesIdempotence } = require('./utils/idempotence');
+app.use('/api', creerMiddlewareIdempotence(supabase));
 
 // ============================================================
 // COMPATIBILITÉ /api/episodes — le front-end existant (CalculateurPanel,
@@ -3241,6 +3246,13 @@ cron.schedule('0 6 * * *', async () => {
     if (purgees > 0) console.log(`🧹 ${purgees} trace(s) d'idempotence de décrément de stock purgée(s) (> ${JOURS_TRACES_DECREMENT_STOCK} jours).`);
   } catch (e) {
     console.error('❌ Échec de la purge des traces de décrément de stock :', e.message);
+  }
+  // Clés d'idempotence (28/09) : utiles quelques jours au plus (rejeu après une coupure).
+  try {
+    const r = await purgerClesIdempotence(supabase);
+    if (r.erreur) console.error("❌ Échec de la purge des clés d'idempotence :", r.erreur);
+  } catch (e) {
+    console.error("❌ Échec de la purge des clés d'idempotence :", e.message);
   }
   try {
     const purgees = await purgerInvitationsAnciennes();
