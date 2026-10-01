@@ -1,0 +1,4 @@
+# Fins de ligne LF partout, y compris sur Windows (core.autocrlf=true) : les tests
+# de regressions cherchent des motifs avec 
+ et echouaient sur une copie en CRLF.
+* text=auto eol=lf
