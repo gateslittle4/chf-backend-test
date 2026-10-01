@@ -2573,3 +2573,19 @@ test("GET /api/ids-locaux : protégée (sous /api), format local_id filtré, 100
   assert.match(bloc, /\['dossiers', 'episodes', 'fiches'\]/);
   assert.match(bloc, /select\('id, local_id'\)/);
 });
+
+// 01/10 : suppression d'un compte — garde-fous.
+test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même ni un administrateur, seulement un compte désactivé, Firebase + ligne users, journal", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.delete('/api/admin/users/:uid'");
+  assert.ok(i > src.indexOf("app.use('/api', verifyToken)"));
+  const bloc = src.slice(i, i + 2600);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/);
+  assert.match(bloc, /uid === req\.user\.id/);
+  assert.match(bloc, /cible\.role === 'administrateur'/);
+  assert.match(bloc, /cible\.active !== false/);
+  assert.match(bloc, /getAuth\(\)\.deleteUser\(uid\)/);
+  assert.match(bloc, /from\('users'\)\.delete\(\)\.eq\('id', uid\)\.select\('id'\)/);
+  assert.match(bloc, /action: 'suppression_utilisateur'/);
+  assert.ok(bloc.indexOf('cible.active !== false') < bloc.indexOf('deleteUser'), 'les vérifications doivent précéder toute suppression');
+});

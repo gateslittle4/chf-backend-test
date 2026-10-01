@@ -2733,6 +2733,44 @@ app.post('/api/admin/users', async (req, res) => {
   }
 });
 
+// 01/10 (Krystofia) : "il y a trop d'utilisateurs qui ne fonctionnent plus, permets-moi d'en
+// supprimer". Suppression DÉFINITIVE d'un compte (Firebase + ligne users), avec des garde-fous :
+//   - seulement un compte DÉJÀ désactivé : on désactive d'abord (réversible), on supprime ensuite ;
+//   - jamais son propre compte, jamais un administrateur (le rétrograder d'abord) ;
+//   - l'historique reste intact : paiements, fiches et journal gardent le NOM et l'uid recopiés au
+//     moment de l'action (encaisse_par, effectue_par...), ils ne dépendent pas de cette ligne.
+// L'identifiant (@chf.com) redevient libre pour un nouveau compte.
+app.delete('/api/admin/users/:uid', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const uid = req.params.uid;
+  if (uid === req.user.id) return res.status(400).json({ error: 'Tu ne peux pas supprimer ton propre compte.' });
+  const { data: cible, error: erreurLecture } = await supabase.from('users').select('id, email, display_name, role, active').eq('id', uid).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!cible) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+  if (cible.role === 'administrateur') return res.status(400).json({ error: "Impossible de supprimer un administrateur : change d'abord son rôle." });
+  if (cible.active !== false) return res.status(400).json({ error: "Désactive d'abord ce compte, puis supprime-le." });
+  try {
+    await getAuth().deleteUser(uid);
+  } catch (e) {
+    if (e.code !== 'auth/user-not-found') return res.status(500).json({ error: 'Compte de connexion non supprimé : ' + e.message });
+  }
+  const { data: supprime, error: erreurSuppression } = await supabase.from('users').delete().eq('id', uid).select('id');
+  if (erreurSuppression) return res.status(500).json({ error: "Connexion supprimée mais fiche utilisateur conservée : " + erreurSuppression.message });
+  if (!supprime || supprime.length === 0) return res.status(500).json({ error: 'Fiche utilisateur non supprimée (0 ligne).' });
+  const { error: erreurAudit } = await supabase.from('audit_log').insert({
+    id: crypto.randomUUID(),
+    action: 'suppression_utilisateur',
+    effectue_par: req.user.email || req.user.id,
+    effectue_par_uid: req.user.id,
+    details: { utilisateurCible: uid, email: cible.email, nom: cible.display_name, role: cible.role },
+    date: new Date().toISOString(),
+  });
+  if (erreurAudit) console.warn('Audit de suppression d\'utilisateur non enregistré :', erreurAudit.message);
+  res.json({ success: true });
+});
+
 // Génère un lien de réinitialisation SANS envoyer d'email — identifiant@chf.com n'est pas une
 // vraie boîte mail (voir discussion avec Esdras du 22/08), donc sendPasswordResetEmail
 // n'atteindrait jamais personne tout en affichant "envoyé avec succès". L'administrateur
