@@ -63,7 +63,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 const PERMISSIONS_PAR_DEFAUT = [
   { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
-  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir'] },
+  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
   { role: 'archiviste', permissions: ['fiche_patient_voir','facturation_voir'] },
   // Retour d'Esdras (28/08) : "l'infirmier ne peut voir que Dossier/Épisode et Fiche Patient" —
@@ -78,7 +78,7 @@ const PERMISSIONS_PAR_DEFAUT = [
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
-  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','audit_voir','caisse_voir','hospitalisation_voir','stock_voir','catalogue_voir','requisitions_voir','facturation_voir'] },
+  { role: 'visiteur', permissions: ['fiche_patient_voir','fiche_patient_voir_finances','direction_voir','rapport_chf_voir','caisse_voir','hospitalisation_voir','stock_voir','catalogue_voir','requisitions_voir','facturation_voir'] },
 ];
 
 // Vérifie qu'un utilisateur a une permission donnée : lit son rôle, puis la table des
@@ -1156,8 +1156,11 @@ app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
 });
 
 app.post('/api/dossiers', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'dossier_creer'))) {
-    return res.status(403).json({ error: "Permission 'dossier_creer' requise." });
+  // 01/10 (retour d'Esdras) : la caisse/pharmacie (caisse_travailler) peut aussi créer un dossier —
+  // elle le fait depuis l'écran "Dossier/Épisode" puis passe directement au calculateur. Les autres
+  // rôles (archiviste, lecteur, visiteur...) restent exclus : dossier_creer OU caisse_travailler.
+  if (!(await aPermission(req.user.id, 'dossier_creer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'dossier_creer' (ou accès caisse) requise." });
   }
   const { numero_dossier, nom, date_naissance, telephone, adresse, local_id } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
@@ -2884,8 +2887,12 @@ async function envoyerCallMeBot(message) {
 // (verifyToken, ligne ~237, s'applique déjà à toute route /api) : ça ne fait que déclencher une
 // notification best-effort, aucune donnée sensible exposée ni modifiée.
 app.post('/api/notifications/exoneration-demandee', async (req, res) => {
+  // Texte libre venant du client : borné et nettoyé (pas de retours à la ligne, 80 caractères max)
+  // pour qu'un utilisateur connecté ne puisse pas fabriquer un message WhatsApp arbitraire/long.
+  const propre = (v, fallback) => (typeof v === 'string' || typeof v === 'number') ? String(v).replace(/[\r\n]+/g, ' ').slice(0, 80) : fallback;
   const { patientNom, montantExonere, pourcentage, demandeur } = req.body || {};
-  envoyerCallMeBot(`🎯 CHF : demande d'exonération de ${demandeur || 'inconnu'} pour ${patientNom || 'un patient'} — ${pourcentage || '?'}% (${Math.round(montantExonere) || '?'} Gdes). À approuver dans l'app.`);
+  const montantAffiche = Number.isFinite(Number(montantExonere)) ? Math.round(Number(montantExonere)) : '?';
+  envoyerCallMeBot(`🎯 CHF : demande d'exonération de ${propre(demandeur, 'inconnu')} pour ${propre(patientNom, 'un patient')} — ${propre(pourcentage, '?')}% (${montantAffiche} Gdes). À approuver dans l'app.`);
   res.json({ success: true }); // best-effort : jamais d'erreur même si CallMeBot est down
 });
 
