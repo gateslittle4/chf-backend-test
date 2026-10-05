@@ -1,3 +1,6 @@
 node_modules/
 .env
 .env.test
+
+# Dossier de travail d'un plugin Claude (pas du code du projet)
+.clawness/
