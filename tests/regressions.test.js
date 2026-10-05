@@ -951,7 +951,10 @@ test("CORS restreint à l'origine du frontend (FRONTEND_URL), plus l'URL onrende
   assert.doesNotMatch(serverSrc, /app\.use\(cors\(\)\)/, "cors() sans options autorise n'importe quel site web à appeler l'API");
   const bloc = serverSrc.slice(serverSrc.indexOf('const ORIGINE_FRONTEND'), serverSrc.indexOf("app.use(express.json"));
   assert.match(bloc, /process\.env\.FRONTEND_URL \|\| 'https:\/\/chf-app2\.onrender\.com'/, "doit réutiliser FRONTEND_URL, avec repli sur l'URL onrender.com actuelle");
-  assert.match(bloc, /if \(!origin \|\|/, "une requête sans en-tête Origin (curl, health check, serveur à serveur) doit rester autorisée");
+  assert.match(bloc, /origineAutorisee\(origin,/, "la décision CORS passe par utils/origineCors.js (testée dans origineCors.test.js)");
+  assert.match(bloc, /apercusAutorises: process\.env\.AUTORISER_APERCUS_PR === '1'/, "les aperçus de PR ne sont acceptés que si AUTORISER_APERCUS_PR=1 (désactivé par défaut)");
+  const utilCors = fs.readFileSync(path.join(__dirname, '..', 'utils', 'origineCors.js'), 'utf8');
+  assert.match(utilCors, /if \(!origin\) return true;/, "une requête sans en-tête Origin (curl, health check, serveur à serveur) doit rester autorisée");
 });
 
 // Retour d'Esdras (29/08) : "call me bot, on va l'activer" — alertes WhatsApp pour 3 événements

@@ -37,6 +37,7 @@ const supabase = createClient(
 );
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
+const { origineAutorisee } = require('./utils/origineCors');
 
 // Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
@@ -159,7 +160,9 @@ app.use(cors({
     // autorisé — CORS ne protège que les requêtes envoyées par un NAVIGATEUR pour le compte d'un
     // site tiers, jamais quelqu'un qui appelle directement l'API (celui-là devrait de toute façon
     // déjà avoir un jeton Firebase valide, ce que CORS ne vérifie pas).
-    if (!origin || origin === ORIGINE_FRONTEND || origin === 'https://chf-app2.onrender.com') {
+    // Aperçus de PR du frontend (chf-app2-pr-N.onrender.com) : refusés par défaut. À activer sur
+    // Render (AUTORISER_APERCUS_PR=1) le temps de tester une PR, puis retirer la variable.
+    if (origineAutorisee(origin, { origineFrontend: ORIGINE_FRONTEND, apercusAutorises: process.env.AUTORISER_APERCUS_PR === '1' })) {
       return callback(null, true);
     }
     callback(new Error('Origine non autorisée par CORS'));
