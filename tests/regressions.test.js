@@ -265,9 +265,7 @@ test("episodeVersFlat journalise (ne l'avale plus silencieusement) l'erreur de l
 test("dateOuNull convertit une date de naissance vide en null, jamais en chaîne vide — Postgres refuse '' pour une colonne date ('invalid input syntax for type date'), et la date de naissance est optionnelle (saisie rétroactive, patient qui ne la connaît pas)", () => {
   assert.match(serverSrc, /function dateOuNull\(v\) \{ return v \? v : null; \}/, "dateOuNull introuvable ou modifiée");
   for (const routeStart of ["app.post('/api/episodes'", "app.post('/api/dossiers'", "app.put('/api/dossiers/:id'"]) {
-    const i = serverSrc.indexOf(routeStart);
-    assert.ok(i !== -1, `route ${routeStart} introuvable`);
-    const bloc = serverSrc.slice(i, i + 2000);
+    const bloc = blocRouteComplet(routeStart);
     assert.match(bloc, /date_naissance:\s*dateOuNull\(/, `${routeStart} doit passer date_naissance par dateOuNull()`);
   }
 });
@@ -290,6 +288,16 @@ test("POST /api/fiches enregistre cree_par_uid — envoyé par CalculateurPanel.
 // compte connecté (même un rôle censé être en lecture seule) pouvait créer des dossiers,
 // changer des prix, encaisser, gérer le stock... en appelant l'API directement. Un test par
 // route corrigée, pour qu'aucune ne redevienne silencieusement ouverte à l'avenir.
+// Texte COMPLET d'une route : du début de sa déclaration jusqu'à la suivante. Une fenêtre de taille
+// fixe (400, 700, 2000 caractères) cessait de couvrir le code dès qu'on ajoutait des commentaires
+// dans la route, et le test échouait alors que le code était correct.
+function blocRouteComplet(debutRoute) {
+  const i = serverSrc.indexOf(debutRoute);
+  assert.ok(i !== -1, `route introuvable : ${debutRoute}`);
+  const suivante = serverSrc.slice(i + debutRoute.length).search(/^app\.(get|post|put|patch|delete|use)\(/m);
+  return serverSrc.slice(i, suivante === -1 ? undefined : i + debutRoute.length + suivante);
+}
+
 function blocRoutePermission(debutRoute, prochaineRouteOuFin) {
   const i = serverSrc.indexOf(debutRoute);
   assert.ok(i !== -1, `route introuvable : ${debutRoute}`);
@@ -298,9 +306,12 @@ function blocRoutePermission(debutRoute, prochaineRouteOuFin) {
   return serverSrc.slice(i, fin);
 }
 
-test("POST /api/episodes et POST /api/dossiers exigent dossier_creer", () => {
+test("POST /api/episodes exige dossier_creer ; POST /api/dossiers exige dossier_creer OU caisse_travailler (la caisse crée un dossier depuis Dossier/Épisode, décision du 01/10)", () => {
   assert.match(blocRoutePermission("app.post('/api/episodes'"), /aPermission\(req\.user\.id, 'dossier_creer'\)/);
-  assert.match(blocRoutePermission("app.post('/api/dossiers',"), /aPermission\(req\.user\.id, 'dossier_creer'\)/);
+  const dossiers = blocRouteComplet("app.post('/api/dossiers',");
+  assert.match(dossiers, /aPermission\(req\.user\.id, 'dossier_creer'\)/);
+  assert.match(dossiers, /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+  assert.match(dossiers, /status\(403\)/, "sans l'une des deux permissions la route doit répondre 403");
 });
 
 test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche Patient l'appelle", () => {
@@ -887,7 +898,8 @@ test("sql/ajoute_role_visiteur.sql documente bien 'visiteur' comme rôle autoris
   assert.match(ligne, /'fiche_patient_voir_finances'/);
   assert.match(ligne, /'direction_voir'/);
   assert.match(ligne, /'rapport_chf_voir'/);
-  assert.match(ligne, /'audit_voir'/);
+  // 01/10, décision d'Esdras : le journal d'audit n'est pas fait pour un visiteur -> audit_voir retiré.
+  assert.doesNotMatch(ligne, /'audit_voir'/, "visiteur ne doit PAS voir le journal d'audit");
   assert.doesNotMatch(ligne, /'dossier_creer'|'episode_creer'|'caisse_travailler'|'analytics_voir'/, "visiteur ne doit avoir aucune permission d'action, ni analytics_voir (salaires)");
   assert.doesNotMatch(ligne, /_gerer'|_annuler'|_supprimer'|_modifier'/, "visiteur ne doit avoir aucune permission de gestion/annulation/suppression/modification");
 });
@@ -986,7 +998,7 @@ test("POST /api/notifications/exoneration-demandee existe, protégée par verify
   const indexVerifyToken = serverSrc.indexOf("app.use('/api', verifyToken);");
   const indexRoute = serverSrc.indexOf("app.post('/api/notifications/exoneration-demandee'");
   assert.ok(indexVerifyToken !== -1 && indexRoute !== -1 && indexRoute > indexVerifyToken, "la route doit être déclarée APRÈS app.use('/api', verifyToken) pour être protégée");
-  const bloc = serverSrc.slice(indexRoute, indexRoute + 700);
+  const bloc = blocRouteComplet("app.post('/api/notifications/exoneration-demandee'");
   assert.match(bloc, /envoyerCallMeBot\(`🎯 CHF : demande d'exonération/);
   assert.match(bloc, /res\.json\(\{ success: true \}\); \/\/ best-effort/, "doit toujours répondre 200, ne jamais faire échouer la demande côté écran si l'alerte échoue");
 });
