@@ -145,6 +145,17 @@ async function aPermission(userId, cle) {
 // pendant la transition vers le nouveau domaine.
 const ORIGINE_FRONTEND = process.env.FRONTEND_URL || 'https://chf-app2.onrender.com';
 
+// Audit de sécurité du 02/10 : en-têtes de protection sur chaque réponse de l'API (aucun effet sur le
+// fonctionnement). nosniff : le navigateur ne devine pas le type d'un fichier ; HSTS : HTTPS seulement ;
+// no-referrer : aucune adresse de page transmise ; x-powered-by retiré : on n'annonce pas « Express ».
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 // Ce serveur (Render) tourne en UTC, jamais à l'heure d'Haïti — un calcul de date "du jour" fait
 // ICI sans préciser le fuseau donne la date UTC, pas celle d'Haïti (audit du 11/09, suite à un
 // dossier ouvert un soir dont dateHeure affichait le lendemain). America/Port-au-Prince gère aussi
@@ -453,13 +464,23 @@ async function verifyToken(req, res, next) {
     // requête, pas seulement à la connexion, pour qu'une désactivation en cours de session soit
     // immédiate (pas besoin d'attendre que le token expire).
     const { data: profil } = await supabase.from('users').select('active, date_expiration').eq('id', decoded.uid).maybeSingle();
-    if (profil) {
-      if (profil.active === false) {
-        return res.status(403).json({ error: 'Ce compte a été désactivé.' });
-      }
-      if (profil.date_expiration && new Date(profil.date_expiration) < new Date()) {
-        return res.status(403).json({ error: "Cet accès a expiré. Contacte l'administrateur pour le renouveler." });
-      }
+    // Audit de sécurité du 02/10 : un jeton Firebase valide prouve seulement que la personne a un
+    // compte Firebase — pas qu'elle fait partie du personnel du CHF. Les comptes légitimes (créés par
+    // /api/admin/users ou par une invitation) ont TOUS une ligne dans `users`, écrite côté serveur.
+    // Jusqu'ici, un jeton sans ligne `users` passait (profil absent = on ne vérifiait rien) et pouvait
+    // appeler les routes de lecture qui n'exigent aucune permission (dossiers, recherche, catalogue).
+    // Si un tiers parvenait à créer un compte Firebase lui-même (inscription ouverte sur le projet
+    // Firebase, la clé publique étant visible dans le navigateur), il aurait pu lire des données de
+    // patients. Désormais : pas de profil = pas d'accès, quoi que dise le jeton.
+    if (!profil) {
+      console.warn(`verifyToken: jeton valide mais aucun profil CHF (uid ${String(decoded.uid).slice(0, 6)}…) — refusé (${req.method} ${req.path})`);
+      return res.status(403).json({ error: "Ce compte n'est pas autorisé à utiliser l'application." });
+    }
+    if (profil.active === false) {
+      return res.status(403).json({ error: 'Ce compte a été désactivé.' });
+    }
+    if (profil.date_expiration && new Date(profil.date_expiration) < new Date()) {
+      return res.status(403).json({ error: "Cet accès a expiré. Contacte l'administrateur pour le renouveler." });
     }
     req.user = { id: decoded.uid, email: decoded.email };
     next();

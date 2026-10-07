@@ -2601,3 +2601,20 @@ test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même ni un 
   assert.match(bloc, /action: 'suppression_utilisateur'/);
   assert.ok(bloc.indexOf('cible.active !== false') < bloc.indexOf('deleteUser'), 'les vérifications doivent précéder toute suppression');
 });
+
+// Audit de sécurité du 02/10 : un jeton Firebase valide SANS ligne dans `users` ne donne plus accès à l'API,
+// et l'API envoie des en-têtes de protection.
+test("verifyToken refuse un jeton valide qui n'a aucun profil CHF (compte Firebase créé par un tiers)", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const debut = src.indexOf('async function verifyToken');
+  const bloc = src.slice(debut, src.indexOf("app.use('/api', verifyToken);", debut));
+  assert.match(bloc, /if \(!profil\) \{/, 'le cas « aucun profil » doit être refusé');
+  assert.ok(bloc.indexOf('if (!profil)') < bloc.indexOf('req.user = {'), 'le refus doit venir AVANT req.user');
+  assert.match(bloc, /status\(403\)/);
+});
+
+test("l'API envoie nosniff, HSTS et no-referrer, et n'annonce plus Express", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /app\.disable\('x-powered-by'\)/);
+  for (const e of ['X-Content-Type-Options', 'Strict-Transport-Security', 'Referrer-Policy']) assert.ok(src.includes(e), e);
+});
