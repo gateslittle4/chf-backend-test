@@ -18,14 +18,21 @@
 -- Appliquer cette recommandation (non vérifié : personne n'a pu lire la base du CHF depuis une session)
 -- casse TOUTES les policies RLS qui appellent la fonction.
 --
--- ⚠️ NE PAS appliquer non plus l'autre moitié de cette recommandation (« passer en SECURITY INVOKER ») :
--- mon_role_chf() lit la table users alors qu'elle sert justement dans les policies DE users — en
--- SECURITY INVOKER, la policy devrait lire users pour s'évaluer, qui évalue la policy... : boucle infinie
--- (c'est la raison d'être du SECURITY DEFINER, voir PLAN_RLS.md). Le risque que le linter signale est
--- réel mais minime ici : la fonction ne renvoie que le rôle DE L'APPELANT, aucune donnée d'autrui. La
--- vraie solution propre, pour plus tard, est de déplacer ces 2 fonctions dans un schéma non exposé par
--- l'API (ex. `private`) avec USAGE + EXECUTE pour `authenticated` — à faire AVEC test d'un vrai compte non
--- administrateur ensuite, jamais en « retirant simplement le droit ».
+-- VÉRIFIÉ sur un Postgres 16 jetable (rôles anon/authenticated, auth.jwt() simulé, définitions et policies
+-- de PLAN_RLS.md reconstituées — PAS sur la vraie base du CHF) :
+--   • `REVOKE EXECUTE ON FUNCTION mon_role_chf() FROM authenticated` reproduit EXACTEMENT l'erreur de la capture
+--     (`ERROR: 42501: permission denied for function mon_role_chf`), même pour une personne qui ne lit que SA
+--     propre ligne ; ce script la répare (le texte collé dans le chat et ce fichier), et se rejoue sans erreur ;
+--   • une requête exécutée en `anon` (jeton sans la revendication role='authenticated') donne le MÊME message :
+--     ce script ne la répare pas (voulu) — voir plus bas ;
+--   • `SECURITY INVOKER` (l'autre moitié de la recommandation de l'audit) : PLAN_RLS.md le déconseille en
+--     invoquant une boucle sur users, mais le test N'A PAS reproduit de boucle (compte existant, compte sans
+--     ligne dans users). Ce n'est donc PAS démontré dangereux ; ce n'est simplement ni nécessaire ni testé sur
+--     la vraie base : ne pas y toucher pour débloquer l'app ;
+--   • déplacer les 2 fonctions dans un schéma non exposé (ex. `private`) fonctionne, MAIS exige
+--     `ALTER FUNCTION private.mon_role_chf() SET search_path = public, private` (elle appelle mon_uid() sans
+--     préfixe) : sans cela, une personne normale passe encore, et c'est l'ADMINISTRATEUR qui casse
+--     (« function mon_uid() does not exist »). Toujours tester un compte administrateur ET un non-administrateur.
 --
 -- CE QUE FAIT CE SCRIPT : redonne le droit EXECUTE au rôle `authenticated` (les personnes connectées) sur
 -- les 2 petites fonctions qui servent aux policies. Rien d'autre :
