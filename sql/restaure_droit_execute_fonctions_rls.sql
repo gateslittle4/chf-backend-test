@@ -11,11 +11,21 @@
 -- jamais (AppHospitaliere attend le rôle) et l'écran reste sur « Chargement… ».
 --
 -- Ce droit fait partie de la conception documentée dans PLAN_RLS.md (« mon_role_chf() n'est plus
--- appelable directement par anon, seulement par authenticated (dont mes policies) »). Il a donc été
--- retiré APRÈS COUP — probablement par un durcissement de l'audit de sécurité des 06-08/10 (ce type de
--- « correctif » est suggéré par le linter de sécurité Supabase pour les fonctions SECURITY DEFINER,
--- sans tenir compte du fait que les policies RLS ont besoin de les appeler). Non prouvé : cette session
--- n'a pas accès à la base du CHF.
+-- appelable directement par anon, seulement par authenticated (dont mes policies) »). Il a été retiré
+-- APRÈS COUP, et la cause est DOCUMENTÉE : la PR #46 de chf-app2 (audit de sécurité du 08/10), section
+-- « À faire côté tableau de bord », item Supabase, recommandait : « mon_role_chf() est en SECURITY
+-- DEFINER appelable par tout utilisateur connecté → révoquer EXECUTE ou passer en SECURITY INVOKER ».
+-- Appliquer cette recommandation (non vérifié : personne n'a pu lire la base du CHF depuis une session)
+-- casse TOUTES les policies RLS qui appellent la fonction.
+--
+-- ⚠️ NE PAS appliquer non plus l'autre moitié de cette recommandation (« passer en SECURITY INVOKER ») :
+-- mon_role_chf() lit la table users alors qu'elle sert justement dans les policies DE users — en
+-- SECURITY INVOKER, la policy devrait lire users pour s'évaluer, qui évalue la policy... : boucle infinie
+-- (c'est la raison d'être du SECURITY DEFINER, voir PLAN_RLS.md). Le risque que le linter signale est
+-- réel mais minime ici : la fonction ne renvoie que le rôle DE L'APPELANT, aucune donnée d'autrui. La
+-- vraie solution propre, pour plus tard, est de déplacer ces 2 fonctions dans un schéma non exposé par
+-- l'API (ex. `private`) avec USAGE + EXECUTE pour `authenticated` — à faire AVEC test d'un vrai compte non
+-- administrateur ensuite, jamais en « retirant simplement le droit ».
 --
 -- CE QUE FAIT CE SCRIPT : redonne le droit EXECUTE au rôle `authenticated` (les personnes connectées) sur
 -- les 2 petites fonctions qui servent aux policies. Rien d'autre :
