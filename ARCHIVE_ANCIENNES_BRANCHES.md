@@ -4,7 +4,7 @@ Cette branche ne sert **à rien d'autre** qu'à garder en mémoire les commits d
 
 ## Pourquoi ces branches ne sont plus utiles
 
-L'historique de `main` a été recréé le 29/08/2026 : ses commits n'ont **aucun ancêtre commun** avec ces branches (créées entre la mi-août et le 29/08), donc elles ne pouvaient plus être fusionnées telles quelles.
+L'historique de `main` commence le 29/08/2026 (son tout premier commit) : ses commits n'ont **aucun ancêtre commun** avec ces branches (créées entre la mi-août et le 29/08), qui ne pouvaient donc plus être fusionnées telles quelles. La cause exacte n'est pas établie (probablement une réinitialisation du dépôt).
 
 Vérification faite le 08/10/2026 par comparaison du code (pas par exécution) : Pour les 33 commits de code de ces branches, j'ai mesuré la part des lignes ajoutées qui existent encore dans `main` : 28 sont à 50 % ou plus. Les 5 autres sont trois anciens « Add files via upload » (15-18/08) et deux routes Firebase **temporaires** (22/08), retirées exprès.
 
