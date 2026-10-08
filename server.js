@@ -455,15 +455,28 @@ async function verifyToken(req, res, next) {
     return res.status(401).json({ error: 'Token manquant ou invalide' });
   }
   const token = authHeader.split('Bearer ')[1];
+  let decoded;
   try {
-    const decoded = await getAuth().verifyIdToken(token);
+    decoded = await getAuth().verifyIdToken(token);
+  } catch (e) {
+    console.warn(`verifyToken: jeton invalide ou expiré (${req.method} ${req.path}):`, e.message);
+    return res.status(401).json({ error: 'Token invalide ou expiré' });
+  }
+  try {
     // "Désactiver un compte" (Gestion des utilisateurs) et l'accès à durée limitée (date
     // d'expiration) n'étaient vérifiés NULLE PART jusqu'ici — ni ici, ni côté écran : le bouton
     // "Désactiver" ne faisait qu'écrire un booléen que rien ne lisait jamais, un compte
     // "désactivé" pouvait continuer à se connecter et travailler normalement. Vérifié à chaque
     // requête, pas seulement à la connexion, pour qu'une désactivation en cours de session soit
     // immédiate (pas besoin d'attendre que le token expire).
-    const { data: profil } = await supabase.from('users').select('active, date_expiration').eq('id', decoded.uid).maybeSingle();
+    // Audit du 08/10 (« L'app ne se charge plus ») : une ERREUR de lecture (Supabase indisponible, colonne
+    // absente, droits...) n'est PAS un profil absent. Avant, `{ data: profil }` ignorait `error` : avec
+    // le refus « pas de profil » ajouté le 06/10, la moindre panne de la base répondait 403 « Ce compte
+    // n'est pas autorisé » à TOUT LE MONDE en même temps — alors qu'un profil réellement absent ne
+    // concerne qu'un compte. Une panne de la base est transitoire : 503, que l'app réessaie toute
+    // seule (lectures servies depuis la copie locale, écritures mises en file).
+    const { data: profil, error: erreurProfil } = await supabase.from('users').select('active, date_expiration').eq('id', decoded.uid).maybeSingle();
+    if (erreurProfil) throw new Error(erreurProfil.message || 'lecture du profil impossible');
     // Audit de sécurité du 02/10 : un jeton Firebase valide prouve seulement que la personne a un
     // compte Firebase — pas qu'elle fait partie du personnel du CHF. Les comptes légitimes (créés par
     // /api/admin/users ou par une invitation) ont TOUS une ligne dans `users`, écrite côté serveur.
@@ -485,8 +498,9 @@ async function verifyToken(req, res, next) {
     req.user = { id: decoded.uid, email: decoded.email };
     next();
   } catch (e) {
-    console.warn(`verifyToken: jeton invalide ou expiré (${req.method} ${req.path}):`, e.message);
-    return res.status(401).json({ error: 'Token invalide ou expiré' });
+    // Seule la lecture du profil peut échouer ici (le jeton, lui, a déjà été vérifié plus haut).
+    console.error(`verifyToken: lecture du profil impossible (${req.method} ${req.path}):`, e.message);
+    return res.status(503).json({ error: 'Vérification du compte impossible pour le moment. Réessaie dans un instant.' });
   }
 }
 

@@ -2613,6 +2613,62 @@ test("verifyToken refuse un jeton valide qui n'a aucun profil CHF (compte Fireba
   assert.match(bloc, /status\(403\)/);
 });
 
+// Incident du 08/10 (« L'app ne se charge plus ») : le refus « aucun profil » du 06/10 ignorait l'ERREUR de
+// lecture de la table users — `const { data: profil } = ...` — donc une panne de la base (ou une colonne
+// absente, des droits...) répondait 403 « Ce compte n'est pas autorisé » à TOUT LE MONDE en même temps.
+// Ce test EXÉCUTE vraiment verifyToken (extrait de server.js, avec de fausses dépendances), cas par cas.
+test("verifyToken : une ERREUR de lecture du profil répond 503 (transitoire, l'app réessaie), jamais 403 « compte non autorisé » ; un profil réellement absent/désactivé/expiré reste refusé", async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const debut = src.indexOf('async function verifyToken');
+  const corps = src.slice(debut, src.indexOf("app.use('/api', verifyToken);", debut));
+  const silence = { warn() {}, error() {}, log() {} };
+  const construire = ({ jeton = 'ok', lecture }) => {
+    const getAuth = () => ({ verifyIdToken: async () => { if (jeton !== 'ok') throw new Error('Firebase ID token has expired'); return { uid: 'u1', email: 'a@chf.com' }; } });
+    const supabase = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: lecture }) }) }) };
+    return new Function('getAuth', 'supabase', 'console', `${corps}\nreturn verifyToken;`)(getAuth, supabase, silence);
+  };
+  const appeler = async (verifyToken, authorization = 'Bearer abc') => {
+    const res = { code: null, corps: null, status(c) { this.code = c; return this; }, json(c) { this.corps = c; return this; } };
+    const req = { headers: authorization ? { authorization } : {}, method: 'GET', path: '/x' };
+    let suite = false;
+    await verifyToken(req, res, () => { suite = true; });
+    return { code: res.code, corps: res.corps, suite, utilisateur: req.user };
+  };
+  const demain = new Date(Date.now() + 86400000).toISOString();
+  const hier = new Date(Date.now() - 86400000).toISOString();
+
+  // Profil normal : la requête continue, l'utilisateur est posé
+  let r = await appeler(construire({ lecture: async () => ({ data: { active: true, date_expiration: demain }, error: null }) }));
+  assert.strictEqual(r.suite, true); assert.strictEqual(r.code, null); assert.deepStrictEqual(r.utilisateur, { id: 'u1', email: 'a@chf.com' });
+  // active absent/NULL = actif ; pas de date d'expiration = pas d'expiration
+  r = await appeler(construire({ lecture: async () => ({ data: { active: null, date_expiration: null }, error: null }) }));
+  assert.strictEqual(r.suite, true);
+
+  // LE CAS DE L'INCIDENT : la base renvoie une erreur → 503 (pas 403), la requête ne passe pas
+  r = await appeler(construire({ lecture: async () => ({ data: null, error: { message: 'column users.date_expiration does not exist', code: '42703' } }) }));
+  assert.strictEqual(r.code, 503, "une erreur de base n'est pas un compte non autorisé");
+  assert.strictEqual(r.suite, false);
+  assert.doesNotMatch(r.corps.error, /n'est pas autorisé/, 'le message ne doit pas accuser le compte');
+  // Base injoignable (exception réseau) : 503 aussi, jamais « jeton expiré » (401 déclencherait un renouvellement inutile)
+  r = await appeler(construire({ lecture: async () => { throw new TypeError('fetch failed'); } }));
+  assert.strictEqual(r.code, 503); assert.strictEqual(r.suite, false);
+
+  // Les vrais refus restent des refus (sécurité du 02/10 et du 06/10 inchangée)
+  r = await appeler(construire({ lecture: async () => ({ data: null, error: null }) }));
+  assert.strictEqual(r.code, 403); assert.match(r.corps.error, /n'est pas autorisé/); assert.strictEqual(r.suite, false);
+  r = await appeler(construire({ lecture: async () => ({ data: { active: false }, error: null }) }));
+  assert.strictEqual(r.code, 403); assert.match(r.corps.error, /désactivé/);
+  r = await appeler(construire({ lecture: async () => ({ data: { active: true, date_expiration: hier }, error: null }) }));
+  assert.strictEqual(r.code, 403); assert.match(r.corps.error, /expiré/);
+
+  // Jeton Firebase invalide ou absent : 401, sans même lire la base
+  let lectures = 0;
+  r = await appeler(construire({ jeton: 'expire', lecture: async () => { lectures++; return { data: null, error: null }; } }));
+  assert.strictEqual(r.code, 401); assert.strictEqual(lectures, 0, 'jeton invalide : la base n\'est pas interrogée');
+  r = await appeler(construire({ lecture: async () => ({ data: { active: true }, error: null }) }), null);
+  assert.strictEqual(r.code, 401);
+});
+
 test("l'API envoie nosniff, HSTS et no-referrer, et n'annonce plus Express", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /app\.disable\('x-powered-by'\)/);
