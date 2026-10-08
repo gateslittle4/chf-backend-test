@@ -61,7 +61,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 // piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
@@ -74,6 +74,9 @@ const PERMISSIONS_PAR_DEFAUT = [
   { role: 'infirmier_chef', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances','rapport_chf_voir'] },
   // 30/09 (Krystofia) : "il y aura quand même des docteurs qui vont créer des dossiers" — crée le
   // dossier ET l'épisode, consulte/modifie la Fiche Patient, voit le statut de paiement et le solde.
+  // 08/10 (Krystofia) : rôle pharmacien — mêmes droits de caisse que direction/comptable, sans les droits
+  // comptables, plus pharmacie_voir (onglet Pharmacie). Miroir de utils/permissions.js (chf-app2).
+  { role: 'pharmacien', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir'] },
   { role: 'medecin', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
@@ -2836,7 +2839,7 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
 // lisible longtemps après coup. Donner les pleins pouvoirs par ce canal serait le maillon le plus
 // faible de toute la sécurité de l'app — un administrateur se crée à la main, depuis Gestion des
 // utilisateurs, avec un mot de passe que l'administrateur en place choisit lui-même.
-const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'visiteur'];
+const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'pharmacien', 'visiteur'];
 // Durées proposées à l'écran. Bornées ici aussi : le corps de la requête ne doit pas pouvoir
 // fabriquer un lien valable dix ans.
 const HEURES_VALIDITE_MAX = 168; // 7 jours
