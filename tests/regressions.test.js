@@ -2674,3 +2674,19 @@ test("l'API envoie nosniff, HSTS et no-referrer, et n'annonce plus Express", () 
   assert.match(src, /app\.disable\('x-powered-by'\)/);
   for (const e of ['X-Content-Type-Options', 'Strict-Transport-Security', 'Referrer-Policy']) assert.ok(src.includes(e), e);
 });
+
+// 08/10 (Krystofia) : rôle pharmacien — droits de caisse + onglet Pharmacie, sans droits comptables.
+test("Rôle 'pharmacien' : script SQL (users_role_check), miroir serveur PERMISSIONS_PAR_DEFAUT et ROLES_INVITABLES d'accord", () => {
+  const sqlSrc = fs.readFileSync(path.join(__dirname, '..', 'sql', 'ajoute_role_pharmacien.sql'), 'utf8');
+  assert.match(sqlSrc, /'pharmacien'::text/);
+  for (const r of ['administrateur', 'direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'visiteur']) {
+    assert.match(sqlSrc, new RegExp(`'${r}'::text`), `le script ne doit pas retirer le rôle ${r}`);
+  }
+  const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
+  const ligne = bloc.slice(bloc.indexOf("{ role: 'pharmacien'"), bloc.indexOf('\n', bloc.indexOf("{ role: 'pharmacien'")));
+  for (const cle of ['pharmacie_voir', 'caisse_travailler', 'episode_creer', 'fiche_patient_voir', 'fiche_patient_voir_finances', 'demandes_voir']) {
+    assert.ok(ligne.includes(`'${cle}'`), `pharmacien doit avoir ${cle}`);
+  }
+  assert.doesNotMatch(ligne, /facturation_|rapport_chf_voir|_annuler'|_supprimer'|utilisateurs_gerer|permissions_gerer|stock_gerer|dossier_creer/, "pharmacien : aucun droit comptable ni d'administration");
+  assert.match(serverSrc, /const ROLES_INVITABLES = \[[^\]]*'pharmacien'/);
+});
