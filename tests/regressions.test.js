@@ -2690,3 +2690,36 @@ test("Rôle 'pharmacien' : script SQL (users_role_check), miroir serveur PERMISS
   assert.doesNotMatch(ligne, /facturation_|rapport_chf_voir|_annuler'|_supprimer'|utilisateurs_gerer|permissions_gerer|stock_gerer|dossier_creer/, "pharmacien : aucun droit comptable ni d'administration");
   assert.match(serverSrc, /const ROLES_INVITABLES = \[[^\]]*'pharmacien'/);
 });
+
+// 09/10 (Esdras) : « pharmacien en chef » = tout ce que fait le pharmacien + modifier les stocks, avec
+// stock_gerer comme case de l'écran Rôles & permissions. Droits lus en EXÉCUTANT le tableau réel de
+// server.js (pas en cherchant du texte), pour comparer de vrais ensembles de permissions.
+function permissionsParDefautServeur() {
+  const debut = serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT = [');
+  const fin = serverSrc.indexOf('\n];', debut) + 3;
+  return new Function(serverSrc.slice(debut, fin).replace('const PERMISSIONS_PAR_DEFAUT =', 'return'))();
+}
+
+test("Rôle 'pharmacien_chef' : droits du pharmacien + stock_gerer exactement, rien de comptable ni d'administration, invitable", () => {
+  const table = permissionsParDefautServeur();
+  const pharmacien = table.find(r => r.role === 'pharmacien');
+  const chef = table.find(r => r.role === 'pharmacien_chef');
+  assert.ok(pharmacien && chef, 'les deux rôles doivent exister dans le miroir serveur');
+  assert.deepStrictEqual([...chef.permissions].sort(), [...pharmacien.permissions, 'stock_gerer'].sort(),
+    "pharmacien_chef = EXACTEMENT les droits du pharmacien + stock_gerer (si le pharmacien gagne un droit, le chef le gagne aussi)");
+  assert.ok(!pharmacien.permissions.includes('stock_gerer'), "le pharmacien simple ne gère pas le stock par défaut");
+  assert.ok(!chef.permissions.some(p => /^facturation_|rapport_chf_voir|_annuler$|_supprimer$|utilisateurs_gerer|permissions_gerer|catalogue_gerer|dossier_creer/.test(p)),
+    'pharmacien_chef : aucun droit comptable ni d\'administration');
+  assert.match(serverSrc, /const ROLES_INVITABLES = \[[^\]]*'pharmacien_chef'/);
+});
+
+test("sql/ajoute_role_pharmacien_chef.sql : UNE seule instruction atomique qui garde tous les rôles existants ET ajoute pharmacien et pharmacien_chef", () => {
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'sql', 'ajoute_role_pharmacien_chef.sql'), 'utf8');
+  const instructions = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n').split(';').map(s => s.trim()).filter(Boolean);
+  assert.strictEqual(instructions.length, 1, "une seule instruction : DROP + ADD dans le même ALTER TABLE (atomique)");
+  assert.match(instructions[0], /^ALTER TABLE users\s+DROP CONSTRAINT users_role_check,\s+ADD CONSTRAINT users_role_check/);
+  const liste = [...instructions[0].matchAll(/'([a-z_]+)'::text/g)].map(m => m[1]).sort();
+  // Tous les rôles du miroir serveur + administrateur (qui n'y figure pas : il a tout par définition).
+  const attendus = [...permissionsParDefautServeur().map(r => r.role), 'administrateur'].sort();
+  assert.deepStrictEqual(liste, attendus, "la contrainte doit autoriser exactement les rôles connus du code — ni plus, ni moins");
+});
