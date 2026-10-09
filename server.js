@@ -39,7 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
-  appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, libelleRolePersonnalise,
+  appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
   refusDeRoleParLaBase, etatBasePourRolesPersonnalises, MESSAGE_ROLE_NON_ACTIVE_INVITE,
 } = require('./utils/roles');
 
@@ -324,6 +324,9 @@ async function lireInvitationUtilisable(token) {
   if (data.revoque) return { erreur: "Ce lien d'invitation a été annulé par l'administrateur." };
   if (data.utilise_le) return { erreur: "Ce lien a déjà servi à créer un compte. Demande-en un nouveau." };
   if (new Date(data.date_expiration) < new Date()) return { erreur: "Ce lien a expiré. Demande-en un nouveau à l'administrateur." };
+  // 09/10 : le rôle d'un lien doit exister au moment où il sert (un rôle créé depuis l'écran a pu être supprimé depuis).
+  const refusRole = await verifierRoleDuLienOuvert({ role: data.role, invitablesIntegres: ROLES_INVITABLES, supabase });
+  if (refusRole) return { erreur: refusRole.error, statut: refusRole.status };
   return { invitation: data };
 }
 
@@ -331,8 +334,8 @@ app.get('/invitation/:token', async (req, res) => {
   if (limiteInvitationAtteinte(req.ip)) {
     return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
   }
-  const { erreur, invitation } = await lireInvitationUtilisable(req.params.token);
-  if (erreur) return res.status(404).json({ error: erreur });
+  const { erreur, statut, invitation } = await lireInvitationUtilisable(req.params.token);
+  if (erreur) return res.status(statut || 404).json({ error: erreur });
   // role_libelle (09/10) : la personne invitée n'est pas connectée, donc ne peut pas lire la table des
   // rôles — le NOM d'un rôle personnalisé doit lui être donné ici (null pour un rôle du code, que l'app
   // connaît déjà). Une table illisible ne doit jamais empêcher l'invitation de s'afficher.
@@ -365,8 +368,8 @@ app.post('/invitation/:token/creer-compte', async (req, res) => {
     return res.status(400).json({ error: "Le nom complet est requis." });
   }
 
-  const { erreur } = await lireInvitationUtilisable(req.params.token);
-  if (erreur) return res.status(404).json({ error: erreur });
+  const { erreur, statut } = await lireInvitationUtilisable(req.params.token);
+  if (erreur) return res.status(statut || 404).json({ error: erreur });
 
   // RÉSERVATION ATOMIQUE avant toute création : la condition utilise_le IS NULL est évaluée par
   // Postgres, pas par nous — deux requêtes simultanées avec le même jeton ne peuvent pas passer

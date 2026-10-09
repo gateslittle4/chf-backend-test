@@ -257,6 +257,19 @@ async function verifierRoleInvitation({ role, invitablesIntegres, table, supabas
   return null;
 }
 
+// Un lien d'invitation DÉJÀ ÉMIS donne-t-il encore un rôle qui existe ? Un rôle créé depuis l'écran peut avoir été
+// supprimé après la génération du lien : le compte créé n'aurait alors aucun droit, sans que personne sache pourquoi.
+// Renvoie null (le lien reste utilisable) ou { status, error }. Les rôles du code n'ont besoin d'aucune lecture.
+async function verifierRoleDuLienOuvert({ role, invitablesIntegres, supabase }) {
+  if (invitablesIntegres.includes(role)) return null;
+  const lecture = await lireTablePermissions(supabase);
+  if (lecture.erreur) return { status: 503, error: "Vérification du lien impossible pour le moment. Réessaie dans un instant." };
+  if (!rolesInvitablesAvecPersonnalises(invitablesIntegres, lecture.table).includes(role)) {
+    return { status: 404, error: "Ce lien n'est plus valable : le rôle qu'il donnait n'existe plus. Demande-en un nouveau à l'administrateur." };
+  }
+  return null;
+}
+
 // Enregistre la table des permissions : vérifie, garde les suppressions, écrit, journalise.
 //   supabase    : client (service_role)
 //   utilisateur : { id, email } de la personne connectée
@@ -295,9 +308,14 @@ async function appliquerMiseAJourPermissions({ items, supabase, utilisateur, cle
   const date = new Date().toISOString();
   const par = { effectue_par: utilisateur.email || utilisateur.id, effectue_par_uid: utilisateur.id };
   const libelleDe = (role) => (verif.items.find(e => e.role === role) || {}).libelle || null;
+  // Nom d'un rôle SUPPRIMÉ : il n'est plus dans la nouvelle table, on le lit dans l'ancienne (journal lisible).
+  const libelleAvant = (role) => {
+    const e = (lecture.table || []).find(x => estRolePersonnalise(x) && x.role === role);
+    return e && typeof e.libelle === 'string' ? e.libelle : null;
+  };
   const lignes = [
     ...verif.crees.map(role => ({ action: 'creation_role', details: { role, libelle: libelleDe(role), permissions: verif.items.find(e => e.role === role).permissions } })),
-    ...verif.supprimes.map(role => ({ action: 'suppression_role', details: { role } })),
+    ...verif.supprimes.map(role => ({ action: 'suppression_role', details: { role, libelle: libelleAvant(role) } })),
     ...verif.renommes.map(r => ({ action: 'renommage_role', details: r })),
     ...verif.modifies.map(m => ({ action: 'modification_droits_role', details: m })),
   ];
@@ -311,7 +329,7 @@ async function appliquerMiseAJourPermissions({ items, supabase, utilisateur, cle
 
 module.exports = {
   CLE_ROLE, LONGUEUR_CLE, CLES_RESERVEES, LONGUEUR_LIBELLE, LIBELLE_AUTORISE, MAX_ROLES_PERSONNALISES, MAX_ENTREES, LIBELLES_INTEGRES,
-  MESSAGE_SQL_ROLES_PERSONNALISES, MESSAGE_ROLE_NON_ACTIVE_INVITE, MESSAGE_SQL_AVANT_CREATION, etatBasePourRolesPersonnalises, verifierRoleInvitation,
+  MESSAGE_SQL_ROLES_PERSONNALISES, MESSAGE_ROLE_NON_ACTIVE_INVITE, MESSAGE_SQL_AVANT_CREATION, etatBasePourRolesPersonnalises, verifierRoleInvitation, verifierRoleDuLienOuvert,
   normaliserLibelle, formeComparable, estRolePersonnalise, verifierTablePermissions, lireTablePermissions,
   rolesInvitablesAvecPersonnalises, libelleRolePersonnalise, refusDeRoleParLaBase, appliquerMiseAJourPermissions,
 };

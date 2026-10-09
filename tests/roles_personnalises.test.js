@@ -10,7 +10,7 @@ const roles = require('../utils/roles');
 const {
   verifierTablePermissions, appliquerMiseAJourPermissions, rolesInvitablesAvecPersonnalises, libelleRolePersonnalise,
   refusDeRoleParLaBase, formeComparable, normaliserLibelle, LIBELLES_INTEGRES, MAX_ROLES_PERSONNALISES,
-  verifierRoleInvitation, etatBasePourRolesPersonnalises,
+  verifierRoleInvitation, etatBasePourRolesPersonnalises, verifierRoleDuLienOuvert,
 } = roles;
 
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -294,6 +294,7 @@ test("Supprimer un rôle que personne n'a : accepté et consigné « suppression
   assert.strictEqual(r.status, 200);
   assert.deepStrictEqual(base.appels.requetesComptes, [['caissier_nuit']]);
   assert.deepStrictEqual(base.appels.audits.map(a => a.action), ['suppression_role']);
+  assert.deepStrictEqual(base.appels.audits[0].details, { role: 'caissier_nuit', libelle: 'Caissier de nuit' }, "le nom du rôle supprimé est conservé : le journal doit rester lisible");
   assert.strictEqual(base.appels.upserts[0].items.some(e => e.role === 'caissier_nuit'), false);
 });
 
@@ -478,6 +479,37 @@ test("verifierRoleInvitation : rôle du code accepté sans interroger la base ; 
 });
 
 // ---------------------------------------------------------------------------------------------------------
+// Lien d'invitation déjà émis dont le rôle a été supprimé depuis
+// ---------------------------------------------------------------------------------------------------------
+test("verifierRoleDuLienOuvert : un rôle du code ne demande aucune lecture ; un rôle créé doit encore exister ; table illisible = 503 ; administrateur jamais", async () => {
+  const invitables = ['direction', 'medecin'];
+  const decision = async (role, base) => ({ r: await verifierRoleDuLienOuvert({ role, invitablesIntegres: invitables, supabase: base }), base });
+  // Rôle du code : accepté sans même lire la table (une panne de lecture ne doit pas bloquer les liens ordinaires).
+  let d = await decision('medecin', fauxSupabase({ erreurLecture: 'panne' }));
+  assert.strictEqual(d.r, null);
+  // Rôle créé et toujours dans la table : accepté.
+  d = await decision('caissier_nuit', fauxSupabase({ catalogue: [...tableDuCode(), perso('caissier_nuit', 'Caissier de nuit')] }));
+  assert.strictEqual(d.r, null);
+  // Rôle supprimé depuis : le lien ne sert plus, avec un message que la personne invitée comprend.
+  d = await decision('caissier_nuit', fauxSupabase({ catalogue: tableDuCode() }));
+  assert.strictEqual(d.r.status, 404);
+  assert.match(d.r.error, /n'est plus valable/);
+  assert.match(d.r.error, /le rôle qu'il donnait n'existe plus/);
+  // Table jamais enregistrée : aucun rôle créé n'existe.
+  d = await decision('caissier_nuit', fauxSupabase({ catalogue: null }));
+  assert.strictEqual(d.r.status, 404);
+  // Panne de lecture : « réessaie », pas « lien invalide ».
+  d = await decision('caissier_nuit', fauxSupabase({ erreurLecture: 'panne' }));
+  assert.strictEqual(d.r.status, 503);
+  assert.match(d.r.error, /Réessaie/);
+  // Une entrée « personnalisée » nommée administrateur, ou un rôle inconnu : jamais.
+  d = await decision('administrateur', fauxSupabase({ catalogue: [...tableDuCode(), { role: 'administrateur', personnalise: true, libelle: 'Admin bis', permissions: [] }] }));
+  assert.strictEqual(d.r.status, 404);
+  d = await decision('inconnu', fauxSupabase({ catalogue: tableDuCode() }));
+  assert.strictEqual(d.r.status, 404);
+});
+
+// ---------------------------------------------------------------------------------------------------------
 // Câblage dans server.js
 // ---------------------------------------------------------------------------------------------------------
 test("server.js : la table des permissions ne s'écrit que par utils/roles.js, AVANT l'écriture générique du catalogue", () => {
@@ -501,6 +533,16 @@ test("server.js : l'invitation passe par verifierRoleInvitation (rôles du code 
   const page = serverSrc.slice(serverSrc.indexOf("app.get('/invitation/:token'"), serverSrc.indexOf("app.post('/invitation/:token/creer-compte'"));
   assert.match(page, /role_libelle: roleLibelle/);
   assert.match(page, /libelleRolePersonnalise\(invitation\.role, lectureRoles\.table\)/);
+});
+
+test("server.js : un lien d'invitation dont le rôle n'existe plus est refusé à l'affichage ET à la création du compte (même vérification, statut conservé)", () => {
+  const lecture = serverSrc.slice(serverSrc.indexOf('async function lireInvitationUtilisable(token)'), serverSrc.indexOf("app.get('/invitation/:token'"));
+  assert.ok(lecture.indexOf('new Date(data.date_expiration) < new Date()') < lecture.indexOf('verifierRoleDuLienOuvert({ role: data.role, invitablesIntegres: ROLES_INVITABLES, supabase })'), "contrôle du rôle après les contrôles de base du lien");
+  assert.match(lecture, /if \(refusRole\) return \{ erreur: refusRole\.error, statut: refusRole\.status \};/);
+  const page = serverSrc.slice(serverSrc.indexOf("app.get('/invitation/:token'"), serverSrc.indexOf("app.post('/invitation/:token/creer-compte'"));
+  assert.match(page, /const \{ erreur, statut, invitation \} = await lireInvitationUtilisable\(req\.params\.token\);\s*if \(erreur\) return res\.status\(statut \|\| 404\)/);
+  const creation = serverSrc.slice(serverSrc.indexOf("app.post('/invitation/:token/creer-compte'"), serverSrc.indexOf("RÉSERVATION ATOMIQUE"));
+  assert.match(creation, /const \{ erreur, statut \} = await lireInvitationUtilisable\(req\.params\.token\);\s*if \(erreur\) return res\.status\(statut \|\| 404\)/);
 });
 
 test("server.js : GET /api/admin/roles-personnalises/pret exige utilisateurs_gerer AVANT d'interroger la base, puis répond { pret }", () => {
