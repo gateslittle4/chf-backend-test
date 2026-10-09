@@ -1,3 +1,24 @@
+# 🧩 RÔLES CRÉÉS DEPUIS L'APP (09/10) — côté serveur
+
+Détail complet, décisions et pièges : section « 🧩 RÔLES CRÉÉS DEPUIS L'APP » des notes de chf-app2. Ici, ce qu'il faut savoir en lisant ce dépôt :
+- **`utils/roles.js`** est la SEULE barrière (l'écran n'est qu'un confort) : `verifierTablePermissions` (validation + normalisation de la table envoyée à
+  `PUT /api/catalog/permissions`, calcul de ce qui est créé / supprimé / renommé / modifié), `appliquerMiseAJourPermissions` (lecture de l'ancienne table → vérif
+  → refus de supprimer un rôle encore attribué (409) → garde « la base accepte-t-elle les rôles créés ? » à la CRÉATION seulement → écriture → audit
+  `creation_role` / `suppression_role` / `renommage_role` / `modification_droits_role`), `verifierRoleInvitation` (création d'un lien), `verifierRoleDuLienOuvert`
+  (lien déjà émis dont le rôle a été supprimé), `etatBasePourRolesPersonnalises` (appelle la fonction SQL `roles_personnalises_actifs()`).
+- `server.js` ne fait que câbler : `PUT /api/catalog/:type` (cas `permissions`), `POST /api/admin/invitations`, `GET /api/admin/roles-personnalises/pret`
+  (droit `utilisateurs_gerer`), `GET /invitation/:token` (renvoie `role_libelle`), acceptation d'un lien (refus de la base ⇒ compte Firebase orphelin supprimé,
+  lien relâché, message à la personne invitée). Un rôle créé n'est JAMAIS administrateur (sa clé ne peut pas être celle d'un rôle du code).
+- **`sql/roles_personnalises.sql`** — à coller UNE fois par Esdras (**pas encore appliqué** au 09/10) : fonction de garde-fou + contrôle de FORMAT
+  de `users_role_check` à la place de la liste fixe + `NOTIFY pgrst`. Les 5 `sql/ajoute_role_*.sql` sont OBSOLÈTES (bandeau, test) : ne plus en écrire.
+  Test sur un Postgres 16 jetable : `python3 scripts/test-roles-personnalises-sql.py` (à relancer si le SQL ou `CLE_ROLE` change).
+- Tests : `tests/roles_personnalises.test.js` (253 tests au total dans ce dépôt), dont le SQL comparé à `CLE_ROLE` sur des centaines d'exemples. `tests/regressions.test.js`
+  a deux tests adaptés (invitations, upsert du catalogue).
+- Ajouter un rôle livré avec le code (comme `pharmacien_chef`) : entrée dans `PERMISSIONS_PAR_DEFAUT` + `ROLES_INVITABLES` + `LIBELLES_INTEGRES` (utils/roles.js) ;
+  plus de SQL. Un test échoue si `LIBELLES_INTEGRES` ne couvre pas exactement les rôles du code.
+
+---
+
 # ✅ IDEMPOTENCE EN PRODUCTION (30/09)
 
 `utils/idempotence.js` (en-tête Idempotency-Key) + fusion de main : PR #10 fusionnée le 30/09

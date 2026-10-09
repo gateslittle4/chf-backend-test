@@ -42,7 +42,7 @@
 --   • annulable : REVOKE EXECUTE ON FUNCTION public.mon_role_chf() FROM authenticated;
 --
 -- ⚠️ À COLLER par un humain dans Supabase → SQL Editor, dans le VRAI projet CHF (règle du projet : on
--- ne modifie jamais la base sans Esdras). Statut : PAS ENCORE CONFIRMÉ APPLIQUÉ.
+-- ne modifie jamais la base sans Esdras). Statut : APPLIQUÉ par Esdras le 09/10 — l'app se charge de nouveau.
 --
 -- SI L'APP RESTE BLOQUÉE APRÈS CE SCRIPT (le tableau du bas montre `true` partout) : la requête ne
 -- s'exécute probablement pas en tant que `authenticated` (jeton Firebase sans la revendication
