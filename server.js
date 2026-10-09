@@ -37,6 +37,7 @@ const supabase = createClient(
 );
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
+const { memePatient } = require('./utils/dossiers');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -1260,7 +1261,29 @@ app.post('/api/dossiers', async (req, res) => {
       // création hors ligne bloquée sur ce conflit était réessayée indéfiniment toutes les 30
       // secondes (elle ne peut pourtant jamais réussir avec les mêmes données) au lieu d'être
       // signalée clairement une seule fois. Voir CHF_API.syncPending (api/supabase.js, chf-app2).
-      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
+      //
+      // 09/10 (Esdras : « quand le net est tombé, il n'y aura plus de connexion entre les deux ordinateurs ») :
+      // si le dossier qui porte déjà ce numéro porte AUSSI ce nom (accents, majuscules, ponctuation et ordre des mots
+      // mis à part), c'est le MÊME patient enregistré deux fois — typiquement à la porte et à la caisse pendant une
+      // coupure d'internet. Au lieu de refuser (et d'abandonner en cascade l'épisode, la fiche et le PAIEMENT que la
+      // caisse a déjà reçus), on renvoie le dossier existant : l'app rattache tout à lui. Le numéro identifie le
+      // patient, le nom le confirme ; un nom DIFFÉRENT reste un vrai conflit (409), avec le nom du dossier en place.
+      const { data: memeNumero } = await supabase.from('dossiers').select('*').eq('numero_dossier', numero_dossier).maybeSingle();
+      if (memeNumero && memePatient(memeNumero, nom)) {
+        // Trace (best-effort, comme partout : un journal qui refuse la ligne ne doit pas bloquer la caisse) — la direction
+        // voit ainsi chaque fois que deux enregistrements ont été réunis.
+        try {
+          const { error: erreurAudit } = await supabase.from('audit_log').insert({
+            id: crypto.randomUUID(), action: 'dossier_deja_enregistre',
+            effectue_par: (req.user && (req.user.email || req.user.id)) || null, effectue_par_uid: (req.user && req.user.id) || null,
+            details: { numero_dossier, nom_recu: nom, nom_existant: memeNumero.nom, dossier_id: memeNumero.id },
+            date: new Date().toISOString(),
+          });
+          if (erreurAudit) console.warn('Audit « dossier déjà enregistré » non enregistré :', erreurAudit.message);
+        } catch (e) { console.warn('Audit « dossier déjà enregistré » non enregistré :', e.message); }
+        return res.status(200).json({ ...memeNumero, dejaEnregistre: true });
+      }
+      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient${memeNumero && memeNumero.nom ? ` (« ${memeNumero.nom} »)` : ''}.` });
     }
     return res.status(500).json({ error: error.message });
   }
