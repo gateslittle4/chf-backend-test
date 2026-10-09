@@ -27,6 +27,9 @@
 // doublé (« administrateur_ » ne doit pas pouvoir faire illusion). Même règle que sql/roles_personnalises.sql.
 const CLE_ROLE = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
 const LONGUEUR_CLE = { min: 3, max: 30 };
+// Mots qui ne doivent jamais servir d'identifiant de rôle : du code qui indexe un objet avec le rôle (ou compare à
+// une valeur absente) pourrait les confondre avec autre chose. Même liste que chf-app2 (utils/rolesPersonnalises.js).
+const CLES_RESERVEES = ['constructor', 'prototype', 'undefined', 'null', 'true', 'false'];
 const LONGUEUR_LIBELLE = { min: 3, max: 40 };
 // Lettres, chiffres, emoji (comme « 💊 Pharmacien »), espace simple, apostrophes, parenthèses, tiret, point,
 // virgule, barre oblique. Ni < > " ` & ni aucun caractère invisible ou de contrôle (sauf le liant d'emoji).
@@ -145,6 +148,7 @@ function verifierTablePermissions(items, { anciens, clesIntegrees, defauts }) {
     if (role.length < LONGUEUR_CLE.min || role.length > LONGUEUR_CLE.max || !CLE_ROLE.test(role)) {
       return refus(400, `Identifiant de rôle invalide (« ${role} ») : ${LONGUEUR_CLE.min} à ${LONGUEUR_CLE.max} caractères, minuscules, chiffres et tirets bas entre deux mots.`);
     }
+    if (CLES_RESERVEES.includes(role)) return refus(400, `L'identifiant « ${role} » est réservé : choisis un autre nom de rôle.`);
     const libelle = normaliserLibelle(brute.libelle);
     const erreurLibelle = validerLibelle(libelle);
     if (erreurLibelle) return refus(400, `${erreurLibelle} (rôle « ${role} »)`);
@@ -257,7 +261,7 @@ async function appliquerMiseAJourPermissions({ items, supabase, utilisateur, cle
 }
 
 module.exports = {
-  CLE_ROLE, LONGUEUR_CLE, LONGUEUR_LIBELLE, LIBELLE_AUTORISE, MAX_ROLES_PERSONNALISES, MAX_ENTREES, LIBELLES_INTEGRES,
+  CLE_ROLE, LONGUEUR_CLE, CLES_RESERVEES, LONGUEUR_LIBELLE, LIBELLE_AUTORISE, MAX_ROLES_PERSONNALISES, MAX_ENTREES, LIBELLES_INTEGRES,
   MESSAGE_SQL_ROLES_PERSONNALISES, MESSAGE_ROLE_NON_ACTIVE_INVITE,
   normaliserLibelle, formeComparable, estRolePersonnalise, verifierTablePermissions, lireTablePermissions,
   rolesInvitablesAvecPersonnalises, libelleRolePersonnalise, refusDeRoleParLaBase, appliquerMiseAJourPermissions,

@@ -131,10 +131,14 @@ test("Clés techniques invalides refusées (majuscules, chiffre au début, tiret
   assert.strictEqual(verifier([...tableDuCode(), perso('a' + 'b'.repeat(29), 'Un nom correct')]).ok, true);
 });
 
-test("Une clé comme « constructor » ou « toString » n'abîme rien (aucune table d'objets indexée par rôle)", () => {
-  for (const cle of ['constructor', 'tostring', 'valueof']) {
+test("Mots réservés (constructor, null, undefined...) refusés comme identifiant ; les autres clés « ressemblantes » n'abîment rien", () => {
+  for (const cle of roles.CLES_RESERVEES) {
     const r = verifier([...tableDuCode(), perso(cle, 'Un nom correct')]);
-    assert.strictEqual(r.ok, true, cle);
+    assert.strictEqual(r.ok, false, cle);
+    assert.match(r.error, /réservé|invalide/, cle);
+  }
+  for (const cle of ['tostring', 'valueof', 'hasownproperty']) {
+    assert.strictEqual(verifier([...tableDuCode(), perso(cle, 'Un nom correct')]).ok, true, cle);
   }
   assert.strictEqual({}.polluee, undefined);
 });
