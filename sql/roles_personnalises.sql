@@ -16,7 +16,8 @@
 --      refusait son rôle : il restait sans profil, et à sa première connexion l'app lui aurait donné le rôle
 --      « auditeur » — des droits que personne n'a décidés. Réservée au serveur (service_role) : ni les visiteurs
 --      ni les personnes connectées ne peuvent l'appeler (même principe que PLAN_RLS.md) ; elle ne lit que la
---      définition de la contrainte, rien d'autre.
+--      définition de la contrainte, rien d'autre. Aucune règle RLS ne l'utilise : retirer ce droit ne touche donc à rien
+--      d'autre dans l'app (contrairement à l'incident du 08/10, où c'était mon_role_chf(), utilisée par les règles RLS).
 --   2) le contrôle de FORMAT, en UNE SEULE instruction (DROP + ADD dans le même ALTER TABLE) : atomique. Si un
 --      compte existant a un rôle qui ne respecte pas ce format, Postgres refuse (« check constraint
 --      "users_role_check" ... is violated by some row ») et RIEN ne change — la fonction de l'étape 1 répond alors
