@@ -37,6 +37,11 @@ const supabase = createClient(
 );
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
+// Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
+const {
+  appliquerMiseAJourPermissions, lireTablePermissions, rolesInvitablesAvecPersonnalises, libelleRolePersonnalise,
+  refusDeRoleParLaBase, MESSAGE_ROLE_NON_ACTIVE_INVITE,
+} = require('./utils/roles');
 
 // Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
 // que le serveur puisse vérifier une permission même si la table catalog('permissions') est
@@ -328,9 +333,14 @@ app.get('/invitation/:token', async (req, res) => {
   }
   const { erreur, invitation } = await lireInvitationUtilisable(req.params.token);
   if (erreur) return res.status(404).json({ error: erreur });
+  // role_libelle (09/10) : la personne invitée n'est pas connectée, donc ne peut pas lire la table des
+  // rôles — le NOM d'un rôle personnalisé doit lui être donné ici (null pour un rôle du code, que l'app
+  // connaît déjà). Une table illisible ne doit jamais empêcher l'invitation de s'afficher.
+  const lectureRoles = await lireTablePermissions(supabase);
+  const roleLibelle = lectureRoles.table ? libelleRolePersonnalise(invitation.role, lectureRoles.table) : null;
   // Rien d'autre ne sort d'ici : ni qui a créé le lien, ni la note interne de l'administrateur
   // (« le nouveau caissier de nuit »), qui ne regarde pas la personne invitée.
-  res.json({ valide: true, role: invitation.role, expire_le: invitation.date_expiration });
+  res.json({ valide: true, role: invitation.role, role_libelle: roleLibelle, expire_le: invitation.date_expiration });
 });
 
 app.post('/invitation/:token/creer-compte', async (req, res) => {
@@ -417,6 +427,13 @@ app.post('/invitation/:token/creer-compte', async (req, res) => {
     // l'invité puisse simplement recommencer avec le même lien, relâché juste après.
     try { await getAuth().deleteUser(nouvelUtilisateur.uid); } catch (_) {}
     await relacher();
+    // Rôle personnalisé alors que la base a encore l'ancienne liste fixe (sql/roles_personnalises.sql pas
+    // collé) : la personne invitée ne peut rien y faire — elle doit prévenir l'administrateur. Le lien est
+    // relâché, elle réessaiera avec le même. Le détail pour l'administrateur reste dans les journaux.
+    if (refusDeRoleParLaBase(erreurProfil)) {
+      console.error(`⚠️ Création par invitation refusée : la base n'accepte pas le rôle « ${invitation.role} » (users_role_check). Coller sql/roles_personnalises.sql dans Supabase (SQL Editor).`);
+      return res.status(409).json({ error: MESSAGE_ROLE_NON_ACTIVE_INVITE });
+    }
     return res.status(500).json({ error: erreurProfil.message });
   }
 
@@ -1893,6 +1910,18 @@ app.put('/api/catalog/:type', async (req, res) => {
     permissionOk = await aPermission(req.user.id, 'catalogue_gerer');
   }
   if (!permissionOk) return res.status(403).json({ error: `Permission requise pour modifier le catalogue "${type}".` });
+  // 'permissions' (09/10, rôles personnalisés) : cette table contient maintenant les rôles créés depuis
+  // l'écran Rôles & permissions. Elle ne s'écrit QUE par utils/roles.js : rôle du code non usurpable, nouvelle
+  // clé obligatoirement déclarée personnalisée et validée, aucun champ libre, suppression d'un rôle encore
+  // attribué refusée (409), changements consignés dans audit_log.
+  if (type === 'permissions') {
+    const resultat = await appliquerMiseAJourPermissions({
+      items: (req.body || {}).items, supabase, utilisateur: req.user,
+      clesIntegrees: new Set(['administrateur', ...PERMISSIONS_PAR_DEFAUT.map(r => r.role)]),
+      defauts: PERMISSIONS_PAR_DEFAUT, genererId: () => crypto.randomUUID(),
+    });
+    return res.status(resultat.status).json(resultat.body);
+  }
   const { items } = req.body;
   // upsert (pas update) : la toute première écriture doit pouvoir CRÉER la ligne si elle
   // n'existe pas encore — un simple update ne peut jamais créer une ligne absente.
@@ -2843,6 +2872,9 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
 // lisible longtemps après coup. Donner les pleins pouvoirs par ce canal serait le maillon le plus
 // faible de toute la sécurité de l'app — un administrateur se crée à la main, depuis Gestion des
 // utilisateurs, avec un mot de passe que l'administrateur en place choisit lui-même.
+// Ce sont les rôles DU CODE ; les rôles personnalisés (créés depuis l'écran Rôles & permissions) s'y ajoutent
+// dynamiquement — voir rolesInvitablesAvecPersonnalises (utils/roles.js). Aucun rôle personnalisé ne peut être
+// administrateur : sa clé ne peut pas être celle d'un rôle du code.
 const ROLES_INVITABLES = ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste', 'infirmier', 'infirmier_chef', 'medecin', 'pharmacien', 'pharmacien_chef', 'visiteur'];
 // Durées proposées à l'écran. Bornées ici aussi : le corps de la requête ne doit pas pouvoir
 // fabriquer un lien valable dix ans.
@@ -2853,8 +2885,11 @@ app.post('/api/admin/invitations', async (req, res) => {
     return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
   }
   const { role, heuresValidite, note } = req.body || {};
-  if (!ROLES_INVITABLES.includes(role)) {
-    return res.status(400).json({ error: `Rôle invalide ou non autorisé par lien d'invitation. Rôles possibles : ${ROLES_INVITABLES.join(', ')}.` });
+  const lectureRoles = await lireTablePermissions(supabase);
+  if (lectureRoles.erreur) return res.status(500).json({ error: lectureRoles.erreur.message });
+  const rolesPossibles = rolesInvitablesAvecPersonnalises(ROLES_INVITABLES, lectureRoles.table);
+  if (!rolesPossibles.includes(role)) {
+    return res.status(400).json({ error: `Rôle invalide ou non autorisé par lien d'invitation. Rôles possibles : ${rolesPossibles.join(', ')}.` });
   }
   const heures = Number(heuresValidite);
   if (!Number.isFinite(heures) || heures <= 0 || heures > HEURES_VALIDITE_MAX) {

@@ -63,12 +63,14 @@ test("Toutes les écritures (update/insert) vérifient une ligne réellement aff
 });
 
 test("La route de catalogue utilise upsert (pas update seul) — sinon impossible de créer la toute première ligne", () => {
-  const blocCatalog = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog"));
-  // Fenêtre volontairement large : ce commentaire s'allonge à chaque session qui documente une
-  // nouvelle exception de permission sur cette route (permissions/parametres/sessions_caisse...) —
-  // un chiffre trop serré casserait ce test à chaque nouvelle explication, sans rapport avec ce
-  // qu'il vérifie réellement (upsert, pas update seul).
-  assert.match(blocCatalog.slice(0, 3000), /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
+  // Toute la route (jusqu'à la suivante), pas une fenêtre de N caractères : le commentaire de cette route
+  // s'allonge à chaque session qui documente une nouvelle exception (permissions/parametres/sessions_caisse,
+  // et depuis le 09/10 les rôles personnalisés) — un chiffre fixe casserait ce test à chaque explication,
+  // sans rapport avec ce qu'il vérifie réellement (upsert, pas update seul).
+  const blocCatalog = serverSrc.slice(serverSrc.indexOf("app.put('/api/catalog"), serverSrc.indexOf("app.post('/api/catalog/:type/item'"));
+  assert.match(blocCatalog, /\.upsert\(/, "PUT /api/catalog doit utiliser upsert, pas update seul");
+  // La table des permissions, elle, passe par utils/roles.js, qui écrit aussi avec upsert (sinon la toute 1re ligne ne se crée pas).
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'utils', 'roles.js'), 'utf8'), /\.upsert\(\{ type: 'permissions'[\s\S]*onConflict: 'type'/);
 });
 
 test("POST /api/paiements en mode remboursement_credit relit le solde en base — n'accepte jamais tel quel le solde_restant envoyé par le navigateur", () => {
@@ -1810,7 +1812,11 @@ test("Un lien d'invitation ne peut JAMAIS donner le rôle administrateur", () =>
   assert.doesNotMatch(ligne[0], /'administrateur'/, "un lien voyage dans WhatsApp : les pleins pouvoirs se donnent à la main");
   // Et la vérification doit être faite côté serveur, pas seulement en cachant l'option à l'écran.
   const bloc = blocRoutePermission("app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'");
-  assert.match(bloc, /ROLES_INVITABLES\.includes\(role\)/);
+  // Depuis le 09/10 la liste vérifiée = rôles du code (ROLES_INVITABLES, sans administrateur) + rôles
+  // personnalisés ; rolesInvitablesAvecPersonnalises n'y ajoute JAMAIS administrateur (testé dans
+  // tests/roles_personnalises.test.js, mutation M16).
+  assert.match(bloc, /rolesInvitablesAvecPersonnalises\(ROLES_INVITABLES, lectureRoles\.table\)/);
+  assert.match(bloc, /if \(!rolesPossibles\.includes\(role\)\)/);
   assert.match(bloc, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/);
 });
 
