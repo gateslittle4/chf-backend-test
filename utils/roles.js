@@ -216,6 +216,47 @@ const MESSAGE_SQL_ROLES_PERSONNALISES =
 const MESSAGE_ROLE_NON_ACTIVE_INVITE =
   "Ton rôle n'est pas encore activé dans la base de données : préviens l'administrateur (il lui reste une étape de configuration), puis réessaie avec le même lien — il n'est pas perdu.";
 
+// La base accepte-t-elle les rôles créés depuis l'écran ? Interroge le garde-fou installé par
+// sql/roles_personnalises.sql (fonction roles_personnalises_actifs, réservée au serveur). Sert à REFUSER, avant
+// qu'il soit trop tard, un rôle que la base refuserait d'attribuer : sinon un compte de connexion pouvait être
+// créé sans profil, et l'app lui aurait donné le rôle « auditeur » à sa première connexion.
+// Renvoie { pret: true } | { pret: false } (script pas collé, ou remis à l'ancienne liste fixe) | { erreur }
+// (base injoignable...). Une fonction absente (code 42883 ou PGRST202) veut dire « script pas collé ».
+async function etatBasePourRolesPersonnalises(supabase) {
+  let reponse;
+  try { reponse = await supabase.rpc('roles_personnalises_actifs'); }
+  catch (e) { return { erreur: { message: (e && e.message) || String(e) } }; }
+  const { data, error } = reponse || {};
+  if (error) {
+    // Seule l'absence de CETTE fonction signifie « script pas collé » ; toute autre erreur (réseau, droit refusé,
+    // table introuvable...) reste une erreur, pour qu'on la voie au lieu de la prendre pour une réponse.
+    const absente = error.code === '42883' || error.code === 'PGRST202'
+      || /could not find the function|function .*does not exist/i.test(String(error.message || ''));
+    return absente ? { pret: false } : { erreur: error };
+  }
+  return { pret: data === true };
+}
+const MESSAGE_SQL_AVANT_CREATION =
+  "Avant de créer un rôle, il faut coller UNE fois le script roles_personnalises.sql dans Supabase (SQL Editor) : sans lui, la base refuserait d'attribuer ce rôle à quelqu'un. Rien n'a été enregistré.";
+
+// Un lien d'invitation peut-il accorder ce rôle ? Renvoie null (oui) ou { status, error } à renvoyer tel quel.
+// - rôle absent des rôles invitables (administrateur compris) : 400 ;
+// - rôle créé depuis l'écran : la base doit l'accepter (script SQL collé), sinon la personne invitée tomberait sur
+//   une erreur qu'elle ne peut pas résoudre : 409 (ou 500 si la base ne répond pas). Les rôles du code n'ont besoin
+//   d'aucune vérification de ce genre.
+async function verifierRoleInvitation({ role, invitablesIntegres, table, supabase }) {
+  const possibles = rolesInvitablesAvecPersonnalises(invitablesIntegres, table);
+  if (!possibles.includes(role)) {
+    return { status: 400, error: `Rôle invalide ou non autorisé par lien d'invitation. Rôles possibles : ${possibles.join(', ')}.` };
+  }
+  if (!invitablesIntegres.includes(role)) {
+    const etat = await etatBasePourRolesPersonnalises(supabase);
+    if (etat.erreur) return { status: 500, error: `Vérification de la base impossible : ${etat.erreur.message}` };
+    if (!etat.pret) return { status: 409, error: MESSAGE_SQL_ROLES_PERSONNALISES };
+  }
+  return null;
+}
+
 // Enregistre la table des permissions : vérifie, garde les suppressions, écrit, journalise.
 //   supabase    : client (service_role)
 //   utilisateur : { id, email } de la personne connectée
@@ -234,6 +275,14 @@ async function appliquerMiseAJourPermissions({ items, supabase, utilisateur, cle
       const roles = [...new Set(comptes.map(c => c.role))].join(', ');
       return { status: 409, body: { error: `Impossible de supprimer le rôle « ${roles} » : ${comptes.length} compte(s) l'ont encore (${noms}${comptes.length > 5 ? ', …' : ''}). Donne-leur d'abord un autre rôle.` } };
     }
+  }
+
+  // Création d'au moins un NOUVEAU rôle : la base doit déjà accepter les rôles créés depuis l'écran. (Les autres
+  // enregistrements — droits, renommage, suppression — n'en dépendent pas et ne sont jamais bloqués par ceci.)
+  if (verif.crees.length > 0) {
+    const etat = await etatBasePourRolesPersonnalises(supabase);
+    if (etat.erreur) return { status: 500, body: { error: `Vérification de la base impossible : ${etat.erreur.message}` } };
+    if (!etat.pret) return { status: 409, body: { error: MESSAGE_SQL_AVANT_CREATION } };
   }
 
   const { data, error } = await supabase.from('catalog')
@@ -262,7 +311,7 @@ async function appliquerMiseAJourPermissions({ items, supabase, utilisateur, cle
 
 module.exports = {
   CLE_ROLE, LONGUEUR_CLE, CLES_RESERVEES, LONGUEUR_LIBELLE, LIBELLE_AUTORISE, MAX_ROLES_PERSONNALISES, MAX_ENTREES, LIBELLES_INTEGRES,
-  MESSAGE_SQL_ROLES_PERSONNALISES, MESSAGE_ROLE_NON_ACTIVE_INVITE,
+  MESSAGE_SQL_ROLES_PERSONNALISES, MESSAGE_ROLE_NON_ACTIVE_INVITE, MESSAGE_SQL_AVANT_CREATION, etatBasePourRolesPersonnalises, verifierRoleInvitation,
   normaliserLibelle, formeComparable, estRolePersonnalise, verifierTablePermissions, lireTablePermissions,
   rolesInvitablesAvecPersonnalises, libelleRolePersonnalise, refusDeRoleParLaBase, appliquerMiseAJourPermissions,
 };

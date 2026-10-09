@@ -1813,10 +1813,10 @@ test("Un lien d'invitation ne peut JAMAIS donner le rôle administrateur", () =>
   // Et la vérification doit être faite côté serveur, pas seulement en cachant l'option à l'écran.
   const bloc = blocRoutePermission("app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'");
   // Depuis le 09/10 la liste vérifiée = rôles du code (ROLES_INVITABLES, sans administrateur) + rôles
-  // personnalisés ; rolesInvitablesAvecPersonnalises n'y ajoute JAMAIS administrateur (testé dans
-  // tests/roles_personnalises.test.js, mutation M16).
-  assert.match(bloc, /rolesInvitablesAvecPersonnalises\(ROLES_INVITABLES, lectureRoles\.table\)/);
-  assert.match(bloc, /if \(!rolesPossibles\.includes\(role\)\)/);
+  // personnalisés ; verifierRoleInvitation (utils/roles.js) n'y ajoute JAMAIS administrateur et refuse tout
+  // rôle hors liste — tests/roles_personnalises.test.js l'exécute (et la mutation M16 le vérifie).
+  assert.match(bloc, /verifierRoleInvitation\(\{ role, invitablesIntegres: ROLES_INVITABLES, table: lectureRoles\.table, supabase \}\)/);
+  assert.match(bloc, /if \(refusRole\) return res\.status\(refusRole\.status\)\.json\(\{ error: refusRole\.error \}\);/);
   assert.match(bloc, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/);
 });
 

@@ -1,3 +1,9 @@
+-- ATTENTION — OBSOLÈTE depuis le 09/10 : NE PLUS COLLER ce script. Il remettrait la liste FIXE de rôles dans
+-- users_role_check, et les rôles créés depuis l'écran « Rôles & permissions » ne pourraient plus être attribués.
+-- Il est remplacé par sql/roles_personnalises.sql (contrôle de FORMAT à la place de la liste fixe, plus aucun SQL à
+-- coller pour un nouveau rôle). Conservé pour l'historique, et pour recréer une base depuis zéro AVANT de coller
+-- roles_personnalises.sql.
+--
 -- Retour d'Esdras (28/08) : "l'infirmier ne peut voir que Dossier/Épisode et Fiche Patient" +
 -- "laisse les rapports RMS, c'est pour l'infirmier en chef" — nouveau rôle infirmier_chef (mêmes
 -- droits qu'infirmier, plus rapport_chf_voir), pour ne pas donner ce rapport à tous les infirmiers

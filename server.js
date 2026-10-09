@@ -39,8 +39,8 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
-  appliquerMiseAJourPermissions, lireTablePermissions, rolesInvitablesAvecPersonnalises, libelleRolePersonnalise,
-  refusDeRoleParLaBase, MESSAGE_ROLE_NON_ACTIVE_INVITE,
+  appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, libelleRolePersonnalise,
+  refusDeRoleParLaBase, etatBasePourRolesPersonnalises, MESSAGE_ROLE_NON_ACTIVE_INVITE,
 } = require('./utils/roles');
 
 // Miroir exact de utils/permissions.js côté front (mêmes valeurs par défaut) — nécessaire pour
@@ -2887,10 +2887,10 @@ app.post('/api/admin/invitations', async (req, res) => {
   const { role, heuresValidite, note } = req.body || {};
   const lectureRoles = await lireTablePermissions(supabase);
   if (lectureRoles.erreur) return res.status(500).json({ error: lectureRoles.erreur.message });
-  const rolesPossibles = rolesInvitablesAvecPersonnalises(ROLES_INVITABLES, lectureRoles.table);
-  if (!rolesPossibles.includes(role)) {
-    return res.status(400).json({ error: `Rôle invalide ou non autorisé par lien d'invitation. Rôles possibles : ${rolesPossibles.join(', ')}.` });
-  }
+  // Rôles du code + rôles créés depuis l'écran ; un rôle créé depuis l'écran n'est donné par lien que si la base
+  // l'accepte (sql/roles_personnalises.sql collé). Décision dans utils/roles.js, où les tests l'exécutent.
+  const refusRole = await verifierRoleInvitation({ role, invitablesIntegres: ROLES_INVITABLES, table: lectureRoles.table, supabase });
+  if (refusRole) return res.status(refusRole.status).json({ error: refusRole.error });
   const heures = Number(heuresValidite);
   if (!Number.isFinite(heures) || heures <= 0 || heures > HEURES_VALIDITE_MAX) {
     return res.status(400).json({ error: `Durée de validité invalide (entre 1 et ${HEURES_VALIDITE_MAX} heures).` });
@@ -2905,6 +2905,18 @@ app.post('/api/admin/invitations', async (req, res) => {
   }).select().single();
   if (error) return res.status(500).json({ error: error.message });
   res.status(201).json({ ...data, lien: `${ORIGINE_FRONTEND}/invitation/${token}` });
+});
+
+// L'écran Utilisateurs demande, AVANT de créer un compte avec un rôle créé depuis l'écran Rôles & permissions, si la
+// base accepte ce genre de rôle : le compte de connexion est créé en premier, et un refus ensuite le laisserait sans
+// profil (donc « auditeur » à sa première connexion). Réponse { pret: true|false }.
+app.get('/api/admin/roles-personnalises/pret', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'utilisateurs_gerer'))) {
+    return res.status(403).json({ error: "Permission 'utilisateurs_gerer' requise." });
+  }
+  const etat = await etatBasePourRolesPersonnalises(supabase);
+  if (etat.erreur) return res.status(500).json({ error: etat.erreur.message });
+  res.json({ pret: etat.pret });
 });
 
 app.get('/api/admin/invitations', async (req, res) => {

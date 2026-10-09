@@ -10,6 +10,7 @@ const roles = require('../utils/roles');
 const {
   verifierTablePermissions, appliquerMiseAJourPermissions, rolesInvitablesAvecPersonnalises, libelleRolePersonnalise,
   refusDeRoleParLaBase, formeComparable, normaliserLibelle, LIBELLES_INTEGRES, MAX_ROLES_PERSONNALISES,
+  verifierRoleInvitation, etatBasePourRolesPersonnalises,
 } = roles;
 
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -237,10 +238,13 @@ test("refusDeRoleParLaBase reconnaît le refus de users_role_check (et rien d'au
 // ---------------------------------------------------------------------------------------------------------
 // Enregistrement complet (avec une fausse base)
 // ---------------------------------------------------------------------------------------------------------
-function fauxSupabase({ catalogue = null, comptes = [], erreurLecture = null, erreurEcriture = null, erreurAudit = null, ecritureVide = false } = {}) {
-  const appels = { upserts: [], audits: [], requetesComptes: [] };
+// rpc : ce que répond le garde-fou roles_personnalises_actifs() (par défaut « oui », comme une base où le script SQL est collé).
+const BASE_PRETE = { data: true, error: null };
+function fauxSupabase({ catalogue = null, comptes = [], erreurLecture = null, erreurEcriture = null, erreurAudit = null, ecritureVide = false, rpc = BASE_PRETE } = {}) {
+  const appels = { upserts: [], audits: [], requetesComptes: [], rpc: [] };
   return {
     appels,
+    rpc: async (nom) => { appels.rpc.push(nom); return rpc; },
     from(table) {
       if (table === 'catalog') return {
         select: () => ({ eq: () => ({ maybeSingle: async () => (erreurLecture ? { data: null, error: { message: erreurLecture } } : { data: catalogue ? { items: catalogue } : null, error: null }) }) }),
@@ -326,6 +330,154 @@ test("Première sauvegarde (rien d'enregistré avant) : acceptée, sans suppress
 });
 
 // ---------------------------------------------------------------------------------------------------------
+// Garde-fou : la base doit accepter les rôles créés depuis l'écran AVANT qu'on en crée un
+// (sinon un compte de connexion pouvait être créé sans profil, puis recevoir le rôle « auditeur » à sa 1re connexion)
+// ---------------------------------------------------------------------------------------------------------
+const AVEC_NOUVEAU_ROLE = () => [...tableDuCode(), perso('caissier_nuit', 'Caissier de nuit')];
+const PAS_PRETE = { data: false, error: null };
+const fonctionAbsente = (code, message) => ({ data: null, error: { code, message } });
+
+test("Créer un rôle alors que le script SQL n'est pas collé : refusé (409) AVANT toute écriture, avec le message qui dit quoi faire", async () => {
+  const base = fauxSupabase({ catalogue: tableDuCode(), rpc: PAS_PRETE });
+  const r = await appliquer(AVEC_NOUVEAU_ROLE(), base);
+  assert.strictEqual(r.status, 409);
+  assert.strictEqual(r.body.error, roles.MESSAGE_SQL_AVANT_CREATION);
+  assert.match(r.body.error, /roles_personnalises\.sql/);
+  assert.deepStrictEqual(base.appels.rpc, ['roles_personnalises_actifs']);
+  assert.deepStrictEqual([base.appels.upserts.length, base.appels.audits.length], [0, 0], 'rien écrit, rien consigné');
+});
+
+test("Fonction du garde-fou absente (script jamais collé) : même verdict que « pas prête » — codes 42883 et PGRST202, ou message de la base", async () => {
+  const absences = [
+    fonctionAbsente('42883', 'function public.roles_personnalises_actifs() does not exist'),
+    fonctionAbsente('PGRST202', 'Could not find the function public.roles_personnalises_actifs without parameters in the schema cache'),
+    fonctionAbsente(undefined, 'Could not find the function public.roles_personnalises_actifs'),
+    fonctionAbsente(undefined, 'function roles_personnalises_actifs() DOES NOT EXIST'),
+  ];
+  for (const rpc of absences) {
+    const base = fauxSupabase({ catalogue: tableDuCode(), rpc });
+    const r = await appliquer(AVEC_NOUVEAU_ROLE(), base);
+    assert.strictEqual(r.status, 409, JSON.stringify(rpc));
+    assert.strictEqual(base.appels.upserts.length, 0, JSON.stringify(rpc));
+  }
+});
+
+test("Seule la réponse « true » ouvre la création : null, texte, nombre, tableau ou réponse vide comptent comme « pas prête »", async () => {
+  for (const data of [null, undefined, 'true', 't', 1, [], {}, [true]]) {
+    const base = fauxSupabase({ catalogue: tableDuCode(), rpc: { data, error: null } });
+    const r = await appliquer(AVEC_NOUVEAU_ROLE(), base);
+    assert.strictEqual(r.status, 409, JSON.stringify(data));
+    assert.strictEqual(base.appels.upserts.length, 0, JSON.stringify(data));
+  }
+  const base = fauxSupabase({ catalogue: tableDuCode(), rpc: BASE_PRETE });
+  assert.strictEqual((await appliquer(AVEC_NOUVEAU_ROLE(), base)).status, 200);
+});
+
+test("Garde-fou illisible pour une autre raison (base injoignable, droit refusé, délai dépassé) : erreur 500 claire, rien n'écrit — jamais un faux « prête »", async () => {
+  const pannes = [
+    { message: 'fetch failed' },
+    { code: '08006', message: 'connection failure' },
+    { code: '57014', message: 'canceling statement due to statement timeout' },
+    { code: '42501', message: 'permission denied for function roles_personnalises_actifs' },
+    { code: '42P01', message: 'relation "public.users" does not exist' },
+  ];
+  for (const erreur of pannes) {
+    const base = fauxSupabase({ catalogue: tableDuCode(), rpc: { data: null, error: erreur } });
+    const r = await appliquer(AVEC_NOUVEAU_ROLE(), base);
+    assert.strictEqual(r.status, 500, JSON.stringify(erreur));
+    assert.match(r.body.error, /Vérification de la base impossible/);
+    assert.strictEqual(base.appels.upserts.length, 0, JSON.stringify(erreur));
+  }
+});
+
+test("etatBasePourRolesPersonnalises : prête / pas prête / erreur — y compris quand l'appel lui-même plante", async () => {
+  const etat = (reponse) => etatBasePourRolesPersonnalises({ rpc: async (nom) => { assert.strictEqual(nom, 'roles_personnalises_actifs'); return reponse; } });
+  assert.deepStrictEqual(await etat({ data: true, error: null }), { pret: true });
+  assert.deepStrictEqual(await etat({ data: false, error: null }), { pret: false });
+  assert.deepStrictEqual(await etat(fonctionAbsente('42883', 'x')), { pret: false });
+  assert.deepStrictEqual(await etat(fonctionAbsente('PGRST202', 'x')), { pret: false });
+  const panne = { message: 'fetch failed' };
+  assert.deepStrictEqual(await etat({ data: null, error: panne }), { erreur: panne });
+  // Une autre « inexistence » (table, rôle de la base...) n'est PAS prise pour une fonction absente.
+  const autre = { code: '42P01', message: 'relation "public.users" does not exist' };
+  assert.deepStrictEqual(await etat({ data: null, error: autre }), { erreur: autre });
+  assert.deepStrictEqual(await etat(undefined), { pret: false }, 'réponse vide : jamais « prête »');
+  const plante = await etatBasePourRolesPersonnalises({ rpc: async () => { throw new Error('socket hang up'); } });
+  assert.deepStrictEqual(plante, { erreur: { message: 'socket hang up' } });
+});
+
+test("Le garde-fou ne bloque QUE la création : droits, renommage et suppression s'enregistrent même si le script n'est pas collé (la base n'est pas interrogée)", async () => {
+  const avant = [...tableDuCode(), perso('caissier_nuit', 'Caissier de nuit'), perso('chef_nuit', 'Chef de nuit')];
+  const droits = avant.map(e => (e.role === 'caissier_nuit' ? { ...e, permissions: ['caisse_travailler', 'stock_voir'] } : e));
+  const renomme = avant.map(e => (e.role === 'caissier_nuit' ? { ...e, libelle: 'Caissier du soir' } : e));
+  const supprime = avant.filter(e => e.role !== 'chef_nuit');
+  for (const [nom, apres] of [['droits', droits], ['renommage', renomme], ['suppression', supprime]]) {
+    const base = fauxSupabase({ catalogue: avant, rpc: PAS_PRETE });
+    const r = await appliquer(apres, base);
+    assert.strictEqual(r.status, 200, nom);
+    assert.deepStrictEqual(base.appels.rpc, [], `${nom} : pas de question à la base`);
+    assert.strictEqual(base.appels.upserts.length, 1, nom);
+  }
+});
+
+test("Ordre des contrôles : table refusée (400) ou suppression bloquée (409) répondent SANS interroger le garde-fou", async () => {
+  const b1 = fauxSupabase({ catalogue: tableDuCode(), rpc: PAS_PRETE });
+  assert.strictEqual((await appliquer([...tableDuCode(), perso('administrateur', 'Pirate')], b1)).status, 400);
+  assert.deepStrictEqual(b1.appels.rpc, []);
+  // Suppression bloquée ET création dans la même sauvegarde : la suppression bloquée répond d'abord.
+  const avant = [...tableDuCode(), perso('chef_nuit', 'Chef de nuit')];
+  const b2 = fauxSupabase({ catalogue: avant, comptes: [{ id: 'u1', role: 'chef_nuit' }], rpc: PAS_PRETE });
+  const r = await appliquer(AVEC_NOUVEAU_ROLE(), b2);
+  assert.strictEqual(r.status, 409);
+  assert.match(r.body.error, /Impossible de supprimer/);
+  assert.deepStrictEqual(b2.appels.rpc, []);
+});
+
+test("Plusieurs rôles créés d'un coup : une seule question à la base, une seule écriture, un journal par rôle", async () => {
+  const base = fauxSupabase({ catalogue: tableDuCode() });
+  const r = await appliquer([...tableDuCode(), perso('role_un', 'Rôle un'), perso('role_deux', 'Rôle deux')], base);
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(base.appels.rpc, ['roles_personnalises_actifs']);
+  assert.strictEqual(base.appels.upserts.length, 1);
+  assert.deepStrictEqual(base.appels.audits.map(a => a.action), ['creation_role', 'creation_role']);
+});
+
+test("verifierRoleInvitation : rôle du code accepté sans interroger la base ; rôle créé accepté seulement si la base est prête ; administrateur et inconnus refusés", async () => {
+  const invitables = ['direction', 'medecin', 'pharmacien'];
+  const table = [...tableDuCode(), perso('caissier_nuit', 'Caissier de nuit')];
+  const decision = async (role, rpc, t = table) => {
+    const base = fauxSupabase({ rpc });
+    return { r: await verifierRoleInvitation({ role, invitablesIntegres: invitables, table: t, supabase: base }), base };
+  };
+  let d = await decision('medecin', PAS_PRETE);
+  assert.strictEqual(d.r, null);
+  assert.deepStrictEqual(d.base.appels.rpc, [], 'un rôle du code ne dépend pas du script SQL');
+  d = await decision('caissier_nuit', BASE_PRETE);
+  assert.strictEqual(d.r, null);
+  assert.deepStrictEqual(d.base.appels.rpc, ['roles_personnalises_actifs']);
+  d = await decision('caissier_nuit', PAS_PRETE);
+  assert.deepStrictEqual(d.r, { status: 409, error: roles.MESSAGE_SQL_ROLES_PERSONNALISES });
+  d = await decision('caissier_nuit', fonctionAbsente('42883', 'x'));
+  assert.strictEqual(d.r.status, 409);
+  d = await decision('caissier_nuit', { data: null, error: { message: 'fetch failed' } });
+  assert.strictEqual(d.r.status, 500);
+  assert.match(d.r.error, /fetch failed/);
+  for (const role of ['administrateur', 'inconnu', undefined, null, '', 'caissier_nuit ', 'CAISSIER_NUIT', 42, {}, ['caissier_nuit']]) {
+    d = await decision(role, BASE_PRETE);
+    assert.strictEqual(d.r && d.r.status, 400, JSON.stringify(role));
+    assert.deepStrictEqual(d.base.appels.rpc, [], 'refusé sans interroger la base');
+  }
+  // Même si la table contient une entrée « personnalisée » nommée administrateur : jamais invitable.
+  d = await decision('administrateur', BASE_PRETE, [...table, { role: 'administrateur', personnalise: true, libelle: 'Admin bis', permissions: [] }]);
+  assert.strictEqual(d.r.status, 400);
+  // Table absente : seuls les rôles du code restent invitables.
+  d = await decision('caissier_nuit', BASE_PRETE, null);
+  assert.strictEqual(d.r.status, 400);
+  d = await decision('direction', BASE_PRETE, null);
+  assert.strictEqual(d.r, null);
+});
+
+// ---------------------------------------------------------------------------------------------------------
 // Câblage dans server.js
 // ---------------------------------------------------------------------------------------------------------
 test("server.js : la table des permissions ne s'écrit que par utils/roles.js, AVANT l'écriture générique du catalogue", () => {
@@ -339,14 +491,30 @@ test("server.js : la table des permissions ne s'écrit que par utils/roles.js, A
   assert.match(route, /type === 'permissions'\) \{\s*permissionOk = await aPermission\(req\.user\.id, 'permissions_gerer'\);/);
 });
 
-test("server.js : les invitations acceptent les rôles personnalisés, et la page d'invitation reçoit leur nom", () => {
-  const creation = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/invitations'"), serverSrc.indexOf("app.get('/api/admin/invitations'"));
-  assert.match(creation, /rolesInvitablesAvecPersonnalises\(ROLES_INVITABLES, lectureRoles\.table\)/);
-  assert.match(creation, /if \(!rolesPossibles\.includes\(role\)\)/);
+test("server.js : l'invitation passe par verifierRoleInvitation (rôles du code + rôles créés, administrateur exclu) et répond AVANT de fabriquer le lien ; la page d'invitation reçoit le nom du rôle", () => {
+  const creation = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/invitations'"), serverSrc.indexOf("app.get('/api/admin/roles-personnalises/pret'"));
+  const posRole = creation.indexOf('verifierRoleInvitation({ role, invitablesIntegres: ROLES_INVITABLES, table: lectureRoles.table, supabase })');
+  const posRefus = creation.indexOf('if (refusRole) return res.status(refusRole.status).json({ error: refusRole.error });');
+  const posInsertion = creation.indexOf(".from('invitations').insert(");
+  assert.ok(posRole > 0 && posRefus > posRole && posInsertion > posRefus, 'le rôle est vérifié, et refusé, AVANT de fabriquer le lien');
   assert.doesNotMatch(creation, /ROLES_INVITABLES\.includes\(role\)/, "l'ancienne liste fixe ne doit plus décider seule");
   const page = serverSrc.slice(serverSrc.indexOf("app.get('/invitation/:token'"), serverSrc.indexOf("app.post('/invitation/:token/creer-compte'"));
   assert.match(page, /role_libelle: roleLibelle/);
   assert.match(page, /libelleRolePersonnalise\(invitation\.role, lectureRoles\.table\)/);
+});
+
+test("server.js : GET /api/admin/roles-personnalises/pret exige utilisateurs_gerer AVANT d'interroger la base, puis répond { pret }", () => {
+  const debut = serverSrc.indexOf("app.get('/api/admin/roles-personnalises/pret'");
+  assert.ok(debut > 0, 'la route doit exister');
+  const route = serverSrc.slice(debut, serverSrc.indexOf("app.get('/api/admin/invitations'", debut));
+  const posDroit = route.indexOf("aPermission(req.user.id, 'utilisateurs_gerer')");
+  const posBase = route.indexOf('etatBasePourRolesPersonnalises(supabase)');
+  assert.ok(posDroit > 0 && posBase > posDroit, "le droit est vérifié avant toute question à la base");
+  assert.match(route.slice(posDroit, posBase), /status\(403\)/);
+  assert.match(route, /if \(etat\.erreur\) return res\.status\(500\)/);
+  assert.match(route, /res\.json\(\{ pret: etat\.pret \}\)/);
+  // Sous /api : donc derrière verifyToken.
+  assert.ok(debut > serverSrc.indexOf("app.use('/api', verifyToken)"), 'route montée APRÈS verifyToken');
 });
 
 test("server.js : un rôle personnalisé refusé par la base (SQL pas collé) donne un message clair, libère le lien et supprime le compte orphelin", () => {
@@ -362,15 +530,34 @@ test("server.js : un rôle personnalisé refusé par la base (SQL pas collé) do
 // ---------------------------------------------------------------------------------------------------------
 // (Le fichier réel a aussi été exécuté sur un Postgres 16 jetable le 09/10, avec 2 000 exemples aléatoires : aucun
 // écart entre la base et le serveur. Ce test garde cet accord sans avoir besoin de Postgres.)
-test("sql/roles_personnalises.sql : une seule instruction atomique, et son contrôle de format est exactement CLE_ROLE du serveur", () => {
+test("sql/roles_personnalises.sql : garde-fou d'abord (réservé au serveur), puis UNE instruction ALTER atomique dont le contrôle de format est exactement CLE_ROLE", () => {
   const sql = fs.readFileSync(path.join(__dirname, '..', 'sql', 'roles_personnalises.sql'), 'utf8');
-  const instructions = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n').split(';').map(s => s.trim()).filter(Boolean);
-  assert.strictEqual(instructions.length, 1, "une seule instruction : DROP + ADD dans le même ALTER TABLE (atomique)");
-  assert.match(instructions[0], /^ALTER TABLE users\s+DROP CONSTRAINT IF EXISTS users_role_check,\s+ADD CONSTRAINT users_role_check\s+CHECK \(/);
-  const bornes = instructions[0].match(/char_length\(role\) BETWEEN (\d+) AND (\d+)/);
+  const texte = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
+  // --- Le garde-fou (fonction lue par le serveur).
+  const posFonction = texte.search(/CREATE OR REPLACE FUNCTION public\.roles_personnalises_actifs\(\)/);
+  const posAlter = texte.indexOf('ALTER TABLE users');
+  assert.ok(posFonction >= 0 && posAlter > posFonction, "la fonction existe AVANT le changement de contrainte (jamais « prête » sans garde-fou)");
+  assert.strictEqual((texte.match(/ALTER TABLE/g) || []).length, 1, 'un seul ALTER TABLE : DROP + ADD dans la même instruction (atomique)');
+  const debutCorps = texte.indexOf('AS $$', posFonction);
+  const fonction = texte.slice(posFonction, texte.indexOf('$$;', debutCorps + 5) + 3);
+  assert.match(fonction, /RETURNS boolean\s+LANGUAGE sql\s+STABLE\s+SET search_path = public, pg_catalog\s+AS \$\$/);
+  assert.doesNotMatch(fonction, /SECURITY DEFINER/i, 'pas de droits élevés : elle ne fait que lire pg_constraint');
+  assert.match(fonction, /c\.conrelid = 'public\.users'::regclass/);
+  assert.match(fonction, /c\.conname = 'users_role_check'/);
+  const marque = fonction.match(/pg_get_constraintdef\(c\.oid\) LIKE '%([a-z_]+)%'/);
+  assert.ok(marque, 'la fonction reconnaît la nouvelle contrainte à une marque de sa définition');
+  // Réservée au serveur : ni PUBLIC, ni visiteurs (anon), ni personnes connectées (authenticated).
+  assert.ok(texte.indexOf('REVOKE ALL ON FUNCTION public.roles_personnalises_actifs() FROM PUBLIC, anon, authenticated;') > posFonction);
+  assert.ok(texte.indexOf('GRANT EXECUTE ON FUNCTION public.roles_personnalises_actifs() TO service_role;') > posFonction);
+  assert.strictEqual((texte.match(/\bGRANT\b/g) || []).length, 1, 'un seul GRANT, au serveur');
+  // --- Le contrôle de format.
+  const alter = texte.slice(posAlter).split(';')[0];
+  assert.match(alter, /^ALTER TABLE users\s+DROP CONSTRAINT IF EXISTS users_role_check,\s+ADD CONSTRAINT users_role_check\s+CHECK \(/);
+  assert.ok(alter.includes(marque[1]), `la marque « ${marque[1]} » cherchée par la fonction doit figurer dans la nouvelle contrainte`);
+  const bornes = alter.match(/char_length\(role\) BETWEEN (\d+) AND (\d+)/);
   assert.ok(bornes, 'les bornes de longueur doivent figurer dans la contrainte');
   assert.deepStrictEqual([Number(bornes[1]), Number(bornes[2])], [roles.LONGUEUR_CLE.min, roles.LONGUEUR_CLE.max]);
-  const motif = instructions[0].match(/role ~ '([^']+)'/);
+  const motif = alter.match(/role ~ '([^']+)'/);
   assert.ok(motif, 'le contrôle de format doit figurer dans la contrainte');
   assert.doesNotMatch(motif[1], /a-z|0-9|\[\[:/, "pas de plage ni de classe : elles peuvent dépendre de la langue du serveur");
   const enBase = new RegExp(motif[1]);
@@ -393,4 +580,15 @@ test("sql/roles_personnalises.sql : une seule instruction atomique, et son contr
   assert.ok(exemples.some(accepteParLeServeur) && exemples.some(s => !accepteParLeServeur(s)), "l'échantillon doit contenir des identifiants valides ET invalides");
   // Tous les rôles du code respectent le format (sinon le script échouerait sur les comptes existants).
   for (const r of CLES_INTEGREES) assert.ok(accepteParLaBase(r), `${r} doit respecter le format`);
+});
+
+test("Les anciens scripts sql/ajoute_role_*.sql portent l'avertissement « obsolète » : les recoller remettrait la liste fixe de rôles", () => {
+  const dossier = path.join(__dirname, '..', 'sql');
+  const anciens = fs.readdirSync(dossier).filter(f => /^ajoute_role_.*\.sql$/.test(f));
+  assert.ok(anciens.length >= 5, 'les 5 scripts historiques sont toujours là');
+  for (const f of anciens) {
+    const debut = fs.readFileSync(path.join(dossier, f), 'utf8').split('\n').slice(0, 5).join('\n');
+    assert.match(debut, /OBSOLÈTE depuis le 09\/10 : NE PLUS COLLER ce script/, f);
+    assert.match(debut, /roles_personnalises\.sql/, f);
+  }
 });
