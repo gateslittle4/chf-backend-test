@@ -120,12 +120,20 @@ def scenario(unique):
     for role in ["anon", "authenticated"]:
         r = pg("SELECT count(*) FROM public.lignes_effacees", role=role)
         verifier("denied" in r or "refus" in r or r == "0", f"{role} ne lit pas lignes_effacees ({r[:80]!r})")
+        verifier(pg(f"SELECT has_schema_privilege('{role}', 'chf_interne', 'USAGE')") == "f", f"{role} n'a aucun accès au schéma chf_interne")
         for f in ["marquer_modifie_le", "noter_ligne_effacee"]:
-            verifier(pg(f"SELECT has_function_privilege('{role}', 'public.{f}()', 'EXECUTE')") == "f", f"{role} ne peut pas appeler {f}()")
+            r = pg(f"SELECT chf_interne.{f}()", role=role)
+            verifier("permission denied" in r, f"{role} ne peut pas appeler chf_interne.{f}() ({r[:70]!r})")
     verifier(pg("SELECT count(*) > 0 FROM public.lignes_effacees", role="service_role") == "t", "service_role lit lignes_effacees")
     verifier("ERROR" not in pg("DELETE FROM public.lignes_effacees WHERE efface_le < now() - interval '2 days'", role="service_role"),
              "service_role peut faire le ménage de lignes_effacees")
     verifier(pg("SELECT relrowsecurity FROM pg_class WHERE relname='lignes_effacees'") == "t", "RLS activée sur lignes_effacees")
+    verifier(pg("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('marquer_modifie_le','noter_ligne_effacee')") == "0",
+             "aucune de ces fonctions dans public (donc rien d'appelable par l'API)")
+    with open(FICHIER, encoding="utf-8") as f:
+        instructions = "\n".join(l for l in f.read().splitlines() if not l.strip().startswith("--")).upper()
+    verifier(" DROP " not in f" {instructions} ".replace("\n", " ") and "REVOKE" not in instructions,
+             "aucun DROP ni REVOKE (sinon le connecteur Supabase exige une confirmation impossible à afficher)")
 
 def main():
     if os.geteuid() != 0:

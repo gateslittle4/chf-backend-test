@@ -2748,8 +2748,14 @@ test("Ménage quotidien : les traces de suppression de la synchro sont purgées,
   const sql = fs.readFileSync(path.join(__dirname, '..', 'sql', 'synchro_incrementale.sql'), 'utf8');
   for (const t of ['episodes', 'dossiers', 'fiches', 'paiements']) {
     assert.match(sql, new RegExp(`ALTER TABLE public\\.${t}\\s+ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT NULL DEFAULT now\\(\\);`));
-    assert.match(sql, new RegExp(`CREATE TRIGGER trg_${t}_modifie_le\\s+BEFORE INSERT OR UPDATE ON public\\.${t}`));
+    assert.match(sql, new RegExp(`CREATE OR REPLACE TRIGGER trg_${t}_modifie_le\\s+BEFORE INSERT OR UPDATE ON public\\.${t}\\s+FOR EACH ROW EXECUTE FUNCTION chf_interne\\.marquer_modifie_le\\(\\);`));
   }
-  for (const t of ['episodes', 'fiches', 'paiements']) assert.match(sql, new RegExp(`CREATE TRIGGER trg_${t}_efface\\s+AFTER DELETE ON public\\.${t}`));
-  assert.match(sql, /REVOKE ALL ON FUNCTION public\.noter_ligne_effacee\(\) FROM PUBLIC, anon, authenticated;/);
+  for (const t of ['episodes', 'fiches', 'paiements']) assert.match(sql, new RegExp(`CREATE OR REPLACE TRIGGER trg_${t}_efface\\s+AFTER DELETE ON public\\.${t}\\s+FOR EACH ROW EXECUTE FUNCTION chf_interne\\.noter_ligne_effacee\\(\\);`));
+  // Fonctions hors de public : jamais appelables par l'API, sans avoir à retirer de droits.
+  assert.match(sql, /CREATE SCHEMA IF NOT EXISTS chf_interne;/);
+  assert.doesNotMatch(sql, /FUNCTION public\.(marquer_modifie_le|noter_ligne_effacee)/);
+  // 12/10 : AUCUN DROP ni REVOKE — le connecteur Supabase exige alors une confirmation impossible à afficher
+  // depuis une session cloud (3 essais annulés). Commentaires exclus de la vérification.
+  const instructions = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
+  assert.doesNotMatch(instructions, /\bDROP\b|\bREVOKE\b/i);
 });

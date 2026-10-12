@@ -21,12 +21,22 @@
 -- Données existantes : toutes les lignes reçoivent l'heure d'application du script ; le premier
 -- rafraîchissement de chaque poste après coup relit donc tout une fois, puis seulement les changements.
 --
--- Sécurité : les deux fonctions ci-dessous ne servent qu'aux déclencheurs. Personne (ni visiteur, ni
--- personne connectée) ne peut les appeler directement ; un déclencheur, lui, n'a pas besoin de ce droit
--- pour s'exécuter. Aucune règle RLS ne les utilise (contrairement à mon_role_chf(), incident du 08/10).
--- La table lignes_effacees n'est lisible que par le serveur (service_role), comme les autres tables.
+-- Sécurité : les deux fonctions ci-dessous ne servent qu'aux déclencheurs. Elles vivent dans le schéma
+-- chf_interne, que l'API (PostgREST) n'expose pas et sur lequel ni visiteur (anon) ni personne connectée
+-- (authenticated) n'a le moindre droit : personne ne peut les appeler directement. Un déclencheur, lui,
+-- n'a besoin d'aucun droit pour s'exécuter. Aucune règle RLS ne les utilise (contrairement à
+-- mon_role_chf(), incident du 08/10). La table lignes_effacees est protégée comme les autres tables de
+-- l'app : RLS activée sans règle, donc illisible sauf par le serveur (service_role).
+--
+-- Volontairement SANS aucun DROP ni REVOKE (12/10) : le connecteur Supabase demande une confirmation
+-- supplémentaire pour ces instructions, impossible à afficher depuis une session cloud. CREATE OR REPLACE
+-- TRIGGER (Postgres 14+) rend le script rejouable sans DROP ; le schéma dédié évite d'avoir à retirer
+-- des droits. Un test (tests/regressions.test.js) vérifie que ça reste ainsi.
 --
 -- Testé sur un Postgres 16 jetable : python3 scripts/test-synchro-incrementale-sql.py
+
+-- 0) Schéma interne, non exposé par l'API, aucun droit pour anon / authenticated
+CREATE SCHEMA IF NOT EXISTS chf_interne;
 
 -- 1) Colonne modifie_le + déclencheur
 ALTER TABLE public.episodes  ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT NULL DEFAULT now();
@@ -34,7 +44,7 @@ ALTER TABLE public.dossiers  ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT
 ALTER TABLE public.fiches    ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT NULL DEFAULT now();
 ALTER TABLE public.paiements ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT NULL DEFAULT now();
 
-CREATE OR REPLACE FUNCTION public.marquer_modifie_le()
+CREATE OR REPLACE FUNCTION chf_interne.marquer_modifie_le()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path TO 'public'
@@ -47,14 +57,10 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_episodes_modifie_le  ON public.episodes;
-DROP TRIGGER IF EXISTS trg_dossiers_modifie_le  ON public.dossiers;
-DROP TRIGGER IF EXISTS trg_fiches_modifie_le    ON public.fiches;
-DROP TRIGGER IF EXISTS trg_paiements_modifie_le ON public.paiements;
-CREATE TRIGGER trg_episodes_modifie_le  BEFORE INSERT OR UPDATE ON public.episodes  FOR EACH ROW EXECUTE FUNCTION public.marquer_modifie_le();
-CREATE TRIGGER trg_dossiers_modifie_le  BEFORE INSERT OR UPDATE ON public.dossiers  FOR EACH ROW EXECUTE FUNCTION public.marquer_modifie_le();
-CREATE TRIGGER trg_fiches_modifie_le    BEFORE INSERT OR UPDATE ON public.fiches    FOR EACH ROW EXECUTE FUNCTION public.marquer_modifie_le();
-CREATE TRIGGER trg_paiements_modifie_le BEFORE INSERT OR UPDATE ON public.paiements FOR EACH ROW EXECUTE FUNCTION public.marquer_modifie_le();
+CREATE OR REPLACE TRIGGER trg_episodes_modifie_le  BEFORE INSERT OR UPDATE ON public.episodes  FOR EACH ROW EXECUTE FUNCTION chf_interne.marquer_modifie_le();
+CREATE OR REPLACE TRIGGER trg_dossiers_modifie_le  BEFORE INSERT OR UPDATE ON public.dossiers  FOR EACH ROW EXECUTE FUNCTION chf_interne.marquer_modifie_le();
+CREATE OR REPLACE TRIGGER trg_fiches_modifie_le    BEFORE INSERT OR UPDATE ON public.fiches    FOR EACH ROW EXECUTE FUNCTION chf_interne.marquer_modifie_le();
+CREATE OR REPLACE TRIGGER trg_paiements_modifie_le BEFORE INSERT OR UPDATE ON public.paiements FOR EACH ROW EXECUTE FUNCTION chf_interne.marquer_modifie_le();
 
 -- 2) Trace des suppressions définitives
 CREATE TABLE IF NOT EXISTS public.lignes_effacees (
@@ -65,12 +71,11 @@ CREATE TABLE IF NOT EXISTS public.lignes_effacees (
   efface_le  timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE public.lignes_effacees ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.lignes_effacees FROM anon, authenticated;
 GRANT SELECT, DELETE ON public.lignes_effacees TO service_role;
 
 -- SECURITY DEFINER : l'écriture de la trace ne dépend pas des droits de qui supprime (le serveur, la
--- tâche de purge...). search_path fixé, et EXECUTE retiré à tout le monde juste en dessous.
-CREATE OR REPLACE FUNCTION public.noter_ligne_effacee()
+-- tâche de purge...). search_path fixé ; inaccessible directement (schéma chf_interne, voir en tête).
+CREATE OR REPLACE FUNCTION chf_interne.noter_ligne_effacee()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -83,15 +88,9 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_episodes_efface  ON public.episodes;
-DROP TRIGGER IF EXISTS trg_fiches_efface    ON public.fiches;
-DROP TRIGGER IF EXISTS trg_paiements_efface ON public.paiements;
-CREATE TRIGGER trg_episodes_efface  AFTER DELETE ON public.episodes  FOR EACH ROW EXECUTE FUNCTION public.noter_ligne_effacee();
-CREATE TRIGGER trg_fiches_efface    AFTER DELETE ON public.fiches    FOR EACH ROW EXECUTE FUNCTION public.noter_ligne_effacee();
-CREATE TRIGGER trg_paiements_efface AFTER DELETE ON public.paiements FOR EACH ROW EXECUTE FUNCTION public.noter_ligne_effacee();
-
-REVOKE ALL ON FUNCTION public.marquer_modifie_le()  FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.noter_ligne_effacee() FROM PUBLIC, anon, authenticated;
+CREATE OR REPLACE TRIGGER trg_episodes_efface  AFTER DELETE ON public.episodes  FOR EACH ROW EXECUTE FUNCTION chf_interne.noter_ligne_effacee();
+CREATE OR REPLACE TRIGGER trg_fiches_efface    AFTER DELETE ON public.fiches    FOR EACH ROW EXECUTE FUNCTION chf_interne.noter_ligne_effacee();
+CREATE OR REPLACE TRIGGER trg_paiements_efface AFTER DELETE ON public.paiements FOR EACH ROW EXECUTE FUNCTION chf_interne.noter_ligne_effacee();
 
 -- 3) Index
 CREATE INDEX IF NOT EXISTS idx_episodes_modifie_le  ON public.episodes  (modifie_le);
