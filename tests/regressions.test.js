@@ -2757,3 +2757,34 @@ test("GET /api/dossiers/:id/solde lit les paiements en une lecture groupée, ave
   assert.match(route, /\.is\('supprime_le', null\)[\s\S]*\.is\('supprime_le', null\)/, "épisodes ET paiements à la corbeille exclus");
   assert.match(route, /new Date\(p\.date_paiement\) > new Date\(actuel\.date_paiement\)/, "le DERNIER paiement fait foi");
 });
+
+// Synchro incrémentale (12/10) — voir utils/synchroListes.js et tests/synchro_listes.test.js pour la logique.
+test("GET /api/episodes et /api/paiements : ?synchro=1 passe par synchroListes, sans ce paramètre le tableau d'avant (versions de l'app en cache)", () => {
+  const routeEp = serverSrc.slice(serverSrc.indexOf("app.get('/api/episodes',"), serverSrc.indexOf("app.post('/api/episodes'"));
+  assert.match(routeEp, /if \(req\.query\.synchro === '1'\) return res\.json\(await synchroListes\.episodes\(req\.query\.depuis \|\| null\)\);/);
+  assert.match(routeEp, /res\.json\(await episodesVersFlatEnLot\(episodes\)\);/, "le chemin d'avant reste intact");
+  const routePa = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
+  const posPermission = routePa.indexOf("aPermission(req.user.id, 'caisse_voir')");
+  const posSynchro = routePa.indexOf('synchroListes.paiements(');
+  assert.ok(posPermission > 0 && posSynchro > posPermission, "la permission est vérifiée AVANT le delta des paiements");
+  assert.match(routePa, /res\.json\(await lireToutesLesPages\(/, "le chemin d'avant reste intact");
+  assert.match(serverSrc, /const synchroListes = creerSynchroListes\(\{ supabase, lireToutesLesPages, lireParLotsDIds, episodesVersFlatEnLot \}\);/,
+    "même lecture paginée et même assemblage que la liste complète");
+});
+
+test("Ménage quotidien : les traces de suppression de la synchro sont purgées, dans leur propre try (un échec n'empêche pas les autres purges)", () => {
+  assert.match(serverSrc, /try \{\n\s*await synchroListes\.purgerLignesEffacees\(\);\n\s*\} catch \(e\) \{/);
+  const sql = fs.readFileSync(path.join(__dirname, '..', 'sql', 'synchro_incrementale.sql'), 'utf8');
+  for (const t of ['episodes', 'dossiers', 'fiches', 'paiements']) {
+    assert.match(sql, new RegExp(`ALTER TABLE public\\.${t}\\s+ADD COLUMN IF NOT EXISTS modifie_le timestamptz NOT NULL DEFAULT now\\(\\);`));
+    assert.match(sql, new RegExp(`CREATE OR REPLACE TRIGGER trg_${t}_modifie_le\\s+BEFORE INSERT OR UPDATE ON public\\.${t}\\s+FOR EACH ROW EXECUTE FUNCTION chf_interne\\.marquer_modifie_le\\(\\);`));
+  }
+  for (const t of ['episodes', 'fiches', 'paiements']) assert.match(sql, new RegExp(`CREATE OR REPLACE TRIGGER trg_${t}_efface\\s+AFTER DELETE ON public\\.${t}\\s+FOR EACH ROW EXECUTE FUNCTION chf_interne\\.noter_ligne_effacee\\(\\);`));
+  // Fonctions hors de public : jamais appelables par l'API, sans avoir à retirer de droits.
+  assert.match(sql, /CREATE SCHEMA IF NOT EXISTS chf_interne;/);
+  assert.doesNotMatch(sql, /FUNCTION public\.(marquer_modifie_le|noter_ligne_effacee)/);
+  // 12/10 : AUCUN DROP ni REVOKE — le connecteur Supabase exige alors une confirmation impossible à afficher
+  // depuis une session cloud (3 essais annulés). Commentaires exclus de la vérification.
+  const instructions = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
+  assert.doesNotMatch(instructions, /\bDROP\b|\bREVOKE\b/i);
+});

@@ -812,6 +812,13 @@ async function episodesVersFlatEnLot(episodes) {
     );
   });
 }
+
+// Lecture incrémentale des listes (12/10) : GET /api/episodes et /api/paiements avec ?synchro=1 — voir
+// utils/synchroListes.js et sql/synchro_incrementale.sql. Les fonctions passées ici sont des déclarations
+// (hissées), disponibles dès ce point.
+const { creerSynchroListes } = require('./utils/synchroListes');
+const synchroListes = creerSynchroListes({ supabase, lireToutesLesPages, lireParLotsDIds, episodesVersFlatEnLot });
+
 // ---------------------------------------------------------------------------------------------
 
 // Retour d'Esdras (26/08) : un dépôt (paiement mode='depot', jamais lié à une fiche précise —
@@ -887,6 +894,9 @@ app.get('/api/episodes', async (req, res) => {
   // de 3 par épisode. Résultat strictement identique — les deux chemins partagent le même
   // assemblage (assemblerEpisodeFlat).
   try {
+    // ?synchro=1 : réponse incrémentale { mode, curseur, lignes, supprimes } (utils/synchroListes.js).
+    // Sans ce paramètre : le tableau complet d'avant, pour les versions de l'app encore en cache.
+    if (req.query.synchro === '1') return res.json(await synchroListes.episodes(req.query.depuis || null));
     // Paginée elle aussi : sans ça, un plafond de lignes côté Supabase aurait tronqué la liste
     // des épisodes EN SILENCE (les plus anciens auraient simplement disparu des rapports, sans
     // erreur) — le reste du correctif n'y aurait rien changé, puisque tout part de cette lecture.
@@ -2077,6 +2087,7 @@ app.get('/api/paiements', async (req, res) => {
   // paiements les plus ANCIENS sans la moindre erreur — un manque d'argent invisible dans les
   // comptes. `.order('id')` en second rend le tri total, obligatoire dès qu'on pagine.
   try {
+    if (req.query.synchro === '1') return res.json(await synchroListes.paiements(req.query.depuis || null));
     res.json(await lireToutesLesPages(
       () => supabase.from('paiements').select('*').is('supprime_le', null).order('date_paiement', { ascending: false }).order('id')));
   } catch (e) {
@@ -3443,6 +3454,12 @@ cron.schedule('0 6 * * *', async () => {
     if (purgees > 0) console.log(`🧹 ${purgees} lien(s) d'invitation périmé(s) purgé(s) (> ${JOURS_CONSERVATION_INVITATIONS} jours).`);
   } catch (e) {
     console.error('❌ Échec de la purge des invitations périmées :', e.message);
+  }
+  // Traces de suppression de la synchro incrémentale (12/10) : utiles quelques jours au plus.
+  try {
+    await synchroListes.purgerLignesEffacees();
+  } catch (e) {
+    console.error('❌ Échec de la purge des traces de suppression (synchro) :', e.message);
   }
   // Purge indépendante des précédentes — un échec ici ne doit jamais empêcher le reste.
   try {
