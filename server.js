@@ -1482,29 +1482,34 @@ app.get('/api/dossiers/:id/solde', async (req, res) => {
     return res.json({ solde_total: 0, episodes_count: 0, detailParEpisode: [] });
   }
 
-  let soldeTotal = 0;
-  const detailParEpisode = [];
-
-  for (const ep of episodes) {
-    // Pour chaque épisode, récupérer le dernier paiement non annulé
-    const { data: paiement, error: errPaiement } = await supabase
+  // Une seule lecture groupée (lireParLotsDIds) au lieu d'une requête par épisode : un patient
+  // chronique avec 30 épisodes coûtait 31 allers-retours vers la base. Même règle qu'avant : le
+  // DERNIER paiement non annulé et non mis à la corbeille de chaque épisode fait foi.
+  let paiements;
+  try {
+    paiements = await lireParLotsDIds(episodes.map(ep => ep.id), (lot) => supabase
       .from('paiements')
-      .select('solde_restant')
-      .eq('episode_id', ep.id)
+      .select('episode_id, solde_restant, date_paiement')
+      .in('episode_id', lot)
       .or('annule.eq.false,annule.is.null')
       .is('supprime_le', null)
-      .order('date_paiement', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .order('date_paiement', { ascending: false }));
+  } catch (errPaiement) {
+    return res.status(500).json({ error: errPaiement.message });
+  }
+  const dernierParEpisode = new Map();
+  for (const p of paiements) {
+    const actuel = dernierParEpisode.get(p.episode_id);
+    if (!actuel || new Date(p.date_paiement) > new Date(actuel.date_paiement)) dernierParEpisode.set(p.episode_id, p);
+  }
 
-    if (errPaiement) return res.status(500).json({ error: errPaiement.message });
-
+  let soldeTotal = 0;
+  const detailParEpisode = [];
+  for (const ep of episodes) {
+    const paiement = dernierParEpisode.get(ep.id);
     const solde = (paiement && paiement.solde_restant) || 0;
     soldeTotal += solde;
-    detailParEpisode.push({
-      episode_id: ep.id,
-      solde: solde
-    });
+    detailParEpisode.push({ episode_id: ep.id, solde });
   }
 
   res.json({
@@ -1880,8 +1885,23 @@ app.get('/api/catalog/:type', async (req, res) => {
     .eq('type', type)
     .single();
   if (error && error.code !== 'PGRST116') return res.status(500).json({ error: error.message });
-  res.json(data?.items || []);
+  const items = data?.items || [];
+  // Audit du 12/10 : les sessions de caisse étaient lisibles EN ENTIER par tout compte connecté
+  // (infirmier, visiteur...) — fond d'ouverture, comptant remis, fond conservé, justification d'écart.
+  // La liste reste lisible par tous (la cloche et la vérification « poste ouvert ? » en ont besoin
+  // pour chaque rôle), mais les montants ne vont qu'aux mêmes permissions que GET /api/paiements.
+  if (type === 'sessions_caisse' && !(await peutVoirMontantsCaisse(req.user.id))) {
+    return res.json(items.map(({ soldeOuverture, comptantRemis, fondConserve, justification, ...reste }) => reste));
+  }
+  res.json(items);
 });
+
+async function peutVoirMontantsCaisse(uid) {
+  for (const permission of ['fiche_patient_voir_finances', 'caisse_travailler', 'demandes_repondre', 'caisse_voir']) {
+    if (await aPermission(uid, permission)) return true;
+  }
+  return false;
+}
 
 // Route : mise à jour du catalogue
 app.put('/api/catalog/:type', async (req, res) => {
