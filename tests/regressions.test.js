@@ -2729,6 +2729,35 @@ test("sql/ajoute_role_pharmacien_chef.sql : UNE seule instruction atomique qui g
   const attendus = [...permissionsParDefautServeur().map(r => r.role), 'administrateur'].sort();
   assert.deepStrictEqual(liste, attendus, "la contrainte doit autoriser exactement les rôles connus du code — ni plus, ni moins");
 });
+
+// Audit du 12/10 — GET /api/catalog/sessions_caisse renvoyait les montants de caisse (fond d'ouverture,
+// comptant remis, fond conservé, justification d'écart) à TOUT compte connecté. La liste reste lisible
+// par tous (cloche, « poste ouvert ? »), les montants seulement avec les permissions de GET /api/paiements.
+test("GET /api/catalog/:type masque les montants des sessions de caisse sans permission financière", () => {
+  const route = serverSrc.slice(serverSrc.indexOf("app.get('/api/catalog/:type'"), serverSrc.indexOf("app.put('/api/catalog/:type'"));
+  assert.match(route, /type === 'sessions_caisse' && !\(await peutVoirMontantsCaisse\(req\.user\.id\)\)/);
+  for (const champ of ['soldeOuverture', 'comptantRemis', 'fondConserve', 'justification']) {
+    assert.match(route, new RegExp(`\\{[^}]*\\b${champ}\\b[^}]*\\.\\.\\.reste \\}`), `${champ} doit être retiré`);
+  }
+  const fonction = serverSrc.slice(serverSrc.indexOf('async function peutVoirMontantsCaisse'), serverSrc.indexOf("app.put('/api/catalog/:type'"));
+  const lecturePaiements = serverSrc.slice(serverSrc.indexOf("app.get('/api/paiements'"), serverSrc.indexOf("app.post('/api/paiements'"));
+  for (const p of ['fiche_patient_voir_finances', 'caisse_travailler', 'demandes_repondre', 'caisse_voir']) {
+    assert.ok(fonction.includes(`'${p}'`), `${p} voit les montants`);
+    assert.ok(lecturePaiements.includes(`'${p}'`), `${p} doit rester aligné sur GET /api/paiements`);
+  }
+});
+
+// Audit du 12/10 — l'état de compte faisait une requête par épisode (31 allers-retours pour 30 épisodes).
+test("GET /api/dossiers/:id/solde lit les paiements en une lecture groupée, avec les mêmes filtres", () => {
+  const route = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/solde'"), serverSrc.indexOf("app.post('/api/dossiers/:dossierId/episodes'"));
+  assert.match(route, /aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\)/);
+  assert.match(route, /lireParLotsDIds\(episodes\.map\(ep => ep\.id\)/, "une lecture groupée, paginée");
+  assert.doesNotMatch(route, /for \(const ep of episodes\) \{[\s\S]*?await supabase/, "plus de requête dans la boucle");
+  assert.match(route, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "paiement annulé exclu");
+  assert.match(route, /\.is\('supprime_le', null\)[\s\S]*\.is\('supprime_le', null\)/, "épisodes ET paiements à la corbeille exclus");
+  assert.match(route, /new Date\(p\.date_paiement\) > new Date\(actuel\.date_paiement\)/, "le DERNIER paiement fait foi");
+});
+
 // Synchro incrémentale (12/10) — voir utils/synchroListes.js et tests/synchro_listes.test.js pour la logique.
 test("GET /api/episodes et /api/paiements : ?synchro=1 passe par synchroListes, sans ce paramètre le tableau d'avant (versions de l'app en cache)", () => {
   const routeEp = serverSrc.slice(serverSrc.indexOf("app.get('/api/episodes',"), serverSrc.indexOf("app.post('/api/episodes'"));
