@@ -1,3 +1,19 @@
+# 🔌 POST /api/dossiers : MÊME NUMÉRO + MÊME NOM = MÊME PATIENT (09/10) — côté serveur
+
+Détail et contexte (question d'Esdras « quand le net est tombé, plus de connexion entre les deux ordinateurs ») : section « 🔌 COUPURE D'INTERNET : LA PORTE ET LA
+CAISSE » des notes de chf-app2. Ici :
+- **`utils/dossiers.js`** : `jetonsDuNom` (sans accent, casse, ponctuation, ordre des mots) et `memePatient(dossierExistant, nomRecu)` (compare aussi `nom_origine`, jamais vrai
+  pour un nom vide). À n'utiliser QUE pour un dossier qui porte déjà le MÊME numéro.
+- **`POST /api/dossiers`**, branche 23505 : (1) rejeu du même `local_id` → 200 comme avant ; (2) NOUVEAU : dossier existant de même numéro ET même nom → **200 avec ce dossier +
+  `dejaEnregistre: true`** et une ligne `audit_log` `dossier_deja_enregistre` (best-effort : un journal qui refuse la ligne ne bloque pas la caisse) ; (3) sinon 409, dont le message
+  donne maintenant le nom du dossier en place. **`PUT /api/dossiers/:id` (changer un numéro) est inchangé** : jamais de réunion silencieuse là (un test le vérifie).
+- Pourquoi : deux postes hors ligne créent le même patient ; le 2e dossier envoyé était refusé et `syncPending` (app) abandonnait en cascade épisode, fiche et PAIEMENT.
+  `syncPending` lit `result.id` quel que soit le code HTTP : un 200 sur le dossier existant suffit à tout rattacher.
+- Tests : `tests/dossier_meme_patient.test.js` (14, exécute la vraie route extraite de `server.js` contre un faux Supabase) ; côté app, le test Chrome réel à deux ordinateurs
+  (`tests/e2e/dossier_meme_patient.e2e.test.js`) lit CE `server.js`.
+
+---
+
 # 🧩 RÔLES CRÉÉS DEPUIS L'APP (09/10) — côté serveur
 
 Détail complet, décisions et pièges : section « 🧩 RÔLES CRÉÉS DEPUIS L'APP » des notes de chf-app2. Ici, ce qu'il faut savoir en lisant ce dépôt :
