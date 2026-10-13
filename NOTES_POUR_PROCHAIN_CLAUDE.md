@@ -334,3 +334,15 @@ n'est sauvegardée nulle part. C'était déjà arrivé à 5 tables (audit du 31/
 - **Le proxy de cet environnement bloque les requêtes directes vers `*.onrender.com`** — on ne
   peut pas visiter le site en production depuis une session Claude. Vérifier par les logs Render,
   les requêtes SQL Supabase et les tests, jamais « en allant voir ».
+
+---
+
+# 🚦 LIMITE DU NOMBRE DE REQUÊTES (13/10, liste de contrôle fintech montrée par Esdras : « rate limits sur la connexion et les opérations sensibles »)
+- **Avant** : aucune limite (seul le portail patient avait la sienne : 5 essais / 15 min). Un script avec un compte valide pouvait envoyer des milliers de requêtes par minute (saturer le serveur gratuit de Render, remplir la base de faux paiements) ; des jetons invalides pouvaient être testés sans fin.
+- **Maintenant** (`utils/limiteur.js`, compteurs en mémoire à fenêtre fixe, un seul serveur → pas de Redis) : **par COMPTE connecté** (jamais par adresse : tout l'hôpital sort par la même adresse) — 600 requêtes/min au total, 240 écritures/min, 120 paiements/min (la reprise de 40 paiements après une longue coupure passe) ; **par adresse** — 60/min sur les pages publiques d'invitation, et 30 jetons manquants/invalides par 10 min (au-delà, 429 au lieu de 401 ; **un jeton valide n'est jamais bloqué**, même depuis une adresse qui a échoué). Réponse : `429 { error: 'TROP_DE_REQUETES', message: 'Trop de demandes en peu de temps. Réessaie dans N secondes.', raison }` + `Retry-After`. Le test de santé `/` et les OPTIONS ne sont jamais limités.
+- **Où** : `app.use('/api', limiteUtilisateur)` juste APRÈS `verifyToken` (il lui faut `req.user.id`), AVANT l'idempotence ; `limiteEchecsAuth.signalerEchec(req)` dans les deux rejets de `verifyToken` ; `limitePublique` sur `GET /invitation/:token` et `POST /invitation/:token/creer-compte`. Nettoyage des compteurs toutes les 5 min (`unref`).
+- **Application** : `STATUTS_REESSAYABLES_ECRITURE` contient déjà 429 → une écriture limitée reste dans la file et repart (jamais un refus définitif). ⚠️ Une LECTURE limitée (429 sur un GET) n'est pas dans `STATUTS_INDISPONIBILITE` : elle s'afficherait comme une erreur au lieu de servir la copie locale — improbable avec ces seuils, mais à ajouter si besoin.
+- **⚠️ Adresse derrière Render** : sans réglage, `req.ip` serait l'adresse du proxy de Render (la même pour tous). `app.set('trust proxy', 1)` (variable d'environnement **`TRUST_PROXY`** pour changer le nombre de proxys sans toucher au code) : je n'ai pas pu vérifier combien de proxys Render met devant le serveur. Si les limites par adresse paraissent mal calibrées (tout le monde bloqué ensemble, ou jamais), ajuster `TRUST_PROXY` d'abord. Effet de bord voulu : la limite du portail patient (par `ip:numéro de dossier`) voit enfin la vraie adresse du visiteur.
+- **Interrupteur de secours** : variable d'environnement Render `DESACTIVER_LIMITES=1` coupe TOUTES les limites sans redéployer le code (seuils ajustables aussi : `LIMITE_GENERALE`, `LIMITE_ECRITURES`, `LIMITE_PAIEMENTS`).
+- Tests : `tests/limiteur.test.js` (10, sur un vrai serveur Express ; 5 sabotages détectés).
+
