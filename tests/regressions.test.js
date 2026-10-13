@@ -1490,8 +1490,10 @@ test("Paiements : le solde de crédit d'un épisode est REPORTÉ, une dette ne p
   assert.match(route, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "un paiement annulé ne doit jamais servir de référence");
   assert.match(route, /\.order\('date_paiement', \{ ascending: false \}\)\.limit\(1\)/);
 
-  // Le report lui-même : un crédit s'ajoute à ce qui était déjà dû, tout autre mode le laisse tel quel.
-  assert.match(route, /const soldeDeCePaiement = corps\.mode === 'credit' \? \(parseFloat\(corps\.solde_restant\) \|\| 0\) : 0;/);
+  // Le report lui-même : un crédit (ou, depuis le 13/10, le reste d'un paiement partiel) s'ajoute à ce qui était
+  // déjà dû, tout autre mode le laisse tel quel (règle dans utils/paiementPartiel.js, testée à part).
+  assert.match(route, /const soldeDeCePaiement = soldeAjouteParPaiement\(corps\);/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'utils', 'paiementPartiel.js'), 'utf8'), /corps\.mode === 'credit' \|\| estPaiementPartiel\(corps\)\) return parseFloat\(corps\.solde_restant\) \|\| 0;\s*\n\s*return 0;/);
   assert.match(route, /corps\.solde_restant = soldeAnterieur \+ soldeDeCePaiement;/);
   assert.match(route, /\} else if \(corps\.episode_id\) \{/, "le report s'applique à TOUS les autres modes (cash, dépôt, exonération, partenaire...)");
 
@@ -2787,4 +2789,17 @@ test("Ménage quotidien : les traces de suppression de la synchro sont purgées,
   // depuis une session cloud (3 essais annulés). Commentaires exclus de la vérification.
   const instructions = sql.split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
   assert.doesNotMatch(instructions, /\bDROP\b|\bREVOKE\b/i);
+});
+
+// Paiement partiel (13/10) — voir utils/paiementPartiel.js et tests/paiement_partiel.test.js pour la logique.
+test("POST /api/paiements : un paiement partiel est validé AVANT toute lecture de solde, et son reste s'ajoute au solde de l'épisode (jamais un nouveau mode)", () => {
+  const route = serverSrc.slice(serverSrc.indexOf("app.post('/api/paiements',"), serverSrc.indexOf("app.patch('/api/paiements/:id/annuler'"));
+  const posValidation = route.indexOf('validerPaiementPartiel(corps)');
+  assert.ok(posValidation > 0, 'la validation existe');
+  assert.match(route, /if \(erreurPartiel\) return res\.status\(400\)\.json\(\{ error: erreurPartiel \}\);/);
+  assert.ok(posValidation < route.indexOf('lireSoldeEpisode(corps.episode_id)'), 'validé avant de lire le solde');
+  assert.match(route, /const soldeDeCePaiement = soldeAjouteParPaiement\(corps\);\s*\n\s*corps\.solde_restant = soldeAnterieur \+ soldeDeCePaiement;/);
+  assert.doesNotMatch(route, /corps\.mode === 'credit' \? \(parseFloat\(corps\.solde_restant\)/, "l'ancienne règle « crédit seulement » a disparu");
+  // Le serveur reste le seul à fixer le solde : un remboursement de crédit relit toujours le solde en base.
+  assert.match(route, /corps\.solde_restant = soldeActuel - montant;/);
 });
