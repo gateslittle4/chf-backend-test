@@ -61,14 +61,14 @@ test("lireMontant et normaliserMontant : texte → nombre, arrondi au centime", 
 test("server.js : le montant est contrôlé AVANT le contrôle du paiement partiel et le calcul du solde, sur la copie du corps", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const debut = src.indexOf("app.post('/api/paiements'");
-  const route = src.slice(debut, debut + 6500);
+  const route = src.slice(debut, src.indexOf('\napp.', debut + 10));
   const iCopie = route.indexOf('const corps = { ...req.body };');
   const iHeure = route.indexOf('appliquerHeureAuPaiement(corps, req);');
   const iValide = route.indexOf('validerMontantPaiement(corps)');
   const i400 = route.indexOf('return res.status(400).json({ error: erreurMontant })');
   const iNormalise = route.indexOf('normaliserMontant(corps)');
   const iPartiel = route.indexOf('validerPaiementPartiel(corps)');
-  const iSolde = route.indexOf('lireSoldeEpisode(');
+  const iSolde = route.indexOf("supabase.rpc('enregistrer_paiement_atomique'"); // le solde est calculé par la base, sous verrou (13/10)
   const iInsert = route.indexOf(".insert({ ...corps, local_id: local_id || null })");
   assert.ok(iCopie > 0 && iCopie < iHeure && iHeure < iValide && iValide < i400 && i400 < iNormalise, 'copie, heure, validation, refus 400, arrondi');
   assert.ok(iNormalise < iPartiel && iPartiel < iSolde && iSolde < iInsert, 'puis paiement partiel, solde, insertion');
