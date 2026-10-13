@@ -40,7 +40,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient } = require('./utils/dossiers');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
-const { middlewareHeureServeur, appliquerHeureAuPaiement, ENTETE_HEURE } = require('./utils/heureServeur');
+const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('./utils/heureServeur');
 // Limite du nombre de requêtes (13/10) : par compte connecté, par adresse pour les pages publiques et les mauvais jetons — voir utils/limiteur.js.
 const { creerLimiteUtilisateur, creerLimitePublique, creerLimiteEchecsAuth, refuser: refuserTropDeRequetes } = require('./utils/limiteur');
 const limiteUtilisateur = creerLimiteUtilisateur();
@@ -50,6 +50,8 @@ const limiteEchecsAuth = creerLimiteEchecsAuth();
 setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoyer(); limiteEchecsAuth.compteur.nettoyer(); }, 5 * 60 * 1000).unref();
 // Contrôle des montants côté serveur (13/10) : jamais de négatif, de texte, d'infini ni de montant absurde — voir utils/validationMontant.js.
 const { validerMontantPaiement, normaliserMontant } = require('./utils/validationMontant');
+// Solde ATOMIQUE (13/10) : le paiement et son solde s'écrivent en une seule opération de la base, avec un verrou par épisode — voir sql/solde_atomique.sql.
+const { estFonctionAbsente, estRefusRemboursement } = require('./utils/soldeAtomique');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -2179,6 +2181,27 @@ app.post('/api/paiements', async (req, res) => {
   // Paiement partiel (13/10) : montant versé + reste dû sur UNE ligne — voir utils/paiementPartiel.js.
   const erreurPartiel = validerPaiementPartiel(corps);
   if (erreurPartiel) return res.status(400).json({ error: erreurPartiel });
+
+  // Solde ATOMIQUE (13/10, liste de contrôle fintech d'Esdras : « deux retraits en même temps ne doivent pas dépenser le même argent »). Lire le dernier solde puis
+  // écrire le paiement en deux temps laissait deux paiements simultanés du même épisode partir du même ancien solde (le 2e écrasait le report du 1er). La fonction
+  // enregistrer_paiement_atomique (sql/solde_atomique.sql) fait lecture + calcul + écriture d'un seul bloc, sous un verrou par épisode. Tant que ce script SQL n'est pas
+  // appliqué en base, on retombe sur l'ancien chemin ci-dessous (inchangé) : jamais une panne.
+  if (corps.mode === 'remboursement_credit' && !corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
+  {
+    const ajout = corps.mode === 'remboursement_credit' || !corps.episode_id ? 0 : soldeAjouteParPaiement(corps);
+    const { data: dataAtomique, error: erreurAtomique } = await supabase.rpc('enregistrer_paiement_atomique', {
+      p_corps: { ...corps, local_id: local_id || null }, p_ajout: ajout, p_remboursement_credit: corps.mode === 'remboursement_credit',
+      p_heure_serveur: !estRejeu(req), // en direct : la base date le paiement sous le verrou ; rejeu hors ligne : date de l'appareil gardée
+    });
+    if (!erreurAtomique) return res.status(201).json(dataAtomique);
+    if (estRefusRemboursement(erreurAtomique)) return res.status(400).json({ error: erreurAtomique.message });
+    if (erreurAtomique.code === '23505') {
+      const { data: existant } = local_id ? await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle() : { data: null };
+      if (existant) return res.status(200).json(existant);
+    }
+    if (!estFonctionAbsente(erreurAtomique)) return res.status(500).json({ error: erreurAtomique.message });
+    // Fonction pas encore en base : ancien chemin (lecture puis écriture), voir plus bas.
+  }
 
   // Le solde de crédit d'un épisode = le solde_restant de son DERNIER paiement non annulé. C'est
   // la définition utilisée partout : Créances (DashboardCaisse), statut et plafond de
