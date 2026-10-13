@@ -526,8 +526,8 @@ test("verifyToken rejette (403) un compte désactivé (active===false) ou dont d
 // ou une route précise dans les logs, sans jamais loguer le jeton lui-même.
 test("verifyToken logue (console.warn) chacun de ses 2 rejets 401, avec la méthode et le chemin — sinon aucune trace de ces rejets ne survit nulle part", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf('async function verifyToken'), serverSrc.indexOf('// Application du middleware'));
-  assert.match(bloc, /console\.warn\(`verifyToken: en-tête Authorization absent \(\$\{req\.method\} \$\{req\.path\}\)`\);\s*\n\s*return res\.status\(401\)\.json\(\{ error: 'Token manquant ou invalide' \}\);/, "doit loguer avant de rejeter faute d'en-tête Authorization");
-  assert.match(bloc, /console\.warn\(`verifyToken: jeton invalide ou expiré \(\$\{req\.method\} \$\{req\.path\}\):`, e\.message\);\s*\n\s*return res\.status\(401\)\.json\(\{ error: 'Token invalide ou expiré' \}\);/, "doit loguer avant de rejeter pour un jeton invalide/expiré");
+  assert.match(bloc, /console\.warn\(`verifyToken: en-tête Authorization absent \(\$\{req\.method\} \$\{req\.path\}\)`\);[\s\S]{0,260}?return res\.status\(401\)\.json\(\{ error: 'Token manquant ou invalide' \}\);/, "doit loguer avant de rejeter faute d'en-tête Authorization");
+  assert.match(bloc, /console\.warn\(`verifyToken: jeton invalide ou expiré \(\$\{req\.method\} \$\{req\.path\}\):`, e\.message\);[\s\S]{0,360}?return res\.status\(401\)\.json\(\{ error: 'Token invalide ou expiré' \}\);/, "doit loguer avant de rejeter pour un jeton invalide/expiré");
   assert.doesNotMatch(bloc, /console\.warn\([^\n]*\$\{token\}/, "ne doit jamais loguer le jeton lui-même, seulement la méthode/le chemin");
 });
 
@@ -2633,7 +2633,9 @@ test("verifyToken : une ERREUR de lecture du profil répond 503 (transitoire, l'
   const construire = ({ jeton = 'ok', lecture }) => {
     const getAuth = () => ({ verifyIdToken: async () => { if (jeton !== 'ok') throw new Error('Firebase ID token has expired'); return { uid: 'u1', email: 'a@chf.com' }; } });
     const supabase = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: lecture }) }) }) };
-    return new Function('getAuth', 'supabase', 'console', `${corps}\nreturn verifyToken;`)(getAuth, supabase, silence);
+    // 13/10 : verifyToken compte aussi les mauvais jetons (utils/limiteur.js) — fausse limite qui ne bloque jamais, testée à part dans tests/limiteur.test.js.
+    const limiteEchecsAuth = { signalerEchec: () => ({ bloque: false, reessayerDansMs: 0 }) };
+    return new Function('getAuth', 'supabase', 'console', 'limiteEchecsAuth', 'refuserTropDeRequetes', `${corps}\nreturn verifyToken;`)(getAuth, supabase, silence, limiteEchecsAuth, () => {});
   };
   const appeler = async (verifyToken, authorization = 'Bearer abc') => {
     const res = { code: null, corps: null, status(c) { this.code = c; return this; }, json(c) { this.corps = c; return this; } };
