@@ -39,6 +39,8 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient } = require('./utils/dossiers');
+// Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
+const { middlewareHeureServeur, appliquerHeureAuPaiement, ENTETE_HEURE } = require('./utils/heureServeur');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -189,7 +191,10 @@ app.use(cors({
     }
     callback(new Error('Origine non autorisée par CORS'));
   },
+  // L'app lit l'heure du serveur dans cet en-tête (voir utils/heureServeur.js) : un navigateur ne montre à une autre origine que les en-têtes exposés.
+  exposedHeaders: [ENTETE_HEURE],
 }));
+app.use(middlewareHeureServeur);
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));
@@ -2143,6 +2148,8 @@ app.post('/api/paiements', async (req, res) => {
   }
 
   const corps = { ...req.body };
+  // Heure RÉELLE (13/10) : en direct, l'heure du serveur fait foi ; un rejeu de la file hors ligne garde l'heure corrigée de l'app (jamais dans le futur).
+  appliquerHeureAuPaiement(corps, req);
 
   // Paiement partiel (13/10) : montant versé + reste dû sur UNE ligne — voir utils/paiementPartiel.js.
   const erreurPartiel = validerPaiementPartiel(corps);
