@@ -37,6 +37,7 @@ const supabase = createClient(
 );
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
+const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -2112,6 +2113,10 @@ app.post('/api/paiements', async (req, res) => {
 
   const corps = { ...req.body };
 
+  // Paiement partiel (13/10) : montant versé + reste dû sur UNE ligne — voir utils/paiementPartiel.js.
+  const erreurPartiel = validerPaiementPartiel(corps);
+  if (erreurPartiel) return res.status(400).json({ error: erreurPartiel });
+
   // Le solde de crédit d'un épisode = le solde_restant de son DERNIER paiement non annulé. C'est
   // la définition utilisée partout : Créances (DashboardCaisse), statut et plafond de
   // remboursement (Fiche Patient), solde affiché au Calculateur, et le remboursement ci-dessous.
@@ -2157,7 +2162,7 @@ app.post('/api/paiements', async (req, res) => {
     let soldeAnterieur;
     try { soldeAnterieur = await lireSoldeEpisode(corps.episode_id); }
     catch (e) { return res.status(500).json({ error: e.message }); }
-    const soldeDeCePaiement = corps.mode === 'credit' ? (parseFloat(corps.solde_restant) || 0) : 0;
+    const soldeDeCePaiement = soldeAjouteParPaiement(corps);
     corps.solde_restant = soldeAnterieur + soldeDeCePaiement;
   }
 
