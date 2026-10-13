@@ -41,6 +41,13 @@ const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paie
 const { memePatient } = require('./utils/dossiers');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
 const { middlewareHeureServeur, appliquerHeureAuPaiement, ENTETE_HEURE } = require('./utils/heureServeur');
+// Limite du nombre de requêtes (13/10) : par compte connecté, par adresse pour les pages publiques et les mauvais jetons — voir utils/limiteur.js.
+const { creerLimiteUtilisateur, creerLimitePublique, creerLimiteEchecsAuth, refuser: refuserTropDeRequetes } = require('./utils/limiteur');
+const limiteUtilisateur = creerLimiteUtilisateur();
+const limitePublique = creerLimitePublique();
+const limiteEchecsAuth = creerLimiteEchecsAuth();
+// Les compteurs vivent en mémoire : on oublie les fenêtres terminées toutes les 5 minutes (unref : ne retient jamais l'arrêt du serveur).
+setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoyer(); limiteEchecsAuth.compteur.nettoyer(); }, 5 * 60 * 1000).unref();
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -195,6 +202,10 @@ app.use(cors({
   exposedHeaders: [ENTETE_HEURE],
 }));
 app.use(middlewareHeureServeur);
+// Derrière le proxy de Render, req.ip serait l'adresse du proxy (la même pour tout le monde) : on fait confiance au nombre de proxys indiqué
+// (1 par défaut, TRUST_PROXY pour l'ajuster sans toucher au code) afin que les limites par adresse voient la vraie adresse du visiteur.
+const sautsDeProxy = process.env.TRUST_PROXY !== undefined && process.env.TRUST_PROXY !== '' && Number.isFinite(Number(process.env.TRUST_PROXY)) ? Number(process.env.TRUST_PROXY) : 1;
+app.set('trust proxy', sautsDeProxy);
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));
@@ -337,7 +348,7 @@ async function lireInvitationUtilisable(token) {
   return { invitation: data };
 }
 
-app.get('/invitation/:token', async (req, res) => {
+app.get('/invitation/:token', limitePublique, async (req, res) => {
   if (limiteInvitationAtteinte(req.ip)) {
     return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
   }
@@ -353,7 +364,7 @@ app.get('/invitation/:token', async (req, res) => {
   res.json({ valide: true, role: invitation.role, role_libelle: roleLibelle, expire_le: invitation.date_expiration });
 });
 
-app.post('/invitation/:token/creer-compte', async (req, res) => {
+app.post('/invitation/:token/creer-compte', limitePublique, async (req, res) => {
   if (limiteInvitationAtteinte(req.ip)) {
     return res.status(429).json({ error: "Trop de tentatives. Réessaie dans quelques minutes." });
   }
@@ -486,6 +497,8 @@ async function verifyToken(req, res, next) {
     // savoir combien ça arrivait ni sur quelles routes. Juste assez pour repérer un pic ou une
     // route précise dans les logs Render, sans loguer le jeton lui-même.
     console.warn(`verifyToken: en-tête Authorization absent (${req.method} ${req.path})`);
+    const blocage = limiteEchecsAuth.signalerEchec(req);
+    if (blocage.bloque) return refuserTropDeRequetes(res, blocage.reessayerDansMs, 'echecs_auth');
     return res.status(401).json({ error: 'Token manquant ou invalide' });
   }
   const token = authHeader.split('Bearer ')[1];
@@ -494,6 +507,9 @@ async function verifyToken(req, res, next) {
     decoded = await getAuth().verifyIdToken(token);
   } catch (e) {
     console.warn(`verifyToken: jeton invalide ou expiré (${req.method} ${req.path}):`, e.message);
+    // Beaucoup de mauvais jetons depuis la même adresse : on répond 429 (jamais pour un jeton valide, qui ne passe pas par ici).
+    const blocage = limiteEchecsAuth.signalerEchec(req);
+    if (blocage.bloque) return refuserTropDeRequetes(res, blocage.reessayerDansMs, 'echecs_auth');
     return res.status(401).json({ error: 'Token invalide ou expiré' });
   }
   try {
@@ -540,6 +556,8 @@ async function verifyToken(req, res, next) {
 
 // Application du middleware sur toutes les routes API
 app.use('/api', verifyToken);
+// Limites par compte connecté : APRÈS verifyToken (req.user connu), AVANT l'idempotence et les routes.
+app.use('/api', limiteUtilisateur);
 // Écritures idempotentes par clé (en-tête Idempotency-Key, audit hors ligne du 28/09) : une requête
 // abandonnée par l'app après 15 s puis rejouée ne s'applique jamais deux fois. Voir utils/idempotence.js
 // et sql/requetes_idempotentes.sql. APRÈS verifyToken : la clé est rangée par personne (req.user.id).
