@@ -38,6 +38,7 @@ const supabase = createClient(
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
+const { memePatient } = require('./utils/dossiers');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -1271,7 +1272,37 @@ app.post('/api/dossiers', async (req, res) => {
       // création hors ligne bloquée sur ce conflit était réessayée indéfiniment toutes les 30
       // secondes (elle ne peut pourtant jamais réussir avec les mêmes données) au lieu d'être
       // signalée clairement une seule fois. Voir CHF_API.syncPending (api/supabase.js, chf-app2).
-      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
+      //
+      // 09/10 (Esdras : « quand le net est tombé, il n'y aura plus de connexion entre les deux ordinateurs ») :
+      // si le dossier qui porte déjà ce numéro porte AUSSI ce nom (accents, majuscules, ponctuation et ordre des mots
+      // mis à part), c'est probablement le MÊME patient enregistré deux fois — typiquement à la porte et à la caisse
+      // pendant une coupure d'internet. 13/10 (Esdras) : jamais réuni AUTOMATIQUEMENT. Sans confirmation, le serveur
+      // refuse (409, code PATIENT_DEJA_ENREGISTRE) en renvoyant le dossier en place : l'application le montre à une
+      // personne, qui choisit de réunir ou non. Avec `reunir: true` (la personne a confirmé), il renvoie le dossier
+      // existant et l'app rattache tout à lui (épisode, fiche, paiement). Un nom DIFFÉRENT reste un vrai conflit.
+      const { data: memeNumero } = await supabase.from('dossiers').select('*').eq('numero_dossier', numero_dossier).maybeSingle();
+      if (memeNumero && memePatient(memeNumero, nom)) {
+        if (req.body.reunir !== true) {
+          return res.status(409).json({
+            error: 'PATIENT_DEJA_ENREGISTRE',
+            message: `Le dossier N° ${numero_dossier} existe déjà au nom de « ${memeNumero.nom} ». Est-ce la même personne ?`,
+            dossierExistant: { id: memeNumero.id, numero_dossier: memeNumero.numero_dossier, nom: memeNumero.nom, date_naissance: memeNumero.date_naissance || null, telephone: memeNumero.telephone || null },
+          });
+        }
+        // Trace (best-effort, comme partout : un journal qui refuse la ligne ne doit pas bloquer la caisse) — la direction
+        // voit chaque fois que deux enregistrements ont été réunis ET par qui la réunion a été confirmée.
+        try {
+          const { error: erreurAudit } = await supabase.from('audit_log').insert({
+            id: crypto.randomUUID(), action: 'dossier_deja_enregistre',
+            effectue_par: (req.user && (req.user.email || req.user.id)) || null, effectue_par_uid: (req.user && req.user.id) || null,
+            details: { numero_dossier, nom_recu: nom, nom_existant: memeNumero.nom, dossier_id: memeNumero.id, confirme: true },
+            date: new Date().toISOString(),
+          });
+          if (erreurAudit) console.warn('Audit « dossier déjà enregistré » non enregistré :', erreurAudit.message);
+        } catch (e) { console.warn('Audit « dossier déjà enregistré » non enregistré :', e.message); }
+        return res.status(200).json({ ...memeNumero, dejaEnregistre: true });
+      }
+      return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient${memeNumero && memeNumero.nom ? ` (« ${memeNumero.nom} »)` : ''}.` });
     }
     return res.status(500).json({ error: error.message });
   }
