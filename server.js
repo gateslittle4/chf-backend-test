@@ -48,6 +48,8 @@ const limitePublique = creerLimitePublique();
 const limiteEchecsAuth = creerLimiteEchecsAuth();
 // Les compteurs vivent en mémoire : on oublie les fenêtres terminées toutes les 5 minutes (unref : ne retient jamais l'arrêt du serveur).
 setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoyer(); limiteEchecsAuth.compteur.nettoyer(); }, 5 * 60 * 1000).unref();
+// Contrôle des montants côté serveur (13/10) : jamais de négatif, de texte, d'infini ni de montant absurde — voir utils/validationMontant.js.
+const { validerMontantPaiement, normaliserMontant } = require('./utils/validationMontant');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -2168,6 +2170,11 @@ app.post('/api/paiements', async (req, res) => {
   const corps = { ...req.body };
   // Heure RÉELLE (13/10) : en direct, l'heure du serveur fait foi ; un rejeu de la file hors ligne garde l'heure corrigée de l'app (jamais dans le futur).
   appliquerHeureAuPaiement(corps, req);
+
+  // Montant contrôlé AVANT tout calcul de solde : un montant négatif ou illisible fausserait les soldes, les totaux et l'écart de caisse.
+  const erreurMontant = validerMontantPaiement(corps);
+  if (erreurMontant) return res.status(400).json({ error: erreurMontant });
+  normaliserMontant(corps);
 
   // Paiement partiel (13/10) : montant versé + reste dû sur UNE ligne — voir utils/paiementPartiel.js.
   const erreurPartiel = validerPaiementPartiel(corps);
