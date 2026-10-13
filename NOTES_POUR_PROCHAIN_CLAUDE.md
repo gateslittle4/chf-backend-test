@@ -1,5 +1,7 @@
 # 🔌 POST /api/dossiers : MÊME NUMÉRO + MÊME NOM = MÊME PATIENT (09/10) — côté serveur
 
+> **⚠️ CHANGEMENT DU 13/10 (Esdras : « une notification pour réunir ou non, pas une réunion automatique ») — remplace le point (2) ci-dessous :** même numéro ET même nom → **409 `error: 'PATIENT_DEJA_ENREGISTRE'`** avec `message` et `dossierExistant {id, numero_dossier, nom, date_naissance, telephone}` ; rien n'est créé ni journalisé. Seule la même création avec **`reunir: true`** (strictement le booléen `true`, jamais une chaîne ni 1) renvoie le 200 `dejaEnregistre: true` + l'audit `dossier_deja_enregistre` (`details.confirme: true`). Un nom différent reste le 409 habituel même avec `reunir: true`. Le champ `reunir` n'est jamais écrit en base. Tests : `tests/dossier_meme_patient.test.js` (15). Déploiement : serveur d'abord ; une ancienne app qui reçoit ce 409 l'affiche comme une erreur ordinaire (pas de réunion).
+
 Détail et contexte (question d'Esdras « quand le net est tombé, plus de connexion entre les deux ordinateurs ») : section « 🔌 COUPURE D'INTERNET : LA PORTE ET LA
 CAISSE » des notes de chf-app2. Ici :
 - **`utils/dossiers.js`** : `jetonsDuNom` (sans accent, casse, ponctuation, ordre des mots) et `memePatient(dossierExistant, nomRecu)` (compare aussi `nom_origine`, jamais vrai

@@ -2,7 +2,8 @@
 // ordinateurs » (Esdras, 09/10). La porte et la caisse peuvent créer, chacune hors ligne, le dossier du MÊME patient avec
 // le MÊME numéro. Au retour d'internet, le 2e dossier envoyé était refusé (numéro déjà pris) et l'épisode, la fiche et le
 // PAIEMENT de la caisse qui en dépendent étaient abandonnés avec lui. Maintenant : même numéro ET même nom = même patient,
-// le serveur renvoie le dossier existant (200) ; un nom différent reste un vrai conflit (409).
+// le serveur ne réunit JAMAIS tout seul (13/10, Esdras) : il refuse (409 PATIENT_DEJA_ENREGISTRE) en renvoyant le dossier en place, et l'app demande
+// à une personne ; avec `reunir: true` (confirmé) il renvoie le dossier existant (200). Un nom différent reste un vrai conflit (409).
 // Ces tests EXÉCUTENT la vraie route POST /api/dossiers (extraite de server.js) contre un faux Supabase.
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -124,38 +125,59 @@ test("POST /api/dossiers : le rejeu de la MÊME création (même local_id) renvo
   assert.deepStrictEqual(supabase.audits, []);
 });
 
-test("POST /api/dossiers : porte ET caisse créent le même patient (même numéro, même nom, local_id différents) → UN seul dossier, la 2e création renvoie le dossier existant", async () => {
+test("POST /api/dossiers : porte ET caisse créent le même patient → la 2e création est REFUSÉE tant que personne n'a confirmé (rien n'est réuni tout seul)", async () => {
   const { appeler, supabase } = routeCreationDossier();
   const porte = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-porte-1' }, { id: 'uid-porte', email: 'porte@chf.com' });
   assert.strictEqual(porte.code, 201);
   const caisse = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-caisse-1' });
-  assert.strictEqual(caisse.code, 200, 'jamais un échec : sinon l\'épisode, la fiche et le paiement de la caisse seraient abandonnés en cascade');
+  assert.strictEqual(caisse.code, 409);
+  assert.strictEqual(caisse.corps.error, 'PATIENT_DEJA_ENREGISTRE');
+  assert.match(caisse.corps.message, /Le dossier N° 1234 existe déjà au nom de « Jean Baptiste »\. Est-ce la même personne \?/);
+  assert.deepStrictEqual(caisse.corps.dossierExistant, { id: porte.corps.id, numero_dossier: '1234', nom: 'Jean Baptiste', date_naissance: null, telephone: null }, "l'app montre ce dossier à la personne qui décide");
+  assert.strictEqual(caisse.corps.dejaEnregistre, undefined);
+  assert.strictEqual(supabase.dossiers.length, 1, 'aucun doublon, aucune réunion');
+  assert.deepStrictEqual(supabase.audits, [], 'rien n\'est journalisé tant que personne n\'a confirmé');
+});
+
+test("POST /api/dossiers : après CONFIRMATION (reunir: true) la 2e création renvoie le dossier existant — l'épisode, la fiche et le paiement de la caisse peuvent suivre", async () => {
+  const { appeler, supabase } = routeCreationDossier();
+  const porte = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-porte-1' }, { id: 'uid-porte', email: 'porte@chf.com' });
+  const caisse = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-caisse-1', reunir: true });
+  assert.strictEqual(caisse.code, 200);
   assert.strictEqual(caisse.corps.id, porte.corps.id, "l'app rattachera tout au dossier existant");
   assert.strictEqual(caisse.corps.dejaEnregistre, true);
   assert.strictEqual(supabase.dossiers.length, 1, 'aucun doublon');
-  // Dans l'autre ordre de synchronisation, même résultat.
-  const rejeu = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-caisse-1' });
-  assert.strictEqual(rejeu.code, 200);
-  assert.strictEqual(rejeu.corps.id, porte.corps.id, 'le rejeu de la réponse perdue donne le même dossier');
+  // `reunir` ne sert qu'à CONFIRMER : un autre nom reste refusé même avec reunir: true.
+  const autre = await appeler({ numero_dossier: '1234', nom: 'Pierre Joseph', local_id: 'local-caisse-2', reunir: true });
+  assert.strictEqual(autre.code, 409);
+  assert.notStrictEqual(autre.corps.error, 'PATIENT_DEJA_ENREGISTRE');
   assert.strictEqual(supabase.dossiers.length, 1);
+  // Seul `true` confirme : pas une chaîne, pas 1.
+  for (const faux of ['true', 1, 'oui']) {
+    const r = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-c-' + faux, reunir: faux });
+    assert.strictEqual(r.code, 409, JSON.stringify(faux));
+  }
 });
 
-test("POST /api/dossiers : la réunion est consignée au journal (qui, quel numéro, quels noms, quel dossier) pour que la direction la voie", async () => {
+test("POST /api/dossiers : la réunion CONFIRMÉE est consignée au journal (qui, quel numéro, quels noms, quel dossier) pour que la direction la voie", async () => {
   const { appeler, supabase } = routeCreationDossier({ dossiers: [{ id: 'd-existant', numero_dossier: '1234', nom: 'Jean Baptiste', nom_origine: 'Jean Baptiste', local_id: 'local-porte-1' }] });
-  await appeler({ numero_dossier: '1234', nom: 'BAPTISTE Jean', local_id: 'local-caisse-1' });
+  await appeler({ numero_dossier: '1234', nom: 'BAPTISTE Jean', local_id: 'local-caisse-1', reunir: true });
   assert.strictEqual(supabase.audits.length, 1);
   const a = supabase.audits[0];
   assert.strictEqual(a.action, 'dossier_deja_enregistre');
   assert.strictEqual(a.effectue_par, 'caisse@chf.com');
   assert.strictEqual(a.effectue_par_uid, 'uid-caisse');
-  assert.deepStrictEqual(a.details, { numero_dossier: '1234', nom_recu: 'BAPTISTE Jean', nom_existant: 'Jean Baptiste', dossier_id: 'd-existant' });
+  assert.deepStrictEqual(a.details, { numero_dossier: '1234', nom_recu: 'BAPTISTE Jean', nom_existant: 'Jean Baptiste', dossier_id: 'd-existant', confirme: true });
   assert.ok(a.id && a.date, 'identifiant et date renseignés');
 });
 
-test("POST /api/dossiers : accents, majuscules, ponctuation et ordre des mots ne font pas deux patients", async () => {
+test("POST /api/dossiers : accents, majuscules, ponctuation et ordre des mots : reconnu comme le même patient (à confirmer)", async () => {
   for (const nomRecu of ['jean-baptiste marié', 'MARIÉ Jean Baptiste', 'Jean  Baptiste   Marie']) {
     const { appeler, supabase } = routeCreationDossier({ dossiers: [{ id: 'd1', numero_dossier: '77', nom: 'Jean Baptiste Marie', nom_origine: 'Jean Baptiste Marie' }] });
-    const r = await appeler({ numero_dossier: '77', nom: nomRecu, local_id: 'local-x' });
+    const demande = await appeler({ numero_dossier: '77', nom: nomRecu, local_id: 'local-x' });
+    assert.strictEqual(demande.code, 409, nomRecu);
+    assert.strictEqual(demande.corps.error, 'PATIENT_DEJA_ENREGISTRE', nomRecu);
+    const r = await appeler({ numero_dossier: '77', nom: nomRecu, local_id: 'local-x', reunir: true });
     assert.strictEqual(r.code, 200, nomRecu);
     assert.strictEqual(r.corps.id, 'd1', nomRecu);
     assert.strictEqual(supabase.dossiers.length, 1, nomRecu);
@@ -164,7 +186,7 @@ test("POST /api/dossiers : accents, majuscules, ponctuation et ordre des mots ne
 
 test("POST /api/dossiers : un bébé renommé reste le même patient pour qui arrive encore avec son nom d'origine", async () => {
   const { appeler, supabase } = routeCreationDossier({ dossiers: [{ id: 'd2', numero_dossier: '88', nom: 'Marie Louise Joseph', nom_origine: 'Bébé Marie Joseph' }] });
-  const r = await appeler({ numero_dossier: '88', nom: 'Bébé Marie Joseph', local_id: 'local-y' });
+  const r = await appeler({ numero_dossier: '88', nom: 'Bébé Marie Joseph', local_id: 'local-y', reunir: true });
   assert.strictEqual(r.code, 200);
   assert.strictEqual(r.corps.id, 'd2');
   assert.strictEqual(supabase.dossiers.length, 1);
@@ -191,7 +213,7 @@ test("POST /api/dossiers : un conflit que le numéro n'explique pas (autre contr
 test("POST /api/dossiers : un journal qui refuse la ligne (ou plante) n'empêche JAMAIS la caisse de continuer", async () => {
   for (const auditRefuse of ['refuse', 'jette']) {
     const { appeler, supabase, avertissements } = routeCreationDossier({ dossiers: [{ id: 'd1', numero_dossier: '1234', nom: 'Jean Baptiste' }], auditRefuse });
-    const r = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-w' });
+    const r = await appeler({ numero_dossier: '1234', nom: 'Jean Baptiste', local_id: 'local-w', reunir: true });
     assert.strictEqual(r.code, 200, auditRefuse);
     assert.strictEqual(r.corps.dejaEnregistre, true, auditRefuse);
     assert.strictEqual(supabase.dossiers.length, 1, auditRefuse);
@@ -218,8 +240,10 @@ test("server.js : la réunion n'a lieu qu'à la CRÉATION, après le contrôle d
   const iMeme = post.indexOf('memePatient(memeNumero, nom)');
   const iAudit = post.indexOf("action: 'dossier_deja_enregistre'");
   const iReponse = post.indexOf('dejaEnregistre: true');
-  const i409 = post.indexOf('return res.status(409)');
-  assert.ok(iLocal > 0 && iNumero > iLocal && iMeme > iNumero && iAudit > iMeme && iReponse > iAudit && i409 > iReponse, "ordre : local_id, numéro, même patient, journal, réponse 200, sinon 409");
+  const iDemande = post.indexOf("error: 'PATIENT_DEJA_ENREGISTRE'");
+  const iConfirme = post.indexOf('req.body.reunir !== true');
+  const i409 = post.indexOf('return res.status(409).json({ error: `Le numéro de dossier');
+  assert.ok(iLocal > 0 && iNumero > iLocal && iMeme > iNumero && iConfirme > iMeme && iDemande > iConfirme && iAudit > iDemande && iReponse > iAudit && i409 > iReponse, "ordre : local_id, numéro, même patient, confirmation (sinon 409 à confirmer), journal, réponse 200, sinon 409");
   assert.match(post, /if \(error\.code === '23505'\) \{/);
   const put = serverSrc.slice(serverSrc.indexOf("app.put('/api/dossiers/:id'"), serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"));
   assert.doesNotMatch(put, /memePatient|dejaEnregistre/, "changer le numéro d'un dossier vers un numéro déjà pris reste un conflit : jamais de réunion silencieuse");
