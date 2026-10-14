@@ -37,6 +37,12 @@ def pg(sql, db="chf", fichier=None, unique=False, role=None):
     r = sh(cmd)
     return (r.stdout + r.stderr).strip()
 
+def sqlstate(appel):
+    """Exécute `appel` (une expression SELECT) et renvoie le SQLSTATE de l'erreur levée, ou 'OK' — c'est CE code que le serveur lit."""
+    corps = appel.replace("SELECT ", "PERFORM ", 1)
+    sortie = pg(f"DO $$ BEGIN {corps}; RAISE NOTICE 'OK'; EXCEPTION WHEN OTHERS THEN RAISE NOTICE '%', SQLSTATE; END $$")
+    return sortie.replace("NOTICE:", "").strip().splitlines()[-1].strip() if sortie else "?"
+
 def verifier(condition, message):
     print(("  ok   " if condition else "  ÉCHEC ") + message)
     if not condition:
@@ -123,13 +129,14 @@ def tests():
     verifier(pg("SELECT count(*) FROM rechercher_dossiers_flou('Marie Josef') WHERE id='%s'" % MERE) == "1", "mais retrouve la cible par l'ancien nom de la source")
     verifier(pg(f"SELECT anciens_noms->0->>'origine' FROM dossiers WHERE id='{MERE}'") == "fusion", "l'ancien nom est gardé sur la cible")
     for sql, code, texte in [
-        (f"SELECT fusionner_dossiers('{MERE}', '{MERE}', 'x')", "CHF_F02", "soi-même"),
-        (f"SELECT fusionner_dossiers('{DOUBLON}', '{AUTRE}', 'x')", "CHF_F03", "source déjà fusionnée"),
-        (f"SELECT fusionner_dossiers('{AUTRE}', '{DOUBLON}', 'x')", "CHF_F04", "cible déjà fusionnée"),
-        (f"SELECT fusionner_dossiers('{MERE}', '{BEBE}', 'x')", "CHF_F05", "cible = enfant de la source"),
-        (f"SELECT fusionner_dossiers('{U(99)}', '{MERE}', 'x')", "CHF_F01", "dossier introuvable"),
+        (f"SELECT fusionner_dossiers('{MERE}', '{MERE}', 'x')", "CHF12", "soi-même"),
+        (f"SELECT fusionner_dossiers('{DOUBLON}', '{AUTRE}', 'x')", "CHF13", "source déjà fusionnée"),
+        (f"SELECT fusionner_dossiers('{AUTRE}', '{DOUBLON}', 'x')", "CHF14", "cible déjà fusionnée"),
+        (f"SELECT fusionner_dossiers('{MERE}', '{BEBE}', 'x')", "CHF15", "cible = enfant de la source"),
+        (f"SELECT fusionner_dossiers('{U(99)}', '{MERE}', 'x')", "CHF11", "dossier introuvable"),
     ]:
-        verifier(code in pg(sql), f"refus {code} ({texte})")
+        etat = sqlstate(sql)
+        verifier(etat == code, f"refus {code} ({texte}) : SQLSTATE reçu {etat}")
 
     print("\n-- annulation d'une fusion (avec un champ changé entre-temps)")
     pg(f"UPDATE dossiers SET telephone = '99999999' WHERE id='{MERE}'")
@@ -140,7 +147,8 @@ def tests():
     verifier(pg(f"SELECT anciens_noms = '[]'::jsonb FROM dossiers WHERE id='{MERE}'") == "t", "l'ancien nom ajouté par la fusion est retiré de la cible")
     verifier(pg(f"SELECT telephone FROM dossiers WHERE id='{MERE}'") == "99999999", "un champ modifié entre-temps n'est pas écrasé")
     verifier(pg("SELECT count(*) FROM rechercher_dossiers_flou('Marie Josef') WHERE id='%s'" % DOUBLON) == "1", "la source redevient retrouvable")
-    verifier("CHF_F06" in pg(f"SELECT defusionner_dossiers('{DOUBLON}', 'x')"), "annuler une fusion qui n'existe pas est refusé (CHF_F06)")
+    etat = sqlstate(f"SELECT defusionner_dossiers('{DOUBLON}', 'x')")
+    verifier(etat == "CHF16", f"annuler une fusion qui n'existe pas est refusé (CHF16) : SQLSTATE reçu {etat}")
 
     print("\n-- champs comblés par la fusion, puis annulés")
     pg(f"UPDATE dossiers SET telephone='55555555', date_naissance='1990-01-01', sexe='F', adresse='Rue 5' WHERE id='{DOUBLON}'")

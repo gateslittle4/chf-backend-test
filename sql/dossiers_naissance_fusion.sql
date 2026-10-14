@@ -55,8 +55,8 @@ AS $$
   LIMIT 20;
 $$;
 
--- FUSION. Codes d'erreur : CHF_F01 introuvable · CHF_F02 même dossier · CHF_F03 source déjà fusionné · CHF_F04 cible déjà fusionnée ·
--- CHF_F05 la cible est un enfant de la source (cycle mère/enfant). Renvoie ce qui a été déplacé.
+-- FUSION. Codes d'erreur (SQLSTATE, 5 caractères) : CHF11 introuvable · CHF12 même dossier · CHF13 source déjà fusionnée · CHF14 cible déjà fusionnée ·
+-- CHF15 la cible est un enfant de la source (cycle mère/enfant) · CHF16 (défusion) ce dossier n'a pas été fusionné. Renvoie ce qui a été déplacé.
 CREATE OR REPLACE FUNCTION public.fusionner_dossiers(p_source uuid, p_cible uuid, p_par text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -66,15 +66,15 @@ DECLARE
   s public.dossiers; c public.dossiers;
   v_eps uuid[]; v_pieces uuid[]; v_enfants uuid[]; v_champs jsonb := '{}'::jsonb; v_ouverts int;
 BEGIN
-  IF p_source IS NULL OR p_cible IS NULL OR p_source = p_cible THEN RAISE EXCEPTION 'Un dossier ne peut pas être fusionné avec lui-même.' USING errcode = 'CHF_F02' ; END IF;
+  IF p_source IS NULL OR p_cible IS NULL OR p_source = p_cible THEN RAISE EXCEPTION 'Un dossier ne peut pas être fusionné avec lui-même.' USING errcode = 'CHF12' ; END IF;
   -- verrou dans l'ordre des identifiants : deux fusions croisées ne s'attendent pas l'une l'autre
   PERFORM 1 FROM dossiers WHERE id IN (p_source, p_cible) ORDER BY id FOR UPDATE;
   SELECT * INTO s FROM dossiers WHERE id = p_source;
   SELECT * INTO c FROM dossiers WHERE id = p_cible;
-  IF s.id IS NULL OR c.id IS NULL THEN RAISE EXCEPTION 'Dossier introuvable.' USING errcode = 'CHF_F01'; END IF;
-  IF s.fusionne_dans IS NOT NULL THEN RAISE EXCEPTION 'Ce dossier a déjà été fusionné dans un autre.' USING errcode = 'CHF_F03'; END IF;
-  IF c.fusionne_dans IS NOT NULL THEN RAISE EXCEPTION 'Le dossier cible a lui-même été fusionné dans un autre.' USING errcode = 'CHF_F04'; END IF;
-  IF c.mere_dossier_id = s.id THEN RAISE EXCEPTION 'Le dossier cible est un enfant du dossier à fusionner.' USING errcode = 'CHF_F05'; END IF;
+  IF s.id IS NULL OR c.id IS NULL THEN RAISE EXCEPTION 'Dossier introuvable.' USING errcode = 'CHF11'; END IF;
+  IF s.fusionne_dans IS NOT NULL THEN RAISE EXCEPTION 'Ce dossier a déjà été fusionné dans un autre.' USING errcode = 'CHF13'; END IF;
+  IF c.fusionne_dans IS NOT NULL THEN RAISE EXCEPTION 'Le dossier cible a lui-même été fusionné dans un autre.' USING errcode = 'CHF14'; END IF;
+  IF c.mere_dossier_id = s.id THEN RAISE EXCEPTION 'Le dossier cible est un enfant du dossier à fusionner.' USING errcode = 'CHF15'; END IF;
 
   WITH deplaces AS (UPDATE episodes SET dossier_id = p_cible WHERE dossier_id = p_source RETURNING id)
   SELECT coalesce(array_agg(id), '{}') INTO v_eps FROM deplaces;
@@ -125,8 +125,8 @@ DECLARE
   s public.dossiers; c public.dossiers; d jsonb; v_eps int; v_pieces int; v_enfants int;
 BEGIN
   SELECT * INTO s FROM dossiers WHERE id = p_source FOR UPDATE;
-  IF s.id IS NULL THEN RAISE EXCEPTION 'Dossier introuvable.' USING errcode = 'CHF_F01'; END IF;
-  IF s.fusionne_dans IS NULL THEN RAISE EXCEPTION 'Ce dossier n''a pas été fusionné.' USING errcode = 'CHF_F06'; END IF;
+  IF s.id IS NULL THEN RAISE EXCEPTION 'Dossier introuvable.' USING errcode = 'CHF11'; END IF;
+  IF s.fusionne_dans IS NULL THEN RAISE EXCEPTION 'Ce dossier n''a pas été fusionné.' USING errcode = 'CHF16'; END IF;
   SELECT * INTO c FROM dossiers WHERE id = s.fusionne_dans FOR UPDATE;
   d := coalesce(s.fusion_details, '{}'::jsonb);
 

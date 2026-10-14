@@ -95,8 +95,8 @@ function routeCreationDossier(options = {}) {
   const aPermission = async () => options.permission !== false;
   const avertissements = [];
   const console_ = { warn: (...a) => avertissements.push(a.join(' ')), log() {}, error() {} };
-  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'crypto', 'console', serverSrc.slice(debut, fin))(
-    app, supabase, aPermission, (v) => (v ? v : null), memePatient, crypto, console_);
+  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'crypto', 'console', 'verifierMere', serverSrc.slice(debut, fin))(
+    app, supabase, aPermission, (v) => (v ? v : null), memePatient, crypto, console_, require('../utils/naissance').verifierMere);
   const appeler = async (corps, utilisateur = { id: 'uid-caisse', email: 'caisse@chf.com' }) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaire({ body: corps, user: utilisateur }, res);
@@ -279,4 +279,18 @@ test("POST /api/dossiers : colonne sexe absente de la base (script SQL pas coll�
   const r2 = await sansOrigine.appeler({ numero_dossier: '2', nom: 'Marie', sexe: 'F', local_id: 'b' });
   assert.strictEqual(r2.code, 201);
   assert.strictEqual(sansOrigine.supabase.dossiers[0].sexe, 'F', 'le sexe n\'est pas perdu parce qu\'une AUTRE colonne manque');
+});
+
+test("POST /api/dossiers : un nouveau-né est lié à sa mère (mere_dossier_id) ; mère introuvable, homme ou sans la colonne → refus clair, aucun bébé créé", async () => {
+  const mere = { id: 'mere-1', numero_dossier: 'M-1', nom: 'Marie Joseph', sexe: 'F' };
+  const homme = { id: 'homme-1', numero_dossier: 'H-1', nom: 'Paul', sexe: 'M' };
+  const { appeler, supabase } = routeCreationDossier({ dossiers: [mere, homme] });
+  const ok = await appeler({ numero_dossier: 'B-1', nom: 'Bébé Marie Joseph', sexe: 'M', mere_dossier_id: 'mere-1', local_id: 'l-b1' });
+  assert.strictEqual(ok.code, 201);
+  assert.strictEqual(supabase.dossiers.find(d => d.numero_dossier === 'B-1').mere_dossier_id, 'mere-1');
+  assert.strictEqual((await appeler({ numero_dossier: 'B-2', nom: 'Bébé X', mere_dossier_id: 'inconnue', local_id: 'l-b2' })).code, 404);
+  const refusHomme = await appeler({ numero_dossier: 'B-3', nom: 'Bébé Y', mere_dossier_id: 'homme-1', local_id: 'l-b3' });
+  assert.strictEqual(refusHomme.code, 400);
+  assert.match(refusHomme.corps.error, /mère doit être une femme/);
+  assert.strictEqual(supabase.dossiers.filter(d => /^B-/.test(d.numero_dossier)).length, 1, 'aucun bébé créé par un refus');
 });

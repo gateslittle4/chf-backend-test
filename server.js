@@ -39,6 +39,9 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient } = require('./utils/dossiers');
+const { creerRoutesDoublons } = require('./utils/routesDoublons');
+const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
+const { anciensNomsApresRenommage, verifierMere } = require('./utils/naissance');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
 const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('./utils/heureServeur');
 // Limite du nombre de requêtes (13/10) : par compte connecté, par adresse pour les pages publiques et les mauvais jetons — voir utils/limiteur.js.
@@ -1197,13 +1200,18 @@ app.get('/api/dossiers/recherche', async (req, res) => {
   if (numero) {
     const { data, error } = await supabase.from('dossiers').select('*').eq('numero_dossier', numero);
     if (error) return res.status(500).json({ error: error.message });
-    return res.json(data);
+    // 14/10 : un dossier FUSIONNÉ dans un autre renvoie le dossier final (le numéro de l'ancien dossier retrouve la bonne personne).
+    const fusionnes = (data || []).filter(d => d.fusionne_dans);
+    if (fusionnes.length === 0) return res.json(data);
+    const { data: finaux } = await supabase.from('dossiers').select('*').in('id', fusionnes.map(d => d.fusionne_dans));
+    return res.json((data || []).filter(d => !d.fusionne_dans).concat(finaux || []));
   }
 
   const { data, error } = await supabase.rpc('rechercher_dossiers_flou', { p_nom: nom });
   if (error) {
     if (error.code === '42883') {
-      const { data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').ilike('nom', `%${nom}%`);
+      let { data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').is('fusionne_dans', null).ilike('nom', `%${nom}%`);
+      if (erreurRepli && erreurRepli.code === '42703') ({ data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').ilike('nom', `%${nom}%`)); // base pas encore migrée
       if (erreurRepli) return res.status(500).json({ error: erreurRepli.message });
       return res.json(repli);
     }
@@ -1248,13 +1256,25 @@ app.get('/api/ids-locaux', async (req, res) => {
 
 app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
   try {
-    const dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
-      .select('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe').order('id'));
+    let dossiers;
+    try {
+      // 14/10 : un dossier fusionné n'est plus proposé hors ligne non plus.
+      dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
+        .select('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe').is('fusionne_dans', null).order('id'));
+    } catch (e) {
+      if (e && e.code !== '42703') throw e; // base pas encore migrée : liste complète comme avant
+      dossiers = await lireToutesLesPages(() => supabase.from('dossiers')
+        .select('id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe').order('id'));
+    }
     res.json(dossiers);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+// 14/10 : doublons d'identité + fusion de dossiers, puis état du système (postes, erreurs) — déclarés AVANT /api/dossiers/:id (voir utils/routesDoublons.js).
+creerRoutesDoublons({ supabase, aPermission, lireToutesLesPages }).monter(app);
+creerRoutesEtatSysteme({ supabase }).monter(app);
 
 app.post('/api/dossiers', async (req, res) => {
   // 01/10 (retour d'Esdras) : la caisse/pharmacie (caisse_travailler) peut aussi créer un dossier —
@@ -1263,7 +1283,7 @@ app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' (ou accès caisse) requise." });
   }
-  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id, sexe } = req.body;
+  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
   // 14/10 : le sexe peut être donné dès la création (rapport MSPP) — même contrôle que PUT /api/dossiers/:id. Vide = non renseigné.
@@ -1287,7 +1307,13 @@ app.post('/api/dossiers', async (req, res) => {
   // sans elle, comme les autres fonctions Postgres pas encore déployées dans ce projet (42883).
   // Colonnes facultatives (nom_origine, sexe) : 42703 = colonne absente (script SQL pas encore collé). On retire d'abord nom_origine (comme
   // avant), puis le sexe en dernier recours — jamais le sexe d'abord, pour ne pas le perdre quand seul nom_origine manque.
-  const ligneDossier = { numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null, ...(sexe ? { sexe } : {}) };
+  // 14/10 : un nouveau-né est lié au dossier de sa MÈRE (mere_dossier_id) — vérifiée (existe, pas fusionnée, pas un homme). Sans la colonne en base, on refuse
+  // plutôt que de créer le bébé en perdant le lien en silence.
+  if (mere_dossier_id) {
+    const verif = await verifierMere(supabase, mere_dossier_id, null);
+    if (!verif.ok) return res.status(verif.status).json({ error: verif.erreur });
+  }
+  const ligneDossier = { numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null, ...(sexe ? { sexe } : {}), ...(mere_dossier_id ? { mere_dossier_id } : {}) };
   let { data, error } = await supabase.from('dossiers').insert(ligneDossier).select().single();
   if (error && error.code === '42703') {
     const { nom_origine, ...sansNomOrigine } = ligneDossier;
@@ -1350,6 +1376,21 @@ app.post('/api/dossiers', async (req, res) => {
 app.get('/api/dossiers/:id', async (req, res) => {
   const { data, error } = await supabase.from('dossiers').select('*').eq('id', req.params.id).single();
   if (error) return res.status(404).json({ error: 'Dossier introuvable' });
+  // 14/10 : la mère d'un nouveau-né, ses enfants, et — si ce dossier a été fusionné — le dossier final. Tout est facultatif : une base pas encore
+  // migrée (colonnes absentes) renvoie simplement le dossier comme avant.
+  const resume = 'id, numero_dossier, nom, nom_origine, date_naissance, sexe';
+  try {
+    if (data.mere_dossier_id) {
+      const { data: mere } = await supabase.from('dossiers').select(resume).eq('id', data.mere_dossier_id).maybeSingle();
+      if (mere) data.mere = mere;
+    }
+    const { data: enfants } = await supabase.from('dossiers').select(resume).eq('mere_dossier_id', data.id).is('fusionne_dans', null).order('date_naissance', { ascending: false });
+    if (enfants && enfants.length) data.enfants = enfants;
+    if (data.fusionne_dans) {
+      const { data: final } = await supabase.from('dossiers').select(resume).eq('id', data.fusionne_dans).maybeSingle();
+      if (final) data.fusionne_dans_dossier = final;
+    }
+  } catch (e) { /* liaisons facultatives */ }
   res.json(data);
 });
 
@@ -1369,7 +1410,7 @@ app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier } = req.body;
+  const { nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier, mere_dossier_id } = req.body;
   if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
   if (sexe !== undefined && sexe !== null && sexe !== 'M' && sexe !== 'F') {
     return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
@@ -1379,7 +1420,28 @@ app.put('/api/dossiers/:id', async (req, res) => {
     if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
     maj.numero_dossier = numero_dossier;
   }
-  const { data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select();
+  // 14/10 : nouveau nom du bébé — chaque nom quitté est gardé (anciens_noms), le nom de création reste intact. Lien vers la mère : absent du corps =
+  // inchangé ; null ou vide = lien retiré ; sinon vérifié comme à la création.
+  const avecNaissance = {};
+  const { data: avant, error: erreurLecture } = await supabase.from('dossiers').select('nom, anciens_noms').eq('id', req.params.id).maybeSingle();
+  if (!erreurLecture && avant) {
+    const liste = anciensNomsApresRenommage(avant, nom, (req.user && (req.user.email || req.user.id)) || null, new Date().toISOString());
+    if (liste) avecNaissance.anciens_noms = liste;
+  }
+  if (mere_dossier_id !== undefined) {
+    if (mere_dossier_id === null || mere_dossier_id === '') avecNaissance.mere_dossier_id = null;
+    else {
+      const verif = await verifierMere(supabase, mere_dossier_id, req.params.id);
+      if (!verif.ok) return res.status(verif.status).json({ error: verif.erreur });
+      avecNaissance.mere_dossier_id = mere_dossier_id;
+    }
+  }
+  let { data, error } = await supabase.from('dossiers').update({ ...maj, ...avecNaissance }).eq('id', req.params.id).select();
+  if (error && error.code === '42703' && Object.keys(avecNaissance).length > 0) {
+    // Base pas encore migrée : on enregistre le reste, mais on ne fait PAS semblant d'avoir gardé le lien à la mère.
+    if (avecNaissance.mere_dossier_id !== undefined) return res.status(503).json({ error: "Le script sql/dossiers_naissance_fusion.sql n'est pas encore collé dans Supabase : le lien bébé → mère n'est pas disponible." });
+    ({ data, error } = await supabase.from('dossiers').update(maj).eq('id', req.params.id).select());
+  }
   if (error) {
     if (error.code === '23505') {
       return res.status(409).json({ error: `Le numéro de dossier "${numero_dossier}" est déjà utilisé par un autre patient.` });
