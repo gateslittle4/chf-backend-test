@@ -348,7 +348,7 @@ test("POST /api/fiches et POST /api/paiements acceptent caisse_travailler OU dem
 
 test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès la création — avant, ces champs n'étaient écrits qu'à l'archivage (ficheVersColonnes, route PUT /api/episodes/:id), donc un dossier encore actif affichait un total de 0 malgré des transactions déjà encaissées", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
-  assert.match(blocRoute, /const \{ episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement \}/, "doit lire total_global, breakdown et mode_paiement depuis req.body");
+  assert.match(blocRoute, /const \{ episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement(?:, inserer_apres)? \}/, "doit lire total_global, breakdown et mode_paiement depuis req.body");
   assert.match(blocRoute, /total_global: total_global \|\| 0/, "doit insérer total_global");
   assert.match(blocRoute, /breakdown: breakdown \|\| \{\}/, "doit insérer breakdown");
   assert.match(blocRoute, /mode_paiement: mode_paiement \|\| null/, "doit insérer mode_paiement");
@@ -365,8 +365,8 @@ test("POST /api/fiches enregistre total_global, breakdown et mode_paiement dès 
 test("POST /api/fiches calcule numero_fiche lui-même (MAX+1 depuis la base, jamais depuis req.body) et retente sur un conflit (episode_id, numero_fiche) au lieu de faire confiance à l'état local du client", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/fiches'"), serverSrc.indexOf("app.get('/api/fiches/episode/:episodeId'"));
   assert.doesNotMatch(blocRoute, /const \{ episode_id, [^}]*numero_fiche/, "numero_fiche ne doit plus être lu depuis req.body — sinon un état client en retard peut refaire un numéro déjà utilisé");
-  assert.match(blocRoute, /\.order\('numero_fiche', \{ ascending: false \}\)\.limit\(1\)\.maybeSingle\(\)/, "doit lire le vrai dernier numero_fiche en base avant chaque insertion");
-  assert.match(blocRoute, /const numero_fiche = \(derniere\?\.numero_fiche \|\| 0\) \+ 1;/, "doit calculer le prochain numéro depuis la base, pas depuis req.body");
+  assert.match(blocRoute, /\.not\('numero_fiche', 'is', null\)\s*\.order\('numero_fiche', \{ ascending: false \}\)\.limit\(1\)\.maybeSingle\(\)/, "doit lire le vrai dernier numero_fiche en base avant chaque insertion");
+  assert.match(blocRoute, /let numero_fiche = \(derniere\?\.numero_fiche \|\| 0\) \+ 1;/, "doit calculer le prochain numéro depuis la base, pas depuis req.body");
   assert.match(blocRoute, /if \(error\.code === '23505'\) \{/, "doit détecter un conflit de contrainte unique");
   assert.match(blocRoute, /continue;/, "doit relire et retenter plutôt qu'échouer ou dupliquer sur un conflit (episode_id, numero_fiche)");
 });
@@ -2524,6 +2524,7 @@ function routeCreationFiche(episodes, fichesExistantes = []) {
             eq: (col, val) => ({
               maybeSingle: async () => ({ data: fiches.find(f => f[col] === val) || null, error: null }),
               order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: fiches.filter(f => f[col] === val).sort((a, b) => b.numero_fiche - a.numero_fiche)[0] || null, error: null }) }) }),
+              not: () => ({ order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: fiches.filter(f => f[col] === val && f.numero_fiche != null).sort((a, b) => b.numero_fiche - a.numero_fiche)[0] || null, error: null }) }) }) }),
             }),
           }),
           insert: (ligne) => ({ select: () => ({ single: async () => { const f = { id: 'fiche-' + (fiches.length + 1), ...ligne }; fiches.push(f); return { data: f, error: null }; } }) }),

@@ -610,6 +610,19 @@ function flatVersTypePatient(typePatient) { return typePatient === 'ONG' ? 'part
 // accepte pour "pas de valeur".
 function dateOuNull(v) { return v ? v : null; }
 
+// Trace dans audit_log depuis le SERVEUR (qui, quoi, quand) pour les actions qui changent des numéros ou des montants et que le navigateur
+// ne peut pas tracer lui-même (renumérotation automatique des fiches). Best-effort : un journal qui refuse la ligne n'annule jamais l'action.
+async function enregistrerAuditServeur(req, action, details) {
+  try {
+    const { error } = await supabase.from('audit_log').insert({
+      id: crypto.randomUUID(), action,
+      effectue_par: (req.user && (req.user.email || req.user.id)) || null, effectue_par_uid: (req.user && req.user.id) || null,
+      details: details || {}, date: new Date().toISOString(),
+    });
+    if (error) console.warn(`Audit « ${action} » non enregistré :`, error.message);
+  } catch (e) { console.warn(`Audit « ${action} » non enregistré :`, e.message); }
+}
+
 function ficheVersFlat(f, fichesAvecPaiementAnnule) {
   return {
     id: f.id, numeroFiche: f.numero_fiche, dateCreation: f.date_creation,
@@ -1118,7 +1131,10 @@ app.put('/api/episodes/:id', async (req, res) => {
       if (estUnVraiUuid(f.id)) {
         // Avant : ni l'erreur ni le nombre de lignes touchées n'étaient vérifiés ici —
         // même angle mort que /api/catalog (succès silencieux même si rien n'est écrit).
-        const { data: fd, error: fe } = await supabase.from('fiches').update(ficheVersColonnes(f)).eq('id', f.id).select();
+        // Le numéro d'une fiche existante n'est JAMAIS réécrit depuis le navigateur (14/10) : depuis la renumérotation automatique (insertion /
+        // suppression d'une fiche), un écran resté sur d'anciens numéros écraserait la bonne numérotation, ou violerait la contrainte d'unicité.
+        const { numero_fiche: _numeroIgnore, ...colonnesSansNumero } = ficheVersColonnes(f);
+        const { data: fd, error: fe } = await supabase.from('fiches').update(colonnesSansNumero).eq('id', f.id).select();
         if (fe) return res.status(500).json({ error: `Fiche ${f.id} : ${fe.message}` });
         if (!fd || fd.length === 0) return res.status(404).json({ error: `Fiche ${f.id} introuvable — rien n'a été modifié.` });
       }
@@ -1946,7 +1962,7 @@ app.post('/api/fiches', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
   }
-  const { episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement } = req.body;
+  const { episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement, inserer_apres } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
@@ -1967,11 +1983,39 @@ app.post('/api/fiches', async (req, res) => {
   // voir sql/ajoute_contrainte_numero_fiche_unique.sql) sert de filet pour la course plus rare
   // entre 2 requêtes vraiment simultanées (2 postes/onglets) : on relit et on retente.
   for (let tentative = 0; tentative < 5; tentative++) {
+    // .not(... null) : une fiche à la corbeille a pu lâcher son numéro (NULL, voir sql/renumerotation_fiches.sql) — en tri décroissant
+    // Postgres range les NULL EN PREMIER, la « dernière » fiche serait alors NULL et le numéro suivant retomberait à 1.
     const { data: derniere, error: erreurDerniere } = await supabase
-      .from('fiches').select('numero_fiche').eq('episode_id', episode_id)
+      .from('fiches').select('numero_fiche').eq('episode_id', episode_id).not('numero_fiche', 'is', null)
       .order('numero_fiche', { ascending: false }).limit(1).maybeSingle();
     if (erreurDerniere) return res.status(500).json({ error: erreurDerniere.message });
-    const numero_fiche = (derniere?.numero_fiche || 0) + 1;
+    let numero_fiche = (derniere?.numero_fiche || 0) + 1;
+
+    // Insertion d'une fiche oubliée ENTRE deux fiches (14/10, reprise de chf-demo2) : `inserer_apres` = id de la fiche après laquelle
+    // elle se place, ou 'DEBUT'. Les fiches suivantes avancent d'un numéro (decaler_fiches, atomique) ; le numéro est calculé ICI.
+    let decalees = 0;
+    if (inserer_apres) {
+      let cible = 1;
+      if (inserer_apres !== 'DEBUT') {
+        if (!estUnVraiUuid(inserer_apres)) return res.status(400).json({ error: "inserer_apres doit être l'id d'une fiche du dossier, ou 'DEBUT'." });
+        const { data: apres, error: erreurApres } = await supabase.from('fiches').select('numero_fiche, episode_id')
+          .eq('id', inserer_apres).is('supprime_le', null).maybeSingle();
+        if (erreurApres) return res.status(500).json({ error: erreurApres.message });
+        if (!apres || apres.episode_id !== episode_id || apres.numero_fiche == null) {
+          return res.status(400).json({ error: "La fiche après laquelle insérer est introuvable dans ce dossier (supprimée entre-temps ?)." });
+        }
+        cible = apres.numero_fiche + 1;
+      }
+      if (cible <= numero_fiche - 1 || (inserer_apres === 'DEBUT' && numero_fiche > 1)) {
+        const { data: nb, error: erreurDecalage } = await supabase.rpc('decaler_fiches', { p_episode: episode_id, p_a_partir_de: cible });
+        if (erreurDecalage) {
+          return res.status(500).json({ error: erreurDecalage.code === '42883' || erreurDecalage.code === 'PGRST202'
+            ? "Insertion impossible : le script sql/renumerotation_fiches.sql n'a pas encore été collé dans Supabase." : erreurDecalage.message });
+        }
+        decalees = Number(nb) || 0;
+        numero_fiche = cible;
+      }
+    }
 
     // total_global/breakdown/mode_paiement sont écrits dès la création (pas seulement à
     // l'archivage) — sinon un dossier encore actif affiche un total de 0 malgré des
@@ -1984,6 +2028,11 @@ app.post('/api/fiches', async (req, res) => {
       }).select().single();
     if (!error) {
       await reactiverEpisodeSuspendu(episode_id);
+      if (inserer_apres && decalees > 0) {
+        enregistrerAuditServeur(req, 'fiche_inseree', { episode_id, fiche_id: data.id, numero_fiche, inserer_apres, fiches_decalees: decalees });
+        const { data: apres } = await supabase.from('fiches').select('id, numero_fiche').eq('episode_id', episode_id).is('supprime_le', null).order('numero_fiche');
+        return res.status(201).json({ ...data, renumerotation: apres || [] });
+      }
       return res.status(201).json(data);
     }
 
@@ -2035,7 +2084,7 @@ app.delete('/api/fiches/:id', async (req, res) => {
   // .is('supprime_le', null) plutôt que juste .select('id') : une fiche déjà à la corbeille
   // (supprimée une 1re fois, rejeu de la file hors ligne) doit rester idempotente, pas se
   // retrouver avec un supprime_le "rafraîchi" à chaque nouvel essai.
-  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('id').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('id, episode_id, numero_fiche').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!fiche) return res.status(200).json({ success: true }); // déjà supprimée (idempotent — utile pour une relecture de la file hors ligne)
 
@@ -2049,7 +2098,19 @@ app.delete('/api/fiches/:id', async (req, res) => {
   const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
   if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
 
-  res.json({ success: true });
+  // Les fiches suivantes remontent d'un numéro (14/10, reprise de chf-demo2) : supprimer la Fiche 1 ne laisse pas un dossier qui commence à la
+  // Fiche 2. Renumérotation atomique en base (sql/renumerotation_fiches.sql). Si le script n'est pas encore collé, la suppression reste valable
+  // (numéros inchangés, comme avant) : on le dit dans `renumerotation: null` plutôt que d'échouer.
+  let renumerotation = null;
+  if (fiche.episode_id) {
+    const { data: numeros, error: erreurRenumerotation } = await supabase.rpc('renumeroter_fiches', { p_episode: fiche.episode_id });
+    if (erreurRenumerotation) console.warn('Renumérotation des fiches non faite (script SQL pas collé ?) :', erreurRenumerotation.message);
+    else {
+      renumerotation = numeros || [];
+      enregistrerAuditServeur(req, 'fiches_renumerotees', { episode_id: fiche.episode_id, fiche_supprimee: fiche.id, ancien_numero: fiche.numero_fiche, numeros_apres: renumerotation.map(n => ({ id: n.id, numero_fiche: n.numero_fiche })) });
+    }
+  }
+  res.json({ success: true, renumerotation });
 });
 
 // Restauration d'une fiche mise à la corbeille — même logique que /api/episodes/:id/restaurer :
@@ -2058,12 +2119,19 @@ app.post('/api/fiches/:id/restaurer', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_annuler'))) {
     return res.status(403).json({ error: "Permission 'dossier_annuler' requise pour restaurer une fiche." });
   }
-  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('supprime_le').eq('id', req.params.id).maybeSingle();
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('supprime_le, numero_fiche, episode_id').eq('id', req.params.id).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!fiche) return res.status(404).json({ error: 'Fiche introuvable.' });
   if (!fiche.supprime_le) return res.status(400).json({ error: "Cette fiche n'est pas à la corbeille." });
   const horodatageSuppression = fiche.supprime_le;
-  const { data: ficheRestauree, error } = await supabase.from('fiches').update({ supprime_le: null }).eq('id', req.params.id).select();
+  // Une fiche supprimée a pu lâcher son numéro (NULL, voir renumeroter_fiches) : elle revient à la FIN du dossier, au prochain numéro libre.
+  const modifsRestauration = { supprime_le: null };
+  if (fiche.numero_fiche == null && fiche.episode_id) {
+    const { data: derniere } = await supabase.from('fiches').select('numero_fiche').eq('episode_id', fiche.episode_id).not('numero_fiche', 'is', null)
+      .order('numero_fiche', { ascending: false }).limit(1).maybeSingle();
+    modifsRestauration.numero_fiche = (derniere?.numero_fiche || 0) + 1;
+  }
+  const { data: ficheRestauree, error } = await supabase.from('fiches').update(modifsRestauration).eq('id', req.params.id).select();
   if (error) return res.status(500).json({ error: error.message });
   if (!ficheRestauree || ficheRestauree.length === 0) return res.status(404).json({ error: 'Fiche introuvable.' });
   await supabase.from('paiements').update({ supprime_le: null }).eq('fiche_id', req.params.id).eq('supprime_le', horodatageSuppression).select();
