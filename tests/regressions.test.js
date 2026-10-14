@@ -254,8 +254,8 @@ test("PUT /api/episodes/:id exige la permission facturation_modifier pour modifi
 test("PUT /api/episodes/:id met à jour dossiers.nom quand nom_patient est fourni — avant, corriger un nom de patient depuis Archives affichait 'succès' sans que rien ne soit jamais enregistré (le nom vit sur dossiers, que cette route ne touchait pas du tout)", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
   assert.match(blocRoute, /d\.nom_patient !== undefined/, "doit vérifier la présence de d.nom_patient");
-  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: d\.nom_patient \}\)/, "doit mettre à jour la colonne nom de la table dossiers");
-  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: d\.nom_patient \}\)\.eq\('id', episodeActuel\.dossier_id\)\.select\(\)/, "doit vérifier qu'une ligne a bien été affectée (même angle mort que les autres updates de ce fichier)");
+  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: formaterNomPropre\(d\.nom_patient\) \}\)/, "doit mettre à jour la colonne nom de la table dossiers");
+  assert.match(blocRoute, /\.from\('dossiers'\)\.update\(\{ nom: formaterNomPropre\(d\.nom_patient\) \}\)\.eq\('id', episodeActuel\.dossier_id\)\.select\(\)/, "doit vérifier qu'une ligne a bien été affectée (même angle mort que les autres updates de ce fichier)");
 });
 
 test("episodeVersFlat journalise (ne l'avale plus silencieusement) l'erreur de lecture du dossier lié à un épisode — avant, un dossier introuvable ou une erreur Supabase transitoire faisait apparaître un patient 'sans nom' dans Archives/Analytics sans aucun signal d'erreur", () => {
@@ -326,7 +326,7 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
 // — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
 test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
   const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
-  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier, mere_dossier_id \} = req\.body;/);
+  assert.match(bloc, /const \{ nom: nomSaisi, date_naissance, telephone, adresse, poids, conjoint: conjointSaisi, sexe, numero_dossier, mere_dossier_id \} = req\.body;/);
   assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint, sexe: sexe \|\| null \};/, "poids/conjoint/sexe doivent toujours être écrits, sans condition");
   assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
   assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
