@@ -1,3 +1,11 @@
+# 🔄 ONGLET LOTS : « DOSSIER COMPLET » ET « DERNIÈRE MODIFICATION PAR » (14/10, version chf-demo2)
+- **SQL à coller dans Supabase** : `sql/ajoute_dossier_complet_modifie_par_episodes.sql` (3 colonnes sur `episodes` : `dossier_complet boolean NOT NULL DEFAULT false`, `modifie_par`, `modifie_par_uid` ; IF NOT EXISTS, aucun DROP/REVOKE). Le serveur marche sans lui.
+- `PUT /api/episodes/:id` : accepte `dossier_complet` (strictement `true`/`false`, sinon 400) ; **signe chaque modification** (`signatureModification` : `modifie_par` = `users.display_name`, à défaut e-mail, 120 caractères max ; `modifie_par_uid` = id) — jamais lu dans le corps de la requête. Colonnes absentes (42703) : la modification passe sans signature, sauf `dossier_complet` qui répond 500 avec le nom du script à coller. Le garde-fou existant (dossier archivé = permission `facturation_modifier`) est inchangé.
+- Forme « flat » envoyée au navigateur : `dossierComplet` (false par défaut) et `modifiePar` (null par défaut).
+- Tests : `tests/lots_dossier_complet.test.js` (10, exécute la vraie route extraite de `server.js`). Côté app : section « 🔄 LOTS : SYNCHRO chf-demo2 DU 14/10 » des notes de chf-app2. **Déployer ce serveur AVANT l'app.**
+
+---
+
 # 💯 CONTRÔLE DES MONTANTS (13/10, liste de contrôle fintech montrée par Esdras : « montants négatifs, énormes, illisibles »)
 - **Avant** : `POST /api/paiements` enregistrait le montant tel quel (seul le remboursement de crédit était contrôlé) ; la base n'avait aucune contrainte sur `montant`. Un appel direct avec un jeton valide pouvait envoyer −500, « abc », Infinity ou 1e15.
 - **Maintenant** (`utils/validationMontant.js`, appelé dans la route juste après `appliquerHeureAuPaiement`, AVANT le paiement partiel et le calcul du solde) : 400 avec un message clair si le montant est absent, négatif, illisible (texte non numérique, `1e3`, `0x10`, virgule), infini, ou > 100 000 000 Gdes ; un dépôt ou un remboursement doit être > 0 ; `solde_restant`, s'il est fourni, doit être un nombre raisonnable. Le montant est arrondi au centime (colonne `numeric(12,2)`). **0 reste valide** (vente à crédit, exonération à 100 %, fiche payée entièrement par dépôt).

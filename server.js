@@ -637,6 +637,19 @@ function ficheVersColonnes(f) {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function estUnVraiUuid(id) { return typeof id === 'string' && UUID_REGEX.test(id); }
 
+// Qui a modifié ce dossier en dernier (affiché dans l'onglet Lots : « Dernière modification par … »). Le nom vient de la table users
+// (display_name), à défaut l'e-mail ; jamais fourni par le navigateur, donc non falsifiable. Aucun échec ici ne doit bloquer une
+// modification : sans nom, on enregistre l'identifiant.
+async function signatureModification(utilisateur) {
+  if (!utilisateur || !utilisateur.id) return {};
+  let nom = utilisateur.email || utilisateur.id;
+  try {
+    const { data } = await supabase.from('users').select('display_name').eq('id', utilisateur.id).maybeSingle();
+    if (data && data.display_name) nom = data.display_name;
+  } catch (e) { /* le nom est un confort : on garde l'e-mail */ }
+  return { modifie_par: String(nom).slice(0, 120), modifie_par_uid: String(utilisateur.id) };
+}
+
 async function episodeVersFlat(ep) {
   const { data: dossier, error: erreurDossier } = await supabase.from('dossiers').select('*').eq('id', ep.dossier_id).single();
   // Avant : cette erreur était silencieusement ignorée — un épisode dont le dossier ne pouvait
@@ -717,6 +730,10 @@ function assemblerEpisodeFlat(ep, dossier, fiches, fichesAvecPaiementAnnule) {
     dateSuspension: ep.date_suspension, moisReport: ep.mois_report,
     numeroLot: ep.numero_lot, verrouilleFacture: ep.verrouille_facture,
     moisLot: ep.mois_lot || null, lotVerrouille: ep.lot_verrouille || false,
+    // 14/10 (version chf-demo2 de l'onglet Lots) : « dossier complet » (case de suivi visuel, aucun effet sur la facturation)
+    // et « dernière modification par » (nom de la personne ; voir signatureModification). Colonnes de
+    // sql/ajoute_dossier_complet_modifie_par_episodes.sql — absentes tant qu'il n'est pas collé : false / null.
+    dossierComplet: ep.dossier_complet === true, modifiePar: ep.modifie_par || null,
     estHospitalisation: ep.est_hospitalisation,
     motifFermeture: ep.motif_fermeture, dateFermeture: ep.date_fermeture,
     lit: ep.lit || null,
@@ -1065,9 +1082,20 @@ app.put('/api/episodes/:id', async (req, res) => {
   // individuel). Colonnes ajoutées par sql/ajoute_lot_mois_verrouillage_episodes.sql.
   if (d.mois_lot !== undefined) maj.mois_lot = d.mois_lot;
   if (d.lot_verrouille !== undefined) maj.lot_verrouille = d.lot_verrouille;
+  // « Dossier complet » (onglet Lots, version chf-demo2) : strictement vrai ou faux, jamais une chaîne ni un nombre.
+  if (d.dossier_complet !== undefined) {
+    if (typeof d.dossier_complet !== 'boolean') return res.status(400).json({ error: 'dossier_complet doit valoir true ou false.' });
+    maj.dossier_complet = d.dossier_complet;
+  }
 
   if (Object.keys(maj).length > 0) {
-    const { data, error } = await supabase.from('episodes').update(maj).eq('id', req.params.id).select();
+    // Chaque modification signe le dossier (modifie_par / modifie_par_uid). Si les colonnes n'existent pas encore (SQL pas collé),
+    // la modification passe quand même SANS signature — sauf « dossier complet », qui a besoin de sa colonne.
+    let { data, error } = await supabase.from('episodes').update({ ...maj, ...(await signatureModification(req.user)) }).eq('id', req.params.id).select();
+    if (error && error.code === '42703') {
+      if (d.dossier_complet !== undefined) return res.status(500).json({ error: "La colonne dossier_complet n'existe pas encore dans Supabase — colle sql/ajoute_dossier_complet_modifie_par_episodes.sql dans le SQL Editor." });
+      ({ data, error } = await supabase.from('episodes').update(maj).eq('id', req.params.id).select());
+    }
     if (error) return res.status(500).json({ error: error.message });
     if (!data || data.length === 0) return res.status(404).json({ error: "Dossier introuvable — rien n'a été modifié." });
   }
