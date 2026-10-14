@@ -95,8 +95,8 @@ function routeCreationDossier(options = {}) {
   const aPermission = async () => options.permission !== false;
   const avertissements = [];
   const console_ = { warn: (...a) => avertissements.push(a.join(' ')), log() {}, error() {} };
-  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'crypto', 'console', 'verifierMere', serverSrc.slice(debut, fin))(
-    app, supabase, aPermission, (v) => (v ? v : null), memePatient, crypto, console_, require('../utils/naissance').verifierMere);
+  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'formaterNomPropre', 'crypto', 'console', 'verifierMere', serverSrc.slice(debut, fin))(
+    app, supabase, aPermission, (v) => (v ? v : null), memePatient, require('../utils/dossiers').formaterNomPropre, crypto, console_, require('../utils/naissance').verifierMere);
   const appeler = async (corps, utilisateur = { id: 'uid-caisse', email: 'caisse@chf.com' }) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaire({ body: corps, user: utilisateur }, res);
@@ -293,4 +293,31 @@ test("POST /api/dossiers : un nouveau-né est lié à sa mère (mere_dossier_id)
   assert.strictEqual(refusHomme.code, 400);
   assert.match(refusHomme.corps.error, /mère doit être une femme/);
   assert.strictEqual(supabase.dossiers.filter(d => /^B-/.test(d.numero_dossier)).length, 1, 'aucun bébé créé par un refus');
+});
+
+// --- Noms de personnes : majuscule au début de chaque mot, aussi côté serveur (14/10, demande d'Esdras)
+test("formaterNomPropre (serveur) : même règle que l'application — majuscule à chaque mot, accents, tirets, apostrophes ; vide/absent -> ''", () => {
+  const { formaterNomPropre } = require('../utils/dossiers');
+  const cas = [['marie exemple', 'Marie Exemple'], ['JEAN PIERRE', 'Jean Pierre'], ['  jean   baptiste ', 'Jean Baptiste'], ['élodie ève', 'Élodie Ève'],
+    ['marie-ève', 'Marie-Ève'], ["o'neil", "O'Neil"], ['', ''], [null, ''], [undefined, '']];
+  for (const [entree, attendu] of cas) assert.strictEqual(formaterNomPropre(entree), attendu, String(entree));
+});
+
+test("Le serveur enregistre le nom avec des majuscules même si le navigateur a envoyé des minuscules (POST /api/dossiers, PUT /api/dossiers/:id, PUT /api/episodes/:id, POST /api/episodes)", () => {
+  const src = serverSrc;
+  assert.match(src, /const nom = formaterNomPropre\(nomSaisi\); \/\/ majuscule au début de chaque mot/);
+  assert.match(src, /conjoint = typeof conjointSaisi === 'string' \? formaterNomPropre\(conjointSaisi\) : conjointSaisi/);
+  assert.match(src, /nom: formaterNomPropre\(d\.nom_patient\), date_naissance/);
+  assert.match(src, /update\(\{ nom: formaterNomPropre\(d\.nom_patient\) \}\)/);
+});
+
+test("POST /api/dossiers : un nom tapé en minuscules est enregistré avec des majuscules (nom et nom d'origine) ; en majuscules aussi", async () => {
+  const { appeler, supabase } = routeCreationDossier();
+  const r = await appeler({ numero_dossier: '2001', nom: 'marie-ève jean baptiste', local_id: 'local-maj-1' });
+  assert.strictEqual(r.code, 201);
+  assert.strictEqual(supabase.dossiers[0].nom, 'Marie-Ève Jean Baptiste');
+  assert.strictEqual(supabase.dossiers[0].nom_origine, 'Marie-Ève Jean Baptiste');
+  const r2 = await appeler({ numero_dossier: '2002', nom: 'PAUL EXEMPLE', local_id: 'local-maj-2' });
+  assert.strictEqual(r2.code, 201);
+  assert.strictEqual(supabase.dossiers[1].nom, 'Paul Exemple');
 });

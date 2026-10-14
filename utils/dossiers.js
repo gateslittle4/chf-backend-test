@@ -22,4 +22,14 @@ function memePatient(dossierExistant, nomRecu) {
   return [dossierExistant.nom, dossierExistant.nom_origine].some(n => jetonsDuNom(n) === recu);
 }
 
-module.exports = { jetonsDuNom, memePatient };
+// Nom de personne : une majuscule au début de chaque mot, le reste en minuscules (« marie-ève o'neil » -> « Marie-Ève O'Neil »).
+// Même règle que formaterNomPropre de l'application (chf-app2, utils/helpers.js) : le navigateur la fait déjà, le serveur la refait pour
+// un vieux navigateur, une opération restée en file d'attente hors ligne, ou tout autre appelant (14/10, demande d'Esdras).
+// Vide/absent -> '' ; les autres types (null, undefined) ne sont jamais convertis en texte « undefined ».
+function formaterNomPropre(chaine) {
+  if (chaine === undefined || chaine === null) return '';
+  return String(chaine).trim().replace(/\s+/g, ' ').toLowerCase()
+    .replace(/(^|[\s\-'’.])(\p{L})/gu, (_, separateur, lettre) => separateur + lettre.toUpperCase());
+}
+
+module.exports = { jetonsDuNom, memePatient, formaterNomPropre };

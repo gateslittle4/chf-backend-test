@@ -38,7 +38,7 @@ const supabase = createClient(
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
-const { memePatient } = require('./utils/dossiers');
+const { memePatient, formaterNomPropre } = require('./utils/dossiers');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -996,7 +996,7 @@ app.post('/api/episodes', async (req, res) => {
     .from('dossiers')
     .insert({
       numero_dossier: d.numero_dossier || `AUTO-${Date.now()}`,
-      nom: d.nom_patient, date_naissance: dateOuNull(d.date_naissance), telephone: d.telephone, adresse: d.adresse,
+      nom: formaterNomPropre(d.nom_patient), date_naissance: dateOuNull(d.date_naissance), telephone: d.telephone, adresse: d.adresse,
     })
     .select().single();
   if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
@@ -1105,7 +1105,7 @@ app.put('/api/episodes/:id', async (req, res) => {
   // Le nom du patient vit sur la table dossiers, pas episodes — cette route ne le touchait
   // jamais, donc corriger un nom depuis Archives affichait "succès" sans rien enregistrer.
   if (d.nom_patient !== undefined && String(d.nom_patient).trim() && episodeActuel) {
-    const { data: nomMaj, error: erreurNom } = await supabase.from('dossiers').update({ nom: d.nom_patient }).eq('id', episodeActuel.dossier_id).select();
+    const { data: nomMaj, error: erreurNom } = await supabase.from('dossiers').update({ nom: formaterNomPropre(d.nom_patient) }).eq('id', episodeActuel.dossier_id).select();
     if (erreurNom) return res.status(500).json({ error: erreurNom.message });
     if (!nomMaj || nomMaj.length === 0) return res.status(404).json({ error: "Dossier lié introuvable — le nom n'a pas été modifié." });
   }
@@ -1332,7 +1332,9 @@ app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' (ou accès caisse) requise." });
   }
-  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
+  const { numero_dossier, nom: nomSaisi, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
+  if (!nomSaisi) return res.status(400).json({ error: 'Le nom est requis' });
+  const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
   // 14/10 : le sexe peut être donné dès la création (rapport MSPP) — même contrôle que PUT /api/dossiers/:id. Vide = non renseigné.
@@ -1407,7 +1409,7 @@ app.post('/api/dossiers', async (req, res) => {
           const { error: erreurAudit } = await supabase.from('audit_log').insert({
             id: crypto.randomUUID(), action: 'dossier_deja_enregistre',
             effectue_par: (req.user && (req.user.email || req.user.id)) || null, effectue_par_uid: (req.user && req.user.id) || null,
-            details: { numero_dossier, nom_recu: nom, nom_existant: memeNumero.nom, dossier_id: memeNumero.id, confirme: true },
+            details: { numero_dossier, nom_recu: nomSaisi, nom_existant: memeNumero.nom, dossier_id: memeNumero.id, confirme: true },
             date: new Date().toISOString(),
           });
           if (erreurAudit) console.warn('Audit « dossier déjà enregistré » non enregistré :', erreurAudit.message);
@@ -1459,8 +1461,10 @@ app.put('/api/dossiers/:id', async (req, res) => {
   if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
     return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   }
-  const { nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier, mere_dossier_id } = req.body;
-  if (!nom || !String(nom).trim()) return res.status(400).json({ error: 'Le nom est requis' });
+  const { nom: nomSaisi, date_naissance, telephone, adresse, poids, conjoint: conjointSaisi, sexe, numero_dossier, mere_dossier_id } = req.body;
+  if (!nomSaisi || !String(nomSaisi).trim()) return res.status(400).json({ error: 'Le nom est requis' });
+  const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
+  const conjoint = typeof conjointSaisi === 'string' ? formaterNomPropre(conjointSaisi) : conjointSaisi;
   if (sexe !== undefined && sexe !== null && sexe !== 'M' && sexe !== 'F') {
     return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
   }
