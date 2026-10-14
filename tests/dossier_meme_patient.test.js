@@ -54,13 +54,14 @@ test("memePatient : le nom d'ORIGINE compte (un bébé renommé reste le même p
 // ---------------------------------------------------------------------------------------------------------
 // La vraie route POST /api/dossiers, contre un faux Supabase
 // ---------------------------------------------------------------------------------------------------------
-function fauxSupabase({ dossiers = [], auditRefuse = null, conflitSansDossier = false } = {}) {
+function fauxSupabase({ dossiers = [], auditRefuse = null, conflitSansDossier = false, colonnesAbsentes = [] } = {}) {
   const audits = [];
   return {
     dossiers, audits,
     from(table) {
       if (table === 'dossiers') return {
         insert: (ligne) => ({ select: () => ({ single: async () => {
+          if (colonnesAbsentes.some(c => c in ligne)) return { data: null, error: { code: '42703', message: 'column does not exist' } };
           const pris = conflitSansDossier
             || dossiers.some(d => d.numero_dossier === ligne.numero_dossier)
             || (ligne.local_id && dossiers.some(d => d.local_id === ligne.local_id));
@@ -247,4 +248,35 @@ test("server.js : la réunion n'a lieu qu'à la CRÉATION, après le contrôle d
   assert.match(post, /if \(error\.code === '23505'\) \{/);
   const put = serverSrc.slice(serverSrc.indexOf("app.put('/api/dossiers/:id'"), serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"));
   assert.doesNotMatch(put, /memePatient|dejaEnregistre/, "changer le numéro d'un dossier vers un numéro déjà pris reste un conflit : jamais de réunion silencieuse");
+});
+
+test("POST /api/dossiers : le sexe donné à la création est enregistré (M ou F) ; vide = non renseigné ; toute autre valeur est refusée (400)", async () => {
+  const { appeler, supabase } = routeCreationDossier();
+  const f = await appeler({ numero_dossier: '1', nom: 'Marie Joseph', sexe: 'F', date_naissance: '1990-05-17', local_id: 'l-1' });
+  assert.strictEqual(f.code, 201);
+  assert.strictEqual(supabase.dossiers[0].sexe, 'F');
+  const m = await appeler({ numero_dossier: '2', nom: 'Jean Paul', sexe: 'M', local_id: 'l-2' });
+  assert.strictEqual(supabase.dossiers[1].sexe, 'M');
+  const vide = await appeler({ numero_dossier: '3', nom: 'Sans Sexe', sexe: '', local_id: 'l-3' });
+  assert.strictEqual(vide.code, 201);
+  assert.strictEqual('sexe' in supabase.dossiers[2], false, 'un sexe vide n\'écrit rien (colonne laissée à null)');
+  const rien = await appeler({ numero_dossier: '4', nom: 'Ancien Client', local_id: 'l-4' });
+  assert.strictEqual(rien.code, 201, 'un ancien client de l\'application (sans champ sexe) continue de fonctionner');
+  for (const mauvais of ['X', 'f', 'homme', 1]) {
+    const r = await appeler({ numero_dossier: '9', nom: 'Faute', sexe: mauvais, local_id: 'l-9' });
+    assert.strictEqual(r.code, 400, JSON.stringify(mauvais));
+    assert.match(r.corps.error, /Sexe invalide/);
+  }
+  assert.strictEqual(supabase.dossiers.length, 4, 'aucun dossier créé par un sexe invalide');
+});
+
+test("POST /api/dossiers : colonne sexe absente de la base (script SQL pas collé) → le dossier est quand même créé, sans le sexe ; si seul nom_origine manque, le sexe est GARDÉ", async () => {
+  const sansSexe = routeCreationDossier({ colonnesAbsentes: ['sexe'] });
+  const r1 = await sansSexe.appeler({ numero_dossier: '1', nom: 'Marie', sexe: 'F', local_id: 'a' });
+  assert.strictEqual(r1.code, 201);
+  assert.strictEqual('sexe' in sansSexe.supabase.dossiers[0], false);
+  const sansOrigine = routeCreationDossier({ colonnesAbsentes: ['nom_origine'] });
+  const r2 = await sansOrigine.appeler({ numero_dossier: '2', nom: 'Marie', sexe: 'F', local_id: 'b' });
+  assert.strictEqual(r2.code, 201);
+  assert.strictEqual(sansOrigine.supabase.dossiers[0].sexe, 'F', 'le sexe n\'est pas perdu parce qu\'une AUTRE colonne manque');
 });

@@ -1263,9 +1263,13 @@ app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' (ou accès caisse) requise." });
   }
-  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id } = req.body;
+  const { numero_dossier, nom, date_naissance, telephone, adresse, local_id, sexe } = req.body;
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
+  // 14/10 : le sexe peut être donné dès la création (rapport MSPP) — même contrôle que PUT /api/dossiers/:id. Vide = non renseigné.
+  if (sexe !== undefined && sexe !== null && sexe !== '' && sexe !== 'M' && sexe !== 'F') {
+    return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
+  }
   // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
   // apiDossierEpisode passe par la file d'attente hors-ligne (avant, cette route n'était jamais
   // rejouée automatiquement, donc jamais appelée deux fois pour la même action).
@@ -1281,11 +1285,17 @@ app.post('/api/dossiers', async (req, res) => {
   // '42703'` (colonne inexistante) : la colonne peut ne pas encore exister dans Supabase (voir
   // sql/ajoute_nom_origine_dossiers.sql, pas encore confirmé collé) — repli sur l'ancien insert
   // sans elle, comme les autres fonctions Postgres pas encore déployées dans ce projet (42883).
-  let { data, error } = await supabase
-    .from('dossiers').insert({ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single();
+  // Colonnes facultatives (nom_origine, sexe) : 42703 = colonne absente (script SQL pas encore collé). On retire d'abord nom_origine (comme
+  // avant), puis le sexe en dernier recours — jamais le sexe d'abord, pour ne pas le perdre quand seul nom_origine manque.
+  const ligneDossier = { numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null, ...(sexe ? { sexe } : {}) };
+  let { data, error } = await supabase.from('dossiers').insert(ligneDossier).select().single();
   if (error && error.code === '42703') {
-    ({ data, error } = await supabase
-      .from('dossiers').insert({ numero_dossier, nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, local_id: local_id || null }).select().single());
+    const { nom_origine, ...sansNomOrigine } = ligneDossier;
+    ({ data, error } = await supabase.from('dossiers').insert(sansNomOrigine).select().single());
+    if (error && error.code === '42703' && sansNomOrigine.sexe) {
+      const { sexe: _sexe, ...sansSexe } = sansNomOrigine;
+      ({ data, error } = await supabase.from('dossiers').insert(sansSexe).select().single());
+    }
   }
   if (error) {
     if (error.code === '23505') {
