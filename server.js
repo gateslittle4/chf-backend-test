@@ -41,6 +41,7 @@ const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paie
 const { memePatient } = require('./utils/dossiers');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
+const { creerRoutesListesServices } = require('./utils/routesListesServices');
 const { anciensNomsApresRenommage, verifierMere } = require('./utils/naissance');
 const { controlerQualite } = require('./utils/qualiteDonnees');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
@@ -1304,6 +1305,8 @@ app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
 // 14/10 : doublons d'identité + fusion de dossiers, puis état du système (postes, erreurs) — déclarés AVANT /api/dossiers/:id (voir utils/routesDoublons.js).
 creerRoutesDoublons({ supabase, aPermission, lireToutesLesPages }).monter(app);
 creerRoutesEtatSysteme({ supabase }).monter(app);
+// 14/10 : renommer un type de consultation / un service d'hospitalisation sans couper l'historique (voir utils/routesListesServices.js).
+creerRoutesListesServices({ supabase, aPermission }).monter(app);
 
 // 14/10 : « Qualité des données » — ce qui manque ou semble faux, avec de quoi corriger (voir utils/qualiteDonnees.js). Lecture seule.
 app.get('/api/qualite-donnees', async (req, res) => {

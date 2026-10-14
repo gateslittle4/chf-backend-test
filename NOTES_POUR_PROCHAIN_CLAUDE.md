@@ -4,6 +4,11 @@
 - Forme « flat » envoyée au navigateur : `dossierComplet` (false par défaut) et `modifiePar` (null par défaut).
 - Tests : `tests/lots_dossier_complet.test.js` (10, exécute la vraie route extraite de `server.js`). Côté app : section « 🔄 LOTS : SYNCHRO chf-demo2 DU 14/10 » des notes de chf-app2. **Déployer ce serveur AVANT l'app.**
 
+# 🗂️ RENOMMER UN SERVICE / UN TYPE DE CONSULTATION (14/10, Esdras : « les services et types de consultation doivent être modifiables »)
+- **`POST /api/catalog/:type/renommer`** `{ ancien, nouveau }` (`utils/routesListesServices.js`), types `types_consultation` | `services_hospitalisation` seulement, permission `catalogue_gerer`. Le nom est recopié en texte dans `episodes.type_consultation`/`episodes.service`, `transferts_service.ancien_service`/`nouveau_service`, `requisitions.service_demandeur` et le catalogue `lits_par_service` : la route met à jour l'HISTORIQUE d'abord, la LISTE ensuite (donc un échec au milieu laisse l'ancien nom dans la liste et l'appel se refait sans effet double ; un appel refait après un succès répond 200). Refus : liste non renommable 400, nom vide / > 60 / `<` `>` / identique 400, déjà pris (sans accent ni majuscule, actif ou masqué) 409, inconnu 404, sans droit 403. Trace `liste_renommee` dans `audit_log`.
+- Les éléments MASQUÉS sont dans les catalogues `types_consultation_masques` / `services_hospitalisation_masques` (écrits par l'app via le PUT habituel) ; masquer/réordonner/ajouter/retirer n'ont pas de route propre. Aucun SQL à coller. **Déployer ce serveur AVANT l'app** (l'app appelle la route).
+- Tests : `tests/renommage_liste.test.js` (15, 4 sabotages détectés). Côté app : section « 🗂️ LISTES MODIFIABLES » des notes de chf-app2.
+
 ---
 
 # 💯 CONTRÔLE DES MONTANTS (13/10, liste de contrôle fintech montrée par Esdras : « montants négatifs, énormes, illisibles »)
