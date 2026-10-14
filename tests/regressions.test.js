@@ -326,7 +326,7 @@ test("PUT /api/dossiers/:id exige fiche_patient_modifier — seul l'écran Fiche
 // — l'écran n'affiche pas toujours ce champ en édition — ne doit jamais l'effacer par erreur).
 test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement s'il est fourni — avec le même conflit 409 que la création s'il est déjà pris par un autre patient", () => {
   const bloc = blocRoutePermission("app.put('/api/dossiers/:id'", "app.get('/api/dossiers/:id/historique'");
-  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier \} = req\.body;/);
+  assert.match(bloc, /const \{ nom, date_naissance, telephone, adresse, poids, conjoint, sexe, numero_dossier, mere_dossier_id \} = req\.body;/);
   assert.match(bloc, /const maj = \{ nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, poids: poids \|\| null, conjoint, sexe: sexe \|\| null \};/, "poids/conjoint/sexe doivent toujours être écrits, sans condition");
   assert.match(bloc, /if \(numero_dossier !== undefined\) \{/, "numero_dossier ne doit être touché QUE s'il est explicitement envoyé");
   assert.match(bloc, /if \(!String\(numero_dossier\)\.trim\(\)\) return res\.status\(400\)/, "un numero_dossier vide envoyé explicitement doit être refusé, pas accepté comme un effacement");
@@ -1676,11 +1676,13 @@ test("Les lectures qui alimentent l'écran (dossiers/épisodes, fiches d'un épi
 test("POST /api/dossiers fige nom_origine=nom à la création (avec repli 42703 si la colonne n'existe pas encore) ; PUT /api/dossiers/:id ne le modifie jamais", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const blocPost = src.slice(src.indexOf("app.post('/api/dossiers'"), src.indexOf("app.get('/api/dossiers/:id'"));
-  assert.match(blocPost, /\.insert\(\{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)/,
-    "le premier essai d'insertion doit inclure nom_origine: nom");
-  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{/, "doit se replier sur l'ancien insert (sans nom_origine) si la colonne n'existe pas encore en base — comme les autres fonctions/colonnes pas encore déployées dans ce projet (42883 pour les RPC)");
-  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{\s*\(\{ data, error \} = await supabase\s*\.from\('dossiers'\)\.insert\(\{ numero_dossier, nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null \}\)\.select\(\)\.single\(\)\);\s*\}/,
-    "le repli doit être l'insert original, sans nom_origine");
+  // 14/10 : la ligne est construite une fois (ligneDossier) — le premier essai l'insère telle quelle, avec nom_origine ; les replis retirent d'abord
+  // nom_origine (comme avant), puis le sexe en dernier recours.
+  assert.match(blocPost, /const ligneDossier = \{ numero_dossier, nom, nom_origine: nom, date_naissance: dateOuNull\(date_naissance\), telephone, adresse, local_id: local_id \|\| null,/,
+    "la ligne d'insertion doit inclure nom_origine: nom");
+  assert.match(blocPost, /let \{ data, error \} = await supabase\.from\('dossiers'\)\.insert\(ligneDossier\)\.select\(\)\.single\(\);/, "le premier essai insère la ligne complète");
+  assert.match(blocPost, /if \(error && error\.code === '42703'\) \{\s*const \{ nom_origine, \.\.\.sansNomOrigine \} = ligneDossier;/,
+    "doit se replier sur l'insert sans nom_origine si la colonne n'existe pas encore en base — comme les autres fonctions/colonnes pas encore déployées dans ce projet (42883 pour les RPC)");
 
   const blocPut = src.slice(src.indexOf("app.put('/api/dossiers/:id'"), src.indexOf("app.get('/api/dossiers/:id/historique'"));
   assert.doesNotMatch(blocPut, /nom_origine/, "un renommage (PUT) ne doit JAMAIS toucher nom_origine — sinon on perdrait la trace du tout premier nom, exactement ce qu'Esdras ne veut pas");
