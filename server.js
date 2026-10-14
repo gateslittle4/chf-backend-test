@@ -106,7 +106,8 @@ const PERMISSIONS_PAR_DEFAUT = [
   // 09/10 (Esdras) : "pharmacien en chef : tout ce que fait un pharmacien, et il peut modifier les stocks, mais
   // cliquable dans Rôles & permissions" — exactement les droits du pharmacien + stock_gerer (ajouter/définir le
   // stock, dons, réquisitions). stock_gerer reste une case de la matrice : la décocher le retire sans toucher au code.
-  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer'] },
+  // 14/10 (Esdras) : + catalogue_gerer (médicaments, prix). Miroir de utils/permissions.js (chf-app2).
+  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer','catalogue_gerer'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.

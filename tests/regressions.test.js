@@ -2712,15 +2712,16 @@ function permissionsParDefautServeur() {
   return new Function(serverSrc.slice(debut, fin).replace('const PERMISSIONS_PAR_DEFAUT =', 'return'))();
 }
 
-test("Rôle 'pharmacien_chef' : droits du pharmacien + stock_gerer exactement, rien de comptable ni d'administration, invitable", () => {
+test("Rôle 'pharmacien_chef' : droits du pharmacien + stock_gerer + catalogue_gerer exactement, rien de comptable ni d'administration, invitable", () => {
   const table = permissionsParDefautServeur();
   const pharmacien = table.find(r => r.role === 'pharmacien');
   const chef = table.find(r => r.role === 'pharmacien_chef');
   assert.ok(pharmacien && chef, 'les deux rôles doivent exister dans le miroir serveur');
-  assert.deepStrictEqual([...chef.permissions].sort(), [...pharmacien.permissions, 'stock_gerer'].sort(),
-    "pharmacien_chef = EXACTEMENT les droits du pharmacien + stock_gerer (si le pharmacien gagne un droit, le chef le gagne aussi)");
+  assert.deepStrictEqual([...chef.permissions].sort(), [...pharmacien.permissions, 'stock_gerer', 'catalogue_gerer'].sort(),
+    "pharmacien_chef = EXACTEMENT les droits du pharmacien + stock_gerer + catalogue_gerer (si le pharmacien gagne un droit, le chef le gagne aussi)");
   assert.ok(!pharmacien.permissions.includes('stock_gerer'), "le pharmacien simple ne gère pas le stock par défaut");
-  assert.ok(!chef.permissions.some(p => /^facturation_|rapport_chf_voir|_annuler$|_supprimer$|utilisateurs_gerer|permissions_gerer|catalogue_gerer|dossier_creer/.test(p)),
+  assert.ok(!pharmacien.permissions.includes('catalogue_gerer'), "ni le catalogue : seul le pharmacien en chef (Esdras, 14/10)");
+  assert.ok(!chef.permissions.some(p => /^facturation_|rapport_chf_voir|_annuler$|_supprimer$|utilisateurs_gerer|permissions_gerer|dossier_creer/.test(p)),
     'pharmacien_chef : aucun droit comptable ni d\'administration');
   assert.match(serverSrc, /const ROLES_INVITABLES = \[[^\]]*'pharmacien_chef'/);
 });
