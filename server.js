@@ -42,6 +42,7 @@ const { memePatient } = require('./utils/dossiers');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { anciensNomsApresRenommage, verifierMere } = require('./utils/naissance');
+const { controlerQualite } = require('./utils/qualiteDonnees');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
 const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('./utils/heureServeur');
 // Limite du nombre de requêtes (13/10) : par compte connecté, par adresse pour les pages publiques et les mauvais jetons — voir utils/limiteur.js.
@@ -1275,6 +1276,22 @@ app.get('/api/dossiers/liste-hors-ligne', async (req, res) => {
 // 14/10 : doublons d'identité + fusion de dossiers, puis état du système (postes, erreurs) — déclarés AVANT /api/dossiers/:id (voir utils/routesDoublons.js).
 creerRoutesDoublons({ supabase, aPermission, lireToutesLesPages }).monter(app);
 creerRoutesEtatSysteme({ supabase }).monter(app);
+
+// 14/10 : « Qualité des données » — ce qui manque ou semble faux, avec de quoi corriger (voir utils/qualiteDonnees.js). Lecture seule.
+app.get('/api/qualite-donnees', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'direction_voir')) && !(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+    return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  }
+  try {
+    const colonnes = 'id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe';
+    let dossiers;
+    try { dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(`${colonnes}, mere_dossier_id, fusionne_dans`).order('id')); }
+    catch (e) { if (e && e.code === '42703') dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(colonnes).order('id')); else throw e; }
+    const episodes = await lireToutesLesPages(() => supabase.from('episodes')
+      .select('id, dossier_id, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, service, supprime_le').order('id'));
+    res.json({ ...controlerQualite({ dossiers, episodes, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 app.post('/api/dossiers', async (req, res) => {
   // 01/10 (retour d'Esdras) : la caisse/pharmacie (caisse_travailler) peut aussi créer un dossier —
