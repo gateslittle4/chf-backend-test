@@ -392,3 +392,9 @@ Le serveur fonctionne AVANT que les scripts soient collés (repli 42703/42P01/42
 - `POST /api/dossiers` accepte `sexe` et `mere_dossier_id` ; `PUT /api/dossiers/:id` garde l'ancien nom dans `anciens_noms` à chaque renommage (le nom de création, lui, ne bouge jamais) et accepte `mere_dossier_id` (null = lien retiré) ; `GET /api/dossiers/:id` renvoie `mere`, `enfants`, `fusionne_dans_dossier`.
 - Les erreurs des postes sont NETTOYÉES (e-mails et suites de 5 chiffres retirés) avant d'être gardées : `utils/erreursClient.js`.
 - Tests : `tests/doublons_identite.test.js`, `routes_doublons.test.js`, `etat_systeme_serveur.test.js`, `naissance.test.js`, `qualite_donnees.test.js` (+ `tests/aides/fauxSupabase.js`, `appFausse.js`).
+
+## 15/10 — Rapport d'anomalies de caisse (administrateur SEUL)
+`GET /api/admin/anomalies?mois=AAAA-MM` (défaut : mois courant, heure d'Haïti) renvoie, pour le mois et le précédent, par personne : paiements, montants, annulations FAITES (attribuées à celle qui annule, `annule_par_uid`), exonérations, crédits, remboursements patient, sorties de caisse accordées, postes fermés automatiquement,
+et des signaux « à regarder » (taux d'au moins 2× la médiane de l'équipe, au moins 2 événements, au moins 5 paiements, au moins 3 personnes à comparer — un signal n'est pas une preuve). Calcul : `utils/anomalies.js` (pur).
+RÉSERVÉ au rôle `administrateur` (test du rôle, PAS une permission : on ne peut pas le donner à un autre rôle par Rôles & permissions) — Esdras : « ce rapport est pour moi, pas encore disponible à la direction ». Pour l'ouvrir plus tard à la direction : remplacer le test de rôle par une permission dédiée.
+Tests : `tests/anomalies.test.js` (dont la route exécutée sur de fausses tables).

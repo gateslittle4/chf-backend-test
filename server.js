@@ -3214,6 +3214,41 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
   }
 });
 
+// Rapport de contrôle des anomalies de caisse (15/10) — voir utils/anomalies.js. RÉSERVÉ AU RÔLE « administrateur » : pas une permission qu'on pourrait donner à un autre
+// rôle par l'écran Rôles & permissions, volontairement (Esdras : ce rapport est pour lui seul, pas encore pour la direction).
+app.get('/api/admin/anomalies', async (req, res) => {
+  const { data: profil, error: erreurProfil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (erreurProfil) return res.status(500).json({ error: erreurProfil.message });
+  if (!profil || profil.role !== 'administrateur') return res.status(403).json({ error: "Réservé à l'administrateur." });
+  const mois = /^\d{4}-(0[1-9]|1[0-2])$/.test(String(req.query.mois || '')) ? String(req.query.mois) : moisDe(Date.now());
+  const precedent = moisPrecedent(mois);
+  // Fenêtre de lecture : du mois précédent à la fin du mois demandé, avec un jour de marge de chaque côté (le découpage exact se fait en heure d'Haïti dans calculerAnomalies).
+  const [a, m] = mois.split('-').map(Number);
+  const debut = new Date(Date.UTC(m === 1 ? a - 1 : a, m === 1 ? 11 : m - 2, 1) - 86400000).toISOString();
+  const fin = new Date(Date.UTC(m === 12 ? a + 1 : a, m === 12 ? 0 : m, 1) + 86400000).toISOString();
+  const lirePages = async (requete) => { // la base renvoie 1000 lignes au plus par appel
+    const toutes = [];
+    for (let i = 0; i < 30; i++) {
+      const { data, error } = await requete().range(i * 1000, i * 1000 + 999);
+      if (error) throw new Error(error.message);
+      toutes.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    return toutes;
+  };
+  try {
+    const paiements = await lirePages(() => supabase.from('paiements').select('id, mode, montant, date_paiement, annule, annule_par, annule_par_uid, encaisse_par, traite_par_uid, exoneration, supprime_le').gte('date_paiement', debut).lt('date_paiement', fin).order('id'));
+    const depenses = await lirePages(() => supabase.from('depenses_caisse').select('id, statut, montant, caissier_uid, caissier, date_reponse, date_demande').order('id'));
+    const { data: ligneSessions } = await supabase.from('catalog').select('items').eq('type', 'sessions_caisse').maybeSingle();
+    const { data: utilisateurs, error: erreurUsers } = await supabase.from('users').select('id, display_name, role');
+    if (erreurUsers) return res.status(500).json({ error: erreurUsers.message });
+    const entree = { paiements, depenses, sessions: (ligneSessions && ligneSessions.items) || [], utilisateurs: utilisateurs || [] };
+    res.json({ mois, precedent, actuel: calculerAnomalies({ ...entree, mois }), moisPrecedent: calculerAnomalies({ ...entree, mois: precedent }) });
+  } catch (e) {
+    res.status(500).json({ error: 'Lecture impossible : ' + e.message });
+  }
+});
+
 // ------------------------------------------------------------
 // Côté administrateur des liens d'invitation (partie publique : voir /invitation/:token plus haut).
 // ------------------------------------------------------------
