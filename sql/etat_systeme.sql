@@ -74,27 +74,33 @@ END;
 $$;
 
 -- Ménage : efface les erreurs « résolues » de plus de 90 jours et les postes jamais revus depuis 90 jours. Renvoie le nombre de lignes retirées.
+-- Découpé en trois petites fonctions SQL : la version plpgsql à deux DELETE restait bloquée à la création dans l'éditeur SQL de Supabase (15/10).
+CREATE OR REPLACE FUNCTION public.nettoyer_erreurs_client() RETURNS integer
+LANGUAGE sql SET search_path TO 'public' AS $$
+  WITH d AS (DELETE FROM erreurs_client WHERE statut = 'resolu' AND derniere_le < now() - interval '90 days' RETURNING 1)
+  SELECT count(*)::int FROM d;
+$$;
+CREATE OR REPLACE FUNCTION public.nettoyer_postes_etat() RETURNS integer
+LANGUAGE sql SET search_path TO 'public' AS $$
+  WITH d AS (DELETE FROM postes_etat WHERE vu_le < now() - interval '90 days' RETURNING 1)
+  SELECT count(*)::int FROM d;
+$$;
 CREATE OR REPLACE FUNCTION public.nettoyer_etat_systeme() RETURNS integer
-LANGUAGE plpgsql
-SET search_path TO 'public'
-AS $$
-DECLARE a int; b int;
-BEGIN
-  DELETE FROM erreurs_client WHERE statut = 'resolu' AND derniere_le < now() - interval '90 days';
-  GET DIAGNOSTICS a = ROW_COUNT;
-  DELETE FROM postes_etat WHERE vu_le < now() - interval '90 days';
-  GET DIAGNOSTICS b = ROW_COUNT;
-  RETURN a + b;
-END;
+LANGUAGE sql SET search_path TO 'public' AS $$
+  SELECT public.nettoyer_erreurs_client() + public.nettoyer_postes_etat();
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.signaler_erreur_client(text, text, text, text, text, text, text, text, integer) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.nettoyer_erreurs_client() FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.nettoyer_postes_etat() FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.nettoyer_etat_systeme() FROM PUBLIC, anon, authenticated;
 
 -- Le serveur (clé de service) garde le droit d'exécution explicitement (sur Supabase il l'a déjà par défaut ; le dire ici évite qu'un retrait du droit PUBLIC le lui enlève).
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
     GRANT EXECUTE ON FUNCTION public.signaler_erreur_client(text, text, text, text, text, text, text, text, integer) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.nettoyer_erreurs_client() TO service_role;
+    GRANT EXECUTE ON FUNCTION public.nettoyer_postes_etat() TO service_role;
     GRANT EXECUTE ON FUNCTION public.nettoyer_etat_systeme() TO service_role;
   END IF;
 END $$;
