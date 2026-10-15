@@ -41,6 +41,7 @@ const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paie
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
+const { contenuDesFiches } = require('./utils/contenuEpisode');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -1684,7 +1685,14 @@ app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
   const { data, error } = await supabase
     .from('episodes').select('*').eq('dossier_id', req.params.id).eq('statut', 'ouvert').is('supprime_le', null);
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // 15/10 : chaque épisode ouvert dit ce qu'il contient déjà (contenu.examens / contenu.medicaments) pour savoir dès le départ s'il faut le continuer.
+  // Champ AJOUTÉ : un ancien écran l'ignore. Si les fiches ne sont pas lisibles, on renvoie les épisodes tels quels plutôt que d'échouer.
+  const episodes = data || [];
+  if (episodes.length === 0) return res.json(episodes);
+  const { data: fiches, error: erreurFiches } = await supabase
+    .from('fiches').select('episode_id, breakdown, raw_state, supprime_le').in('episode_id', episodes.map(e => e.id));
+  if (erreurFiches) return res.json(episodes);
+  res.json(episodes.map(e => ({ ...e, contenu: contenuDesFiches((fiches || []).filter(f => f.episode_id === e.id)) })));
 });
 
 // Solde du dossier = somme des soldes_restants de ses épisodes (dernier paiement non annulé)
