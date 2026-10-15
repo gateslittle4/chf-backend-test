@@ -42,6 +42,7 @@ const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./uti
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
+const { verifierSante } = require('./utils/sante');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -222,6 +223,12 @@ app.set('trust proxy', sautsDeProxy);
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => res.json({ statut: 'CHF backend (Firebase Auth + Supabase DB) en ligne' }));
+// Surveillance externe (15/10) — voir utils/sante.js. Publiques, sans donnée : /sante (le serveur répond), /sante/complet (le serveur ET la base répondent ; 503 sinon).
+app.get('/sante', (req, res) => res.json({ statut: 'ok', heure: new Date().toISOString() }));
+app.get('/sante/complet', limitePublique, async (req, res) => {
+  const etat = await verifierSante({ supabase });
+  res.status(etat.statut === 'ok' ? 200 : 503).json({ ...etat, heure: new Date().toISOString() });
+});
 
 // ============================================================
 // Portail patient (retour d'Esdras, 24/08) : un patient qui a perdu/jeté sa prescription papier

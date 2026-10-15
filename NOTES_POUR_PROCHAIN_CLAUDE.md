@@ -393,6 +393,12 @@ Le serveur fonctionne AVANT que les scripts soient collés (repli 42703/42P01/42
 - Les erreurs des postes sont NETTOYÉES (e-mails et suites de 5 chiffres retirés) avant d'être gardées : `utils/erreursClient.js`.
 - Tests : `tests/doublons_identite.test.js`, `routes_doublons.test.js`, `etat_systeme_serveur.test.js`, `naissance.test.js`, `qualite_donnees.test.js` (+ `tests/aides/fauxSupabase.js`, `appFausse.js`).
 
+## 15/10 — Mise en place pour 2 ans plus tard (préparé, PAS ACTIVÉ sauf mention)
+- **Tests automatiques** : `.github/workflows/tests.yml` — déclenchement MANUEL seulement (Actions → Tests → Run workflow). Pour l'activer à chaque PR : remplacer `workflow_dispatch:` par `pull_request:` + `push: branches: [main]`, puis exiger le contrôle « tests » sur `main` (GitHub → Settings → Branches).
+- **Mises à jour des composants** : `.github/dependabot.yml` — une PR groupée par mois (npm + actions), jamais fusionnée toute seule. (Ce fichier-là est actif dès qu'il est fusionné.)
+- **Journal des scripts SQL** : `sql/journal_migrations.sql` (table `migrations_appliquees`) — NON APPLIQUÉ en production. `node scripts/verifier-sql.js` compare le dépôt au journal ; `--sql` écrit les INSERT pour noter les scripts déjà appliqués (à confirmer un par un) ; `--local` liste les empreintes sans base. Fonctions pures : `utils/journalSql.js`.
+- **Surveillance externe** : `GET /sante` (le serveur répond) et `GET /sante/complet` (le serveur ET la base ; 503 si la base ne répond pas en 4 s), publiques, sans donnée (`utils/sante.js`). Aucun service externe n'est encore branché ; en brancher un (visite toutes les 5 min) gardera aussi le serveur gratuit de Render éveillé.
+
 ## 15/10 — Rapport d'anomalies de caisse (administrateur SEUL)
 `GET /api/admin/anomalies?mois=AAAA-MM` (défaut : mois courant, heure d'Haïti) renvoie, pour le mois et le précédent, par personne : paiements, montants, annulations FAITES (attribuées à celle qui annule, `annule_par_uid`), exonérations, crédits, remboursements patient, sorties de caisse accordées, postes fermés automatiquement,
 et des signaux « à regarder » (taux d'au moins 2× la médiane de l'équipe, au moins 2 événements, au moins 5 paiements, au moins 3 personnes à comparer — un signal n'est pas une preuve). Calcul : `utils/anomalies.js` (pur).
