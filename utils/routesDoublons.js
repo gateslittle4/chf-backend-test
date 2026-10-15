@@ -7,11 +7,16 @@
 //   POST /api/dossiers/:id/fusionner      { cible_id }                     → réunit :id DANS cible_id (annulable)
 //   POST /api/dossiers/:id/defusionner                                      → annule une fusion
 const crypto = require('crypto');
-const { trouverDoublons, candidatsPour, NIVEAUX } = require('./doublonsIdentite');
+const { trouverDoublonsSansBloquer, candidatsPour, NIVEAUX } = require('./doublonsIdentite');
 
 const COLONNES_BASE = 'id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe';
 const COLONNES_ETENDUES = `${COLONNES_BASE}, anciens_noms, mere_dossier_id, fusionne_dans`;
 const DUREE_CACHE_MS = 60 * 1000;
+// 15/10 : au-delà de DUREE_CACHE_MS la liste n'est plus relue EN ENTIER (50 pages de 1 000 à 50 000 dossiers) mais seulement ce qui a changé depuis (colonne modifie_le, tenue à jour
+// par la base) ; une relecture complète a lieu toutes les 30 minutes (rattrape aussi les dossiers supprimés, que la lecture par différence ne voit pas).
+const RECHARGE_COMPLETE_MS = 30 * 60 * 1000;
+const MARGE_MODIFIE_MS = 5000;
+const DUREE_CACHE_PAIRES_MS = 5 * 60 * 1000;
 const MESSAGE_SQL_MANQUANT = "Le script sql/dossiers_naissance_fusion.sql n'est pas encore collé dans Supabase : la fusion de dossiers n'est pas disponible.";
 
 const CODES_FUSION = {
@@ -31,16 +36,42 @@ function creerRoutesDoublons({ supabase, aPermission, lireToutesLesPages, mainte
 
   async function chargerDossiers() {
     if (cache && maintenant() - cache.t < DUREE_CACHE_MS) return cache;
-    const lire = (colonnes) => lireToutesLesPages(() => supabase.from('dossiers').select(colonnes).order('id'));
-    let dossiers;
-    try { dossiers = await lire(COLONNES_ETENDUES); }
-    catch (e) {
-      if (e && e.code === '42703') dossiers = await lire(COLONNES_BASE); // base pas encore migrée : sans fusion ni anciens noms
-      else throw e;
+    const colonnes = (base) => `${base}, modifie_le`;
+    const lire = (cols, depuis) => lireToutesLesPages(() => {
+      const requete = supabase.from('dossiers').select(cols);
+      return (depuis ? requete.gte('modifie_le', depuis) : requete).order('id');
+    });
+    // Lecture par différence : seulement si la liste précédente a été lue COMPLÈTEMENT il y a moins de 30 minutes et que chaque ligne porte sa date de modification.
+    let dossiers = null, parDifference = false, nbChangements = 0;
+    if (cache && cache.derniereModif && maintenant() - cache.chargeCompleteLe < RECHARGE_COMPLETE_MS) {
+      try {
+        const changes = await lire(colonnes(cache.colonnesBase), new Date(new Date(cache.derniereModif).getTime() - MARGE_MODIFIE_MS).toISOString());
+        const parId = new Map(cache.dossiers.map(d => [d.id, d]));
+        // Une ligne relue sans changement réel (marge de 5 s) ne compte pas : on compare la date de modification avec ce qu'on avait.
+        nbChangements = changes.filter(d => !parId.has(d.id) || parId.get(d.id).modifie_le !== d.modifie_le).length;
+        changes.forEach(d => parId.set(d.id, d));
+        dossiers = [...parId.values()]; parDifference = true;
+      } catch (_) { dossiers = null; } // en cas de doute : relecture complète
     }
+    let colonnesBase = cache ? cache.colonnesBase : COLONNES_ETENDUES;
+    if (!dossiers) {
+      try { dossiers = await lire(colonnes(COLONNES_ETENDUES)); colonnesBase = COLONNES_ETENDUES; }
+      catch (e) {
+        if (!(e && e.code === '42703')) throw e;
+        try { dossiers = await lire(COLONNES_ETENDUES); colonnesBase = COLONNES_ETENDUES; } // sans modifie_le : relectures complètes
+        catch (e2) {
+          if (e2 && e2.code === '42703') { dossiers = await lire(COLONNES_BASE); colonnesBase = COLONNES_BASE; } // base pas encore migrée : sans fusion ni anciens noms
+          else throw e2;
+        }
+      }
+    }
+    const modifs = dossiers.map(d => d.modifie_le).filter(Boolean).sort();
+    const derniereModif = modifs.length === dossiers.length && modifs.length > 0 ? modifs[modifs.length - 1] : null;
     const { data: ignorees, error } = await supabase.from('doublons_ignores').select('dossier_a, dossier_b');
     const ignores = new Set(error ? [] : (ignorees || []).map(l => `${l.dossier_a}|${l.dossier_b}`));
-    cache = { t: maintenant(), dossiers, ignores };
+    // Rien n'a changé (ni dossiers ni paires ignorées) : les paires déjà calculées restent valables.
+    const identique = parDifference && nbChangements === 0 && cache.ignores.size === ignores.size;
+    cache = { t: maintenant(), dossiers, ignores, colonnesBase, derniereModif, chargeCompleteLe: parDifference ? cache.chargeCompleteLe : maintenant(), version: (cache ? cache.version : 0) + (identique ? 0 : 1), paires: identique ? cache.paires : new Map() };
     return cache;
   }
   const invalider = () => { cache = null; };
@@ -75,8 +106,14 @@ function creerRoutesDoublons({ supabase, aPermission, lireToutesLesPages, mainte
       if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
       try {
         const min = (NIVEAUX.find(n => n.cle === req.query.niveau) || NIVEAUX[NIVEAUX.length - 1]).min;
-        const { dossiers, ignores } = await chargerDossiers();
-        const toutes = trouverDoublons(dossiers, { ignores, seuil: min });
+        const etat = await chargerDossiers();
+        // Le calcul des paires peut durer plusieurs secondes avec des dizaines de milliers de dossiers : il cède la main au reste du serveur, et son résultat est gardé 5 minutes.
+        let calcul = etat.paires.get(min);
+        if (!calcul || maintenant() - calcul.t > DUREE_CACHE_PAIRES_MS) {
+          calcul = { t: maintenant(), promesse: trouverDoublonsSansBloquer(etat.dossiers, { ignores: etat.ignores, seuil: min }) };
+          etat.paires.set(min, calcul);
+        }
+        const toutes = await calcul.promesse;
         const paires = toutes.slice(0, 200);
         const ids = [...new Set(paires.flatMap(p => [p.a.id, p.b.id]))];
         const nb = {};
