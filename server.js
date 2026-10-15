@@ -39,6 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre } = require('./utils/dossiers');
+const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -3174,8 +3175,11 @@ app.post('/api/admin/generer-lien-reinitialisation', async (req, res) => {
   const { email } = req.body;
   if (!email || !String(email).trim()) return res.status(400).json({ error: 'email requis.' });
   try {
-    const lien = await getAuth().generatePasswordResetLink(email.trim(), { url: process.env.FRONTEND_URL || 'https://chf-app2.onrender.com' });
-    res.json({ lien });
+    const { lien, retourAuSite } = await genererLienReinitialisation(getAuth(), email.trim(), process.env.FRONTEND_URL || 'https://chf-app2.onrender.com');
+    res.json(retourAuSite ? { lien } : {
+      lien,
+      avertissement: "Lien créé sans retour automatique vers le site (le domaine du site n'est pas dans les « Domaines autorisés » de Firebase). Il fonctionne : après avoir choisi son mot de passe, la personne rouvre le site elle-même.",
+    });
   } catch (e) {
     if (e.code === 'auth/user-not-found') return res.status(404).json({ error: 'Aucun compte avec cet email.' });
     res.status(500).json({ error: e.message });
