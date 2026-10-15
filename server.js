@@ -3127,9 +3127,10 @@ app.post('/api/admin/users', async (req, res) => {
 });
 
 // 01/10 (Krystofia) : "il y a trop d'utilisateurs qui ne fonctionnent plus, permets-moi d'en
-// supprimer". Suppression DÉFINITIVE d'un compte (Firebase + ligne users), avec des garde-fous :
-//   - seulement un compte DÉJÀ désactivé : on désactive d'abord (réversible), on supprime ensuite ;
-//   - jamais son propre compte, jamais un administrateur (le rétrograder d'abord) ;
+// supprimer". Suppression DÉFINITIVE d'un compte (Firebase + ligne users). 15/10 (Esdras) : « permets à l'administrateur de
+// supprimer totalement un compte » — plus besoin de désactiver d'abord, et un administrateur peut en supprimer un autre. Garde-fous restants :
+//   - jamais son propre compte ;
+//   - supprimer un administrateur est réservé à un administrateur, et il doit en rester au moins un autre ACTIF ;
 //   - l'historique reste intact : paiements, fiches et journal gardent le NOM et l'uid recopiés au
 //     moment de l'action (encaisse_par, effectue_par...), ils ne dépendent pas de cette ligne.
 // L'identifiant (@chf.com) redevient libre pour un nouveau compte.
@@ -3142,8 +3143,13 @@ app.delete('/api/admin/users/:uid', async (req, res) => {
   const { data: cible, error: erreurLecture } = await supabase.from('users').select('id, email, display_name, role, active').eq('id', uid).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!cible) return res.status(404).json({ error: 'Utilisateur introuvable.' });
-  if (cible.role === 'administrateur') return res.status(400).json({ error: "Impossible de supprimer un administrateur : change d'abord son rôle." });
-  if (cible.active !== false) return res.status(400).json({ error: "Désactive d'abord ce compte, puis supprime-le." });
+  if (cible.role === 'administrateur') {
+    const { data: appelant } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+    if (!appelant || appelant.role !== 'administrateur') return res.status(403).json({ error: "Seul un administrateur peut supprimer un compte administrateur." });
+    const { data: autres, error: erreurAutres } = await supabase.from('users').select('id').eq('role', 'administrateur').neq('active', false).neq('id', uid);
+    if (erreurAutres) return res.status(500).json({ error: erreurAutres.message });
+    if (!autres || autres.length === 0) return res.status(400).json({ error: "Impossible : ce serait le dernier administrateur actif. Crée ou réactive un autre administrateur d'abord." });
+  }
   try {
     await getAuth().deleteUser(uid);
   } catch (e) {

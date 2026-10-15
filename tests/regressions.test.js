@@ -2600,7 +2600,7 @@ test("GET /api/ids-locaux : protégée (sous /api), format local_id filtré, 100
 });
 
 // 01/10 : suppression d'un compte — garde-fous.
-test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même ni un administrateur, seulement un compte désactivé, Firebase + ligne users, journal", () => {
+test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même, administrateur seulement par un administrateur (jamais le dernier), compte actif ou non, Firebase + ligne users, journal", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const i = src.indexOf("app.delete('/api/admin/users/:uid'");
   assert.ok(i > src.indexOf("app.use('/api', verifyToken)"));
@@ -2608,11 +2608,11 @@ test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même ni un 
   assert.match(bloc, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/);
   assert.match(bloc, /uid === req\.user\.id/);
   assert.match(bloc, /cible\.role === 'administrateur'/);
-  assert.match(bloc, /cible\.active !== false/);
+  assert.doesNotMatch(bloc, /cible\.active !== false/, "plus besoin de désactiver d'abord (15/10)");
   assert.match(bloc, /getAuth\(\)\.deleteUser\(uid\)/);
   assert.match(bloc, /from\('users'\)\.delete\(\)\.eq\('id', uid\)\.select\('id'\)/);
   assert.match(bloc, /action: 'suppression_utilisateur'/);
-  assert.ok(bloc.indexOf('cible.active !== false') < bloc.indexOf('deleteUser'), 'les vérifications doivent précéder toute suppression');
+  assert.ok(bloc.indexOf("cible.role === 'administrateur'") < bloc.indexOf('deleteUser'), 'les vérifications doivent précéder toute suppression');
 });
 
 // Audit de sécurité du 02/10 : un jeton Firebase valide SANS ligne dans `users` ne donne plus accès à l'API,
