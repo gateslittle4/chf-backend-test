@@ -40,6 +40,7 @@ const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre } = require('./utils/dossiers');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
+const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -3615,6 +3616,14 @@ async function rattraperSauvegardeAuDemarrage() {
 // attend devant son écran), la sauvegarde complète des 17 tables vient ensuite. unref() pour que
 // ce minuteur n'empêche jamais le processus de s'arrêter proprement.
 setTimeout(rattraperSauvegardeAuDemarrage, DELAI_RATTRAPAGE_DEMARRAGE_MS).unref();
+
+// ============================================================
+// FERMETURE AUTOMATIQUE DES POSTES DE CAISSE (15/10, Esdras) — voir utils/fermetureAutoPostes.js.
+// Chaque minute, et UNE FOIS au réveil du serveur (le plan gratuit de Render l'éteint sans visite : un poste dont la limite est passée pendant ce sommeil
+// est fermé au réveil, avec comme heure de fermeture sa limite, pas l'heure du réveil).
+// ============================================================
+cron.schedule('* * * * *', () => { fermerPostesExpires({ supabase }); });
+setTimeout(() => { fermerPostesExpires({ supabase }); }, 20000).unref();
 
 // ============================================================
 // CORBEILLE CATALOGUE (medicaments/actes) — retour d'Esdras (01/09) : "j'aime pas trop
