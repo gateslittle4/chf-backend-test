@@ -32,4 +32,20 @@ function formaterNomPropre(chaine) {
     .replace(/(^|[\s\-'’.])(\p{L})/gu, (_, separateur, lettre) => separateur + lettre.toUpperCase());
 }
 
-module.exports = { jetonsDuNom, memePatient, formaterNomPropre };
+
+// 15/10 (Esdras : « comment peut-on enregistrer un dossier sans sexe, sans numéro d'archive, sans date de naissance ? ») : à la CRÉATION d'un dossier, le numéro de
+// dossier (numéro d'archive), le sexe (M ou F) et la date de naissance sont obligatoires — vérifié ICI, pas seulement à l'écran : un ancien écran resté ouvert,
+// un appel direct ou une file d'attente hors ligne ne doivent pas pouvoir contourner la règle. Une date ESTIMÉE (âge approximatif) reste une date valide.
+// Renvoie un message d'erreur en français, ou null si tout est en règle.
+function erreurIdentiteDossier({ numero_dossier, sexe, date_naissance } = {}, maintenantMs = Date.now()) {
+  if (numero_dossier === undefined || numero_dossier === null || !String(numero_dossier).trim()) return "Le numéro de dossier (numéro d'archive) est requis.";
+  if (sexe !== 'M' && sexe !== 'F') return "Le sexe est obligatoire (M ou F).";
+  const d = String(date_naissance || '');
+  if (!d) return "La date de naissance est obligatoire (ou un âge approximatif, converti en date estimée).";
+  const date = /^\d{4}-\d{2}-\d{2}/.test(d) ? new Date(`${d.slice(0, 10)}T12:00:00Z`) : null;
+  if (!date || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== d.slice(0, 10)) return "La date de naissance n'est pas valide (format AAAA-MM-JJ).";
+  if (date.getUTCFullYear() < 1900 || date.getTime() > maintenantMs + 2 * 86400000) return "La date de naissance n'est pas valide (pas dans le futur, après 1900).";
+  return null;
+}
+
+module.exports = { jetonsDuNom, memePatient, formaterNomPropre, erreurIdentiteDossier };

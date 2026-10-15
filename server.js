@@ -38,7 +38,7 @@ const supabase = createClient(
 const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
-const { memePatient, formaterNomPropre } = require('./utils/dossiers');
+const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
@@ -1007,11 +1007,20 @@ app.post('/api/episodes', async (req, res) => {
     const { data: dejaCree } = await supabase.from('episodes').select('*').eq('local_id', d.local_id).maybeSingle();
     if (dejaCree) return res.status(200).json(await episodeVersFlat(dejaCree));
   }
+  // 15/10 : cette route crée aussi le DOSSIER. Même règle que POST /api/dossiers (numéro, sexe, date de naissance obligatoires), sauf deux cas
+  // qui n'enregistrent pas un vrai patient : la vente comptoir (⚡ Express : client de passage, numéro « AUTO-… ») et l'import d'une sauvegarde
+  // (anciennes données, déjà telles quelles).
+  const exempteIdentite = d.voie_entree === 'vente_comptoir' || d.import_sauvegarde === true;
+  if (!exempteIdentite) {
+    const erreurIdentite = erreurIdentiteDossier({ numero_dossier: d.numero_dossier, sexe: d.sexe, date_naissance: d.date_naissance });
+    if (erreurIdentite) return res.status(400).json({ error: erreurIdentite, code: 'IDENTITE_INCOMPLETE' });
+  }
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
       numero_dossier: d.numero_dossier || `AUTO-${Date.now()}`,
       nom: formaterNomPropre(d.nom_patient), date_naissance: dateOuNull(d.date_naissance), telephone: d.telephone, adresse: d.adresse,
+      ...(d.sexe === 'M' || d.sexe === 'F' ? { sexe: d.sexe } : {}),
     })
     .select().single();
   if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
@@ -1354,11 +1363,6 @@ app.post('/api/dossiers', async (req, res) => {
   if (!nomSaisi) return res.status(400).json({ error: 'Le nom est requis' });
   const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
-  if (!numero_dossier) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
-  // 14/10 : le sexe peut être donné dès la création (rapport MSPP) — même contrôle que PUT /api/dossiers/:id. Vide = non renseigné.
-  if (sexe !== undefined && sexe !== null && sexe !== '' && sexe !== 'M' && sexe !== 'F') {
-    return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
-  }
   // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
   // apiDossierEpisode passe par la file d'attente hors-ligne (avant, cette route n'était jamais
   // rejouée automatiquement, donc jamais appelée deux fois pour la même action).
@@ -1366,6 +1370,10 @@ app.post('/api/dossiers', async (req, res) => {
     const { data: existant } = await supabase.from('dossiers').select('*').eq('local_id', local_id).maybeSingle();
     if (existant) return res.status(200).json(existant);
   }
+  // Après le rejeu : un dossier déjà créé (avant cette règle) qu'on renvoie par idempotence reste renvoyé tel quel.
+  // 15/10 : numéro de dossier, sexe ET date de naissance obligatoires à la création (voir utils/dossiers.js::erreurIdentiteDossier).
+  const erreurIdentite = erreurIdentiteDossier({ numero_dossier, sexe, date_naissance });
+  if (erreurIdentite) return res.status(400).json({ error: erreurIdentite, code: 'IDENTITE_INCOMPLETE' });
   // Retour d'Esdras (01/09) : "je ne veux pas oublier la racine de l'enfant" — un bébé né au
   // néonat est d'abord enregistré sous un nom temporaire ("Bébé + nom de la mère"), puis reçoit
   // son vrai nom au retour de la mère en consultation. nom_origine fige le nom du dossier à sa
@@ -1494,7 +1502,12 @@ app.put('/api/dossiers/:id', async (req, res) => {
   // 14/10 : nouveau nom du bébé — chaque nom quitté est gardé (anciens_noms), le nom de création reste intact. Lien vers la mère : absent du corps =
   // inchangé ; null ou vide = lien retiré ; sinon vérifié comme à la création.
   const avecNaissance = {};
-  const { data: avant, error: erreurLecture } = await supabase.from('dossiers').select('nom, anciens_noms').eq('id', req.params.id).maybeSingle();
+  const { data: avant, error: erreurLecture } = await supabase.from('dossiers').select('nom, anciens_noms, sexe, date_naissance').eq('id', req.params.id).maybeSingle();
+  // 15/10 : une fois connus, le sexe et la date de naissance ne peuvent plus être EFFACÉS (seulement corrigés) — sinon le dossier redevient incomplet.
+  if (!erreurLecture && avant) {
+    if (avant.sexe && !sexe) return res.status(400).json({ error: "Le sexe est déjà enregistré : tu peux le corriger, pas l'effacer." });
+    if (avant.date_naissance && !date_naissance) return res.status(400).json({ error: "La date de naissance est déjà enregistrée : tu peux la corriger, pas l'effacer." });
+  }
   if (!erreurLecture && avant) {
     const liste = anciensNomsApresRenommage(avant, nom, (req.user && (req.user.email || req.user.id)) || null, new Date().toISOString());
     if (liste) avecNaissance.anciens_noms = liste;
