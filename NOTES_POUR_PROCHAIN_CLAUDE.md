@@ -392,3 +392,8 @@ Le serveur fonctionne AVANT que les scripts soient collés (repli 42703/42P01/42
 - `POST /api/dossiers` accepte `sexe` et `mere_dossier_id` ; `PUT /api/dossiers/:id` garde l'ancien nom dans `anciens_noms` à chaque renommage (le nom de création, lui, ne bouge jamais) et accepte `mere_dossier_id` (null = lien retiré) ; `GET /api/dossiers/:id` renvoie `mere`, `enfants`, `fusionne_dans_dossier`.
 - Les erreurs des postes sont NETTOYÉES (e-mails et suites de 5 chiffres retirés) avant d'être gardées : `utils/erreursClient.js`.
 - Tests : `tests/doublons_identite.test.js`, `routes_doublons.test.js`, `etat_systeme_serveur.test.js`, `naissance.test.js`, `qualite_donnees.test.js` (+ `tests/aides/fauxSupabase.js`, `appFausse.js`).
+
+## 15/10 — Partenaires rattachés à un identifiant stable (préparé, NON appliqué)
+`sql/partenaires_identifiant_stable.sql` : ajoute `ong_partenaire_id` (nullable) sur `episodes` et `paiements`, remplit l'historique (nom identique, majuscules/espaces ignorés, à UN SEUL partenaire non supprimé ; ambigu ou inconnu = vide), un déclencheur le remplit seul à chaque nouvelle ligne,
+et `renommer_partenaire(id, nouveau_nom)` change le nom du partenaire ET de tous ses épisodes/paiements d'un bloc (réservée à `service_role`). Aucun changement du serveur ni de l'application : il suffit de COLLER le script pour l'activer ; rien n'est lu tant qu'aucun écran « renommer » n'existe.
+Reste à traiter à l'activation : `catalog.medicaments[].donsParOng` est rangé par NOM (champ JSON). Test SQL sur Postgres jetable : `python3 scripts/test-partenaires-identifiant-sql.py` ; test de garde : `tests/partenaires_identifiant_prepare.test.js`.
