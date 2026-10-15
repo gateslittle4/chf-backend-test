@@ -95,11 +95,12 @@ function routeCreationDossier(options = {}) {
   const aPermission = async () => options.permission !== false;
   const avertissements = [];
   const console_ = { warn: (...a) => avertissements.push(a.join(' ')), log() {}, error() {} };
-  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'formaterNomPropre', 'crypto', 'console', 'verifierMere', serverSrc.slice(debut, fin))(
-    app, supabase, aPermission, (v) => (v ? v : null), memePatient, require('../utils/dossiers').formaterNomPropre, crypto, console_, require('../utils/naissance').verifierMere);
+  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'formaterNomPropre', 'crypto', 'console', 'verifierMere', 'erreurIdentiteDossier', serverSrc.slice(debut, fin))(
+    app, supabase, aPermission, (v) => (v ? v : null), memePatient, require('../utils/dossiers').formaterNomPropre, crypto, console_, require('../utils/naissance').verifierMere, require('../utils/dossiers').erreurIdentiteDossier);
   const appeler = async (corps, utilisateur = { id: 'uid-caisse', email: 'caisse@chf.com' }) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
-    await gestionnaire({ body: corps, user: utilisateur }, res);
+    // 15/10 : sexe et date de naissance sont obligatoires à la création ; ces tests parlent d'AUTRE chose (doublons, réunion…), donc ils en reçoivent par défaut.
+    await gestionnaire({ body: { sexe: 'F', date_naissance: '1990-05-05', ...corps }, user: utilisateur }, res);
     return res;
   };
   return { appeler, supabase, avertissements };
@@ -134,7 +135,7 @@ test("POST /api/dossiers : porte ET caisse créent le même patient → la 2e cr
   assert.strictEqual(caisse.code, 409);
   assert.strictEqual(caisse.corps.error, 'PATIENT_DEJA_ENREGISTRE');
   assert.match(caisse.corps.message, /Le dossier N° 1234 existe déjà au nom de « Jean Baptiste »\. Est-ce la même personne \?/);
-  assert.deepStrictEqual(caisse.corps.dossierExistant, { id: porte.corps.id, numero_dossier: '1234', nom: 'Jean Baptiste', date_naissance: null, telephone: null }, "l'app montre ce dossier à la personne qui décide");
+  assert.deepStrictEqual(caisse.corps.dossierExistant, { id: porte.corps.id, numero_dossier: '1234', nom: 'Jean Baptiste', date_naissance: '1990-05-05', telephone: null }, "l'app montre ce dossier à la personne qui décide");
   assert.strictEqual(caisse.corps.dejaEnregistre, undefined);
   assert.strictEqual(supabase.dossiers.length, 1, 'aucun doublon, aucune réunion');
   assert.deepStrictEqual(supabase.audits, [], 'rien n\'est journalisé tant que personne n\'a confirmé');
@@ -250,24 +251,35 @@ test("server.js : la réunion n'a lieu qu'à la CRÉATION, après le contrôle d
   assert.doesNotMatch(put, /memePatient|dejaEnregistre/, "changer le numéro d'un dossier vers un numéro déjà pris reste un conflit : jamais de réunion silencieuse");
 });
 
-test("POST /api/dossiers : le sexe donné à la création est enregistré (M ou F) ; vide = non renseigné ; toute autre valeur est refusée (400)", async () => {
+test("POST /api/dossiers : sexe (M ou F), date de naissance et numéro sont OBLIGATOIRES à la création (400, rien créé) ; un sexe invalide est refusé", async () => {
   const { appeler, supabase } = routeCreationDossier();
   const f = await appeler({ numero_dossier: '1', nom: 'Marie Joseph', sexe: 'F', date_naissance: '1990-05-17', local_id: 'l-1' });
   assert.strictEqual(f.code, 201);
   assert.strictEqual(supabase.dossiers[0].sexe, 'F');
   const m = await appeler({ numero_dossier: '2', nom: 'Jean Paul', sexe: 'M', local_id: 'l-2' });
   assert.strictEqual(supabase.dossiers[1].sexe, 'M');
-  const vide = await appeler({ numero_dossier: '3', nom: 'Sans Sexe', sexe: '', local_id: 'l-3' });
-  assert.strictEqual(vide.code, 201);
-  assert.strictEqual('sexe' in supabase.dossiers[2], false, 'un sexe vide n\'écrit rien (colonne laissée à null)');
-  const rien = await appeler({ numero_dossier: '4', nom: 'Ancien Client', local_id: 'l-4' });
-  assert.strictEqual(rien.code, 201, 'un ancien client de l\'application (sans champ sexe) continue de fonctionner');
-  for (const mauvais of ['X', 'f', 'homme', 1]) {
-    const r = await appeler({ numero_dossier: '9', nom: 'Faute', sexe: mauvais, local_id: 'l-9' });
-    assert.strictEqual(r.code, 400, JSON.stringify(mauvais));
-    assert.match(r.corps.error, /Sexe invalide/);
+  const base = { numero_dossier: '9', nom: 'Incomplet', local_id: 'l-9' };
+  const refus = [
+    [{ sexe: '' }, /sexe est obligatoire/], [{ sexe: null }, /sexe est obligatoire/], [{ sexe: 'X' }, /sexe est obligatoire/], [{ sexe: 'f' }, /sexe est obligatoire/], [{ sexe: 1 }, /sexe est obligatoire/],
+    [{ date_naissance: '' }, /date de naissance est obligatoire/], [{ date_naissance: null }, /date de naissance est obligatoire/],
+    [{ date_naissance: '31/02/1990' }, /pas valide/], [{ date_naissance: '1990-02-31' }, /pas valide/], [{ date_naissance: '1850-01-01' }, /pas valide/], [{ date_naissance: '2999-01-01' }, /pas valide/],
+    [{ numero_dossier: '' }, /numéro de dossier/], [{ numero_dossier: '   ' }, /numéro de dossier/], [{ numero_dossier: null }, /numéro de dossier/],
+  ];
+  for (const [champs, motif] of refus) {
+    const r = await appeler({ ...base, ...champs });
+    assert.strictEqual(r.code, 400, JSON.stringify(champs));
+    assert.match(r.corps.error, motif, JSON.stringify(champs));
+    assert.strictEqual(r.corps.code, 'IDENTITE_INCOMPLETE');
   }
-  assert.strictEqual(supabase.dossiers.length, 4, 'aucun dossier créé par un sexe invalide');
+  assert.strictEqual(supabase.dossiers.length, 2, 'aucun dossier créé par une identité incomplète');
+});
+
+test("POST /api/dossiers : le rejeu d'un dossier DÉJÀ créé (même local_id) est renvoyé tel quel, même s'il avait été créé avant la règle", async () => {
+  const { appeler, supabase } = routeCreationDossier();
+  supabase.dossiers.push({ id: 'd-vieux', numero_dossier: '55', nom: 'Ancien', local_id: 'l-vieux', sexe: null, date_naissance: null });
+  const r = await appeler({ numero_dossier: '55', nom: 'Ancien', local_id: 'l-vieux', sexe: '', date_naissance: '' });
+  assert.strictEqual(r.code, 200);
+  assert.strictEqual(r.corps.id, 'd-vieux');
 });
 
 test("POST /api/dossiers : colonne sexe absente de la base (script SQL pas collé) → le dossier est quand même créé, sans le sexe ; si seul nom_origine manque, le sexe est GARDÉ", async () => {
