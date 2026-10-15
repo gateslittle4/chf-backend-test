@@ -120,7 +120,9 @@ test("episodeVersFlat exclut de totalGlobal toute fiche dont le paiement associ�
 test("POST /api/admin/generer-lien-reinitialisation exige utilisateurs_gerer et utilise generatePasswordResetLink (jamais sendPasswordResetEmail, qui enverrait à une adresse @chf.com qui n'existe pas)", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/generer-lien-reinitialisation'"));
   assert.match(blocRoute, /aPermission\(req\.user\.id, 'utilisateurs_gerer'\)/, "doit exiger la permission utilisateurs_gerer");
-  assert.match(blocRoute, /generatePasswordResetLink/, "doit générer le lien sans l'envoyer");
+  assert.match(blocRoute, /genererLienReinitialisation\(getAuth\(\)/, "doit générer le lien sans l'envoyer (aide utils/lienReinitialisation.js : generatePasswordResetLink)");
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'utils', 'lienReinitialisation.js'), 'utf8'), /generatePasswordResetLink/);
+  assert.doesNotMatch(blocRoute, /sendPasswordResetEmail/);
 });
 
 test("POST /api/stock/decrementer appelle la fonction Postgres atomique decrementer_stock_medicaments et renvoie 409 si le stock est insuffisant", () => {
