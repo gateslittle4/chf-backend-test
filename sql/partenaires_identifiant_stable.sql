@@ -1,7 +1,7 @@
 -- sql/partenaires_identifiant_stable.sql — rattacher les épisodes et les paiements d'un partenaire à son IDENTIFIANT, pas seulement à son nom (15/10).
 -- Pourquoi : episodes.ong_partenaire et paiements.ong_partenaire contiennent le NOM du partenaire. Corriger l'écriture d'un nom (« AVSI » → « Avsi ») couperait ses
 -- anciens épisodes, ses lots et ses rapports de son nouveau nom : l'historique de deux ans se retrouverait en deux morceaux.
--- ÉTAT : PRÉPARÉ, PAS ENCORE APPLIQUÉ (décision d'Esdras, 15/10). Rien dans le site ne lit ces colonnes : le coller ne change aucun écran, et le serveur n'a pas besoin de changer.
+-- ÉTAT : APPLIQUÉ EN PRODUCTION le 16/10 (« Active les 3 » d'Esdras). Rien dans le site ne lit ces colonnes : le coller ne change aucun écran, et le serveur n'a pas besoin de changer.
 -- Entièrement AJOUTÉ (aucune colonne ni donnée existante n'est modifiée ou supprimée) et rejouable sans danger.
 --
 -- Ce que ça fait :

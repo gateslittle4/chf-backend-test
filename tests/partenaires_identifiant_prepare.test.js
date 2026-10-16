@@ -1,4 +1,4 @@
-// tests/partenaires_identifiant_prepare.test.js — partenaires rattachés à un identifiant stable (15/10) : préparé, NON appliqué, rien dans le serveur ne le lit.
+// tests/partenaires_identifiant_prepare.test.js — partenaires rattachés à un identifiant stable (15/10) : appliqué en production le 16/10, rien dans le serveur ne le lit.
 // Le comportement SQL est vérifié sur un Postgres jetable par scripts/test-partenaires-identifiant-sql.py.
 const { test } = require('node:test');
 const assert = require('node:assert');
