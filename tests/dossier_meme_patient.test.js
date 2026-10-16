@@ -92,11 +92,12 @@ function routeCreationDossier(options = {}) {
   const supabase = fauxSupabase(options);
   let gestionnaire;
   const app = { post: (_chemin, fn) => { gestionnaire = fn; } };
-  const aPermission = async () => options.permission !== false;
+  // `sansCaisse` : un rôle qui a le droit de créer un dossier mais PAS celui de la caisse (infirmier, archiviste) — il ne peut pas donner de numéro (16/10).
+  const aPermission = async (_uid, cle) => options.permission !== false && !(options.sansCaisse && cle === 'caisse_travailler');
   const avertissements = [];
   const console_ = { warn: (...a) => avertissements.push(a.join(' ')), log() {}, error() {} };
-  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'formaterNomPropre', 'crypto', 'console', 'verifierMere', 'erreurIdentiteDossier', serverSrc.slice(debut, fin))(
-    app, supabase, aPermission, (v) => (v ? v : null), memePatient, require('../utils/dossiers').formaterNomPropre, crypto, console_, require('../utils/naissance').verifierMere, require('../utils/dossiers').erreurIdentiteDossier);
+  new Function('app', 'supabase', 'aPermission', 'dateOuNull', 'memePatient', 'formaterNomPropre', 'crypto', 'console', 'verifierMere', 'erreurIdentiteDossier', 'numeroProvisoire', 'erreurNumeroDossier', serverSrc.slice(debut, fin))(
+    app, supabase, aPermission, (v) => (v ? v : null), memePatient, require('../utils/dossiers').formaterNomPropre, crypto, console_, require('../utils/naissance').verifierMere, require('../utils/dossiers').erreurIdentiteDossier, require('../utils/numeroDossier').numeroProvisoire, require('../utils/numeroDossier').erreurNumeroDossier);
   const appeler = async (corps, utilisateur = { id: 'uid-caisse', email: 'caisse@chf.com' }) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     // 15/10 : sexe et date de naissance sont obligatoires à la création ; ces tests parlent d'AUTRE chose (doublons, réunion…), donc ils en reçoivent par défaut.
@@ -223,13 +224,16 @@ test("POST /api/dossiers : un journal qui refuse la ligne (ou plante) n'empêche
   }
 });
 
-test("POST /api/dossiers : les contrôles d'avant restent en place (permission 403, nom et numéro requis 400)", async () => {
+test("POST /api/dossiers : les contrôles d'avant restent en place (permission 403, nom requis 400) ; sans numéro, le dossier est créé « en attente » (16/10)", async () => {
   const sans = routeCreationDossier({ permission: false });
   assert.strictEqual((await sans.appeler({ numero_dossier: '1', nom: 'X Y' })).code, 403);
   const { appeler, supabase } = routeCreationDossier();
   assert.strictEqual((await appeler({ numero_dossier: '1' })).code, 400);
-  assert.strictEqual((await appeler({ nom: 'Jean Baptiste' })).code, 400);
   assert.strictEqual(supabase.dossiers.length, 0);
+  const attente = await appeler({ nom: 'Jean Baptiste' });
+  assert.strictEqual(attente.code, 201);
+  assert.match(attente.corps.numero_dossier, /^EN-ATTENTE-[0-9A-F]{10}$/, 'numéro provisoire, la caisse le remplacera');
+  assert.strictEqual(supabase.dossiers.length, 1);
 });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -251,7 +255,7 @@ test("server.js : la réunion n'a lieu qu'à la CRÉATION, après le contrôle d
   assert.doesNotMatch(put, /memePatient|dejaEnregistre/, "changer le numéro d'un dossier vers un numéro déjà pris reste un conflit : jamais de réunion silencieuse");
 });
 
-test("POST /api/dossiers : sexe (M ou F), date de naissance et numéro sont OBLIGATOIRES à la création (400, rien créé) ; un sexe invalide est refusé", async () => {
+test("POST /api/dossiers : sexe (M ou F) et date de naissance sont OBLIGATOIRES à la création (400, rien créé) ; un sexe invalide est refusé — le numéro, lui, ne l'est plus (16/10)", async () => {
   const { appeler, supabase } = routeCreationDossier();
   const f = await appeler({ numero_dossier: '1', nom: 'Marie Joseph', sexe: 'F', date_naissance: '1990-05-17', local_id: 'l-1' });
   assert.strictEqual(f.code, 201);
@@ -263,7 +267,6 @@ test("POST /api/dossiers : sexe (M ou F), date de naissance et numéro sont OBLI
     [{ sexe: '' }, /sexe est obligatoire/], [{ sexe: null }, /sexe est obligatoire/], [{ sexe: 'X' }, /sexe est obligatoire/], [{ sexe: 'f' }, /sexe est obligatoire/], [{ sexe: 1 }, /sexe est obligatoire/],
     [{ date_naissance: '' }, /date de naissance est obligatoire/], [{ date_naissance: null }, /date de naissance est obligatoire/],
     [{ date_naissance: '31/02/1990' }, /pas valide/], [{ date_naissance: '1990-02-31' }, /pas valide/], [{ date_naissance: '1850-01-01' }, /pas valide/], [{ date_naissance: '2999-01-01' }, /pas valide/],
-    [{ numero_dossier: '' }, /numéro de dossier/], [{ numero_dossier: '   ' }, /numéro de dossier/], [{ numero_dossier: null }, /numéro de dossier/],
   ];
   for (const [champs, motif] of refus) {
     const r = await appeler({ ...base, ...champs });

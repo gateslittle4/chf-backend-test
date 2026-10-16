@@ -2033,8 +2033,8 @@ test("ORDRE_RESTAURATION respecte la chaîne de dépendances FK dossiers→episo
     new Set(noms),
     new Set(['dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
       'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-      'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations']),
-    "doit couvrir exactement les 17 tables de TABLES_A_SAUVEGARDER — un oubli ici ne serait jamais restauré"
+      'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations', 'compteurs']),
+    "doit couvrir exactement les 18 tables de TABLES_A_SAUVEGARDER (dont compteurs, le compteur des numéros de dossier, 16/10) — un oubli ici ne serait jamais restauré"
   );
   const position = (t) => noms.indexOf(t);
   assert.ok(position('dossiers') < position('episodes'), "episodes dépend de dossiers");
