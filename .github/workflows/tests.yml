@@ -1,11 +1,10 @@
-# Tests automatiques du serveur (15/10). ÉTAT : PRÉPARÉ, PAS ACTIVÉ — déclenchement MANUEL seulement (onglet Actions → « Tests » → Run workflow).
-# Pour l'activer à chaque PR : remplacer `workflow_dispatch:` par
-#   pull_request:
-#   push:
-#     branches: [main]
-# puis, dans GitHub → Settings → Branches → règle sur `main` → « Require status checks » → cocher « tests ».
+# Tests automatiques du serveur. ACTIVÉS le 16/10 : ils tournent à chaque pull request et à chaque envoi sur `main`.
+# Pour qu'un test rouge BLOQUE la fusion : GitHub → Settings → Branches → règle sur `main` → « Require status checks to pass » → cocher « tests ».
 name: Tests
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 jobs:
   tests:
