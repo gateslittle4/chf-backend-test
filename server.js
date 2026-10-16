@@ -1580,8 +1580,9 @@ app.get('/api/dossiers/:id', async (req, res) => {
 // table dont la valeur EXACTE alimente un calcul plutôt qu'un simple affichage, et un rejet 400
 // clair vaut mieux que l'erreur Postgres brute d'une contrainte violée remontant telle quelle.
 app.put('/api/dossiers/:id', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
-    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
+  // 16/10 (Esdras) : le caissier modifie un dossier depuis Facturation, sans passer par Dossier/Épisode ni Fiche Patient → la caisse (caisse_travailler) peut aussi.
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'fiche_patient_modifier' ou 'caisse_travailler' requise." });
   }
   const { nom: nomSaisi, date_naissance, telephone, adresse, poids, conjoint: conjointSaisi, sexe, numero_dossier, mere_dossier_id } = req.body;
   if (!nomSaisi || !String(nomSaisi).trim()) return res.status(400).json({ error: 'Le nom est requis' });
