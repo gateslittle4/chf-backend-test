@@ -39,6 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
+const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart } = require('./utils/numeroDossier');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
@@ -1019,14 +1020,26 @@ app.post('/api/episodes', async (req, res) => {
   // qui n'enregistrent pas un vrai patient : la vente comptoir (⚡ Express : client de passage, numéro « AUTO-… ») et l'import d'une sauvegarde
   // (anciennes données, déjà telles quelles).
   const exempteIdentite = d.voie_entree === 'vente_comptoir' || d.import_sauvegarde === true;
+  // 16/10 : hors vente comptoir et import, le numéro n'est plus exigé — et seule la caisse peut en fournir un ; sans numéro, le dossier est « en attente » (EN-ATTENTE-…).
+  let numeroDuDossier = d.numero_dossier || null;
   if (!exempteIdentite) {
-    const erreurIdentite = erreurIdentiteDossier({ numero_dossier: d.numero_dossier, sexe: d.sexe, date_naissance: d.date_naissance });
+    const erreurIdentite = erreurIdentiteDossier({ sexe: d.sexe, date_naissance: d.date_naissance });
     if (erreurIdentite) return res.status(400).json({ error: erreurIdentite, code: 'IDENTITE_INCOMPLETE' });
+    if (numeroDuDossier && String(numeroDuDossier).trim()) {
+      if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+        return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier. Crée le dossier sans numéro : la caisse le donnera après le paiement.", code: 'NUMERO_RESERVE_CAISSE' });
+      }
+      const erreurNumero = erreurNumeroDossier(numeroDuDossier);
+      if (erreurNumero) return res.status(400).json({ error: erreurNumero });
+      numeroDuDossier = String(numeroDuDossier).trim();
+    } else {
+      numeroDuDossier = numeroProvisoire();
+    }
   }
   const { data: dossier, error: erreurDossier } = await supabase
     .from('dossiers')
     .insert({
-      numero_dossier: d.numero_dossier || `AUTO-${Date.now()}`,
+      numero_dossier: numeroDuDossier || `AUTO-${Date.now()}`,
       nom: formaterNomPropre(d.nom_patient), date_naissance: dateOuNull(d.date_naissance), telephone: d.telephone, adresse: d.adresse,
       ...(d.sexe === 'M' || d.sexe === 'F' ? { sexe: d.sexe } : {}),
     })
@@ -1296,6 +1309,66 @@ app.get('/api/dossiers/recherche', async (req, res) => {
 // par son nom de naissance. Colonnes réduites au strict nécessaire pour RETROUVER quelqu'un (pas d'adresse, rien de
 // financier). Même accès que /api/dossiers/recherche (toute personne connectée), qui renvoie déjà
 // davantage. Paginée : un select unique s'arrêterait en silence à 1000 lignes.
+// ============================================================================================
+// NUMÉRO DE DOSSIER DONNÉ PAR LA CAISSE (16/10, Esdras) — voir utils/numeroDossier.js et sql/numero_dossier_compteur.sql.
+// « Seule la caisse donne un numéro, quand la personne a payé ; le site le donne automatiquement, c'est moi qui définis où ça commence, la caisse peut le modifier. »
+// Droit : caisse_travailler (direction, comptable, pharmacien, pharmacien en chef, administrateur) ; infirmier et archiviste n'ont PAS ce droit.
+// ⚠️ Ces routes sont déclarées AVANT /api/dossiers/:id (sinon « numero-propose » serait pris pour un identifiant de dossier).
+// ============================================================================================
+app.get('/api/dossiers/numero-propose', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier.", code: 'NUMERO_RESERVE_CAISSE' });
+  const { data, error } = await supabase.rpc('numero_dossier_propose');
+  if (error) {
+    if (['42883', 'PGRST202'].includes(String(error.code))) return res.status(503).json({ error: "Le script sql/numero_dossier_compteur.sql n'est pas encore collé dans Supabase : le numéro automatique n'est pas disponible." });
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ numero: data });
+});
+
+// Donne (ou change) le numéro d'un dossier. Corps : { numero }. Le serveur refuse un numéro déjà pris (409) ; le compteur n'avance que si c'est le numéro proposé.
+app.post('/api/dossiers/:id/numero', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) return res.status(403).json({ error: "Seule la caisse peut donner ou changer un numéro de dossier.", code: 'NUMERO_RESERVE_CAISSE' });
+  const erreurNumero = erreurNumeroDossier(req.body && req.body.numero);
+  if (erreurNumero) return res.status(400).json({ error: erreurNumero });
+  const numero = String(req.body.numero).trim();
+  const { data, error } = await supabase.rpc('attribuer_numero_dossier', { p_dossier: req.params.id, p_numero: numero });
+  if (error) {
+    if (['42883', 'PGRST202'].includes(String(error.code))) return res.status(503).json({ error: "Le script sql/numero_dossier_compteur.sql n'est pas encore collé dans Supabase : le numéro automatique n'est pas disponible." });
+    const statut = { CHF30: 400, CHF31: 404, CHF32: 409 }[error.code] || (error.code === '22P02' ? 404 : 500);
+    return res.status(statut).json({ error: error.message });
+  }
+  if (!data.inchange) {
+    await enregistrerAuditServeur(req, 'numero_dossier_donne', { dossier_id: req.params.id, ancien_numero: data.ancien, nouveau_numero: data.numero, automatique: !!data.automatique });
+  }
+  res.json(data);
+});
+
+// Réglage de l'administrateur : le prochain numéro que le site proposera. RÉSERVÉ au rôle « administrateur » (contrôle de rôle, comme /api/admin/anomalies : pas une permission
+// qu'on pourrait donner à un autre rôle par l'écran Rôles & permissions — « c'est moi qui définis où ça commence »).
+async function exigerAdministrateur(req, res) {
+  const { data: profil, error } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return false; }
+  if (!profil || profil.role !== 'administrateur') { res.status(403).json({ error: "Réservé à l'administrateur." }); return false; }
+  return true;
+}
+app.get('/api/admin/numero-dossier-depart', async (req, res) => {
+  if (!(await exigerAdministrateur(req, res))) return;
+  const { data, error } = await supabase.rpc('numero_dossier_depart');
+  if (error) return res.status(['42883', 'PGRST202'].includes(String(error.code)) ? 503 : 500).json({ error: error.message });
+  res.json({ prochain: Number(data) });
+});
+app.put('/api/admin/numero-dossier-depart', async (req, res) => {
+  if (!(await exigerAdministrateur(req, res))) return;
+  const erreur = erreurNumeroDepart(req.body && req.body.prochain);
+  if (erreur) return res.status(400).json({ error: erreur });
+  const prochain = Number(req.body.prochain);
+  const { data: avant } = await supabase.rpc('numero_dossier_depart');
+  const { data, error } = await supabase.rpc('definir_numero_dossier_depart', { p_prochain: prochain });
+  if (error) return res.status(error.code === 'CHF33' ? 400 : (['42883', 'PGRST202'].includes(String(error.code)) ? 503 : 500)).json({ error: error.message });
+  await enregistrerAuditServeur(req, 'numero_dossier_depart_modifie', { ancien: avant === undefined ? null : Number(avant), nouveau: prochain });
+  res.json({ prochain: Number(data) });
+});
+
 // ⚠️ Déclarée AVANT /api/dossiers/:id, sinon Express y verrait un dossier nommé "liste-hors-ligne".
 // 30/09 (test réel) : "correspondances" id local -> vrai id. Une fiche et son paiement mis en file
 // PENDANT qu'une synchronisation envoyait déjà le dossier et l'épisode dont ils dépendent restaient
@@ -1367,7 +1440,7 @@ app.post('/api/dossiers', async (req, res) => {
   if (!(await aPermission(req.user.id, 'dossier_creer')) && !(await aPermission(req.user.id, 'caisse_travailler'))) {
     return res.status(403).json({ error: "Permission 'dossier_creer' (ou accès caisse) requise." });
   }
-  const { numero_dossier, nom: nomSaisi, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
+  const { numero_dossier: numeroSaisi, nom: nomSaisi, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
   if (!nomSaisi) return res.status(400).json({ error: 'Le nom est requis' });
   const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
@@ -1379,9 +1452,23 @@ app.post('/api/dossiers', async (req, res) => {
     if (existant) return res.status(200).json(existant);
   }
   // Après le rejeu : un dossier déjà créé (avant cette règle) qu'on renvoie par idempotence reste renvoyé tel quel.
-  // 15/10 : numéro de dossier, sexe ET date de naissance obligatoires à la création (voir utils/dossiers.js::erreurIdentiteDossier).
-  const erreurIdentite = erreurIdentiteDossier({ numero_dossier, sexe, date_naissance });
+  // 15/10 : sexe ET date de naissance obligatoires à la création (voir utils/dossiers.js::erreurIdentiteDossier).
+  const erreurIdentite = erreurIdentiteDossier({ sexe, date_naissance });
   if (erreurIdentite) return res.status(400).json({ error: erreurIdentite, code: 'IDENTITE_INCOMPLETE' });
+  // 16/10 (Esdras) : SEULE LA CAISSE donne un numéro de dossier (quand la personne a payé). Sans numéro, le dossier est créé « en attente » sous un numéro provisoire
+  // (EN-ATTENTE-…) que la caisse remplace ensuite (POST /api/dossiers/:id/numero). Un numéro fourni par quelqu'un qui n'est pas de la caisse est REFUSÉ, jamais ignoré en silence.
+  const numeroDemande = numeroSaisi === undefined || numeroSaisi === null ? '' : String(numeroSaisi).trim();
+  let numero_dossier;
+  if (numeroDemande) {
+    if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+      return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier. Crée le dossier sans numéro : la caisse le donnera après le paiement.", code: 'NUMERO_RESERVE_CAISSE' });
+    }
+    const erreurNumero = erreurNumeroDossier(numeroDemande);
+    if (erreurNumero) return res.status(400).json({ error: erreurNumero });
+    numero_dossier = numeroDemande;
+  } else {
+    numero_dossier = numeroProvisoire();
+  }
   // Retour d'Esdras (01/09) : "je ne veux pas oublier la racine de l'enfant" — un bébé né au
   // néonat est d'abord enregistré sous un nom temporaire ("Bébé + nom de la mère"), puis reçoit
   // son vrai nom au retour de la mère en consultation. nom_origine fige le nom du dossier à sa
@@ -1503,9 +1590,19 @@ app.put('/api/dossiers/:id', async (req, res) => {
     return res.status(400).json({ error: "Sexe invalide : 'M', 'F' ou vide." });
   }
   const maj = { nom, date_naissance: dateOuNull(date_naissance), telephone, adresse, poids: poids || null, conjoint, sexe: sexe || null };
+  // 16/10 (Esdras) : seule la caisse donne ou change un numéro de dossier. L'écran de modification renvoie le numéro tel quel : un numéro INCHANGÉ passe pour tout le
+  // monde (l'infirmier corrige un téléphone sans que le numéro bloque) ; un numéro DIFFÉRENT exige la caisse. Voir aussi POST /api/dossiers/:id/numero.
   if (numero_dossier !== undefined) {
     if (!String(numero_dossier).trim()) return res.status(400).json({ error: 'Le numéro de dossier est requis' });
-    maj.numero_dossier = numero_dossier;
+    const { data: actuel } = await supabase.from('dossiers').select('numero_dossier').eq('id', req.params.id).maybeSingle();
+    if (!actuel || String(actuel.numero_dossier) !== String(numero_dossier).trim()) {
+      if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+        return res.status(403).json({ error: "Seule la caisse peut donner ou changer un numéro de dossier.", code: 'NUMERO_RESERVE_CAISSE' });
+      }
+      const erreurNumero = erreurNumeroDossier(numero_dossier);
+      if (erreurNumero) return res.status(400).json({ error: erreurNumero });
+      maj.numero_dossier = String(numero_dossier).trim();
+    }
   }
   // 14/10 : nouveau nom du bébé — chaque nom quitté est gardé (anciens_noms), le nom de création reste intact. Lien vers la mère : absent du corps =
   // inchangé ; null ou vide = lien retiré ; sinon vérifié comme à la création.
@@ -3413,7 +3510,7 @@ const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
   'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
-  'invitations',
+  'invitations', 'compteurs',
 ];
 // Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
 // information_schema.table_constraints — mêmes valeurs que ORDRE_RESTAURATION plus bas). Sert au
@@ -3956,7 +4053,7 @@ const ORDRE_RESTAURATION = [
   ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
   ['catalog', 'type'], ['cloture_caisse', 'id'], ['ong_partenaires', 'id'], ['users', 'id'],
   ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
-  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'],
+  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
 ];
 const TAILLE_LOT_RESTAURATION = 500;
 
