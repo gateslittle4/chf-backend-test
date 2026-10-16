@@ -93,7 +93,7 @@ const {
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
   { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir'] },
-  { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','facturation_exporter','rapport_chf_voir'] },
+  { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
   { role: 'archiviste', permissions: ['fiche_patient_voir','facturation_voir'] },
