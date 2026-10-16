@@ -393,6 +393,11 @@ Le serveur fonctionne AVANT que les scripts soient collés (repli 42703/42P01/42
 - Les erreurs des postes sont NETTOYÉES (e-mails et suites de 5 chiffres retirés) avant d'être gardées : `utils/erreursClient.js`.
 - Tests : `tests/doublons_identite.test.js`, `routes_doublons.test.js`, `etat_systeme_serveur.test.js`, `naissance.test.js`, `qualite_donnees.test.js` (+ `tests/aides/fauxSupabase.js`, `appFausse.js`).
 
+## 15/10 — Partenaires rattachés à un identifiant stable (APPLIQUÉ en production le 16/10)
+`sql/partenaires_identifiant_stable.sql` : ajoute `ong_partenaire_id` (nullable) sur `episodes` et `paiements`, remplit l'historique (nom identique, majuscules/espaces ignorés, à UN SEUL partenaire non supprimé ; ambigu ou inconnu = vide), un déclencheur le remplit seul à chaque nouvelle ligne,
+et `renommer_partenaire(id, nouveau_nom)` change le nom du partenaire ET de tous ses épisodes/paiements d'un bloc (réservée à `service_role`). Appliqué le 16/10 (2 épisodes et 1 paiement rattachés ; la ligne du journal `migrations_appliquees` est à jour). Aucun changement du serveur ni de l'application ; rien n'est lu tant qu'aucun écran « renommer » n'existe.
+Reste à traiter à l'activation : `catalog.medicaments[].donsParOng` est rangé par NOM (champ JSON). Test SQL sur Postgres jetable : `python3 scripts/test-partenaires-identifiant-sql.py` ; test de garde : `tests/partenaires_identifiant_prepare.test.js`.
+
 ## 15/10 — Mise en place pour 2 ans plus tard (préparé, PAS ACTIVÉ sauf mention)
 - **Tests automatiques** : `.github/workflows/tests.yml` — déclenchement MANUEL seulement (Actions → Tests → Run workflow). Pour l'activer à chaque PR : remplacer `workflow_dispatch:` par `pull_request:` + `push: branches: [main]`, puis exiger le contrôle « tests » sur `main` (GitHub → Settings → Branches).
 - **Mises à jour des composants** : `.github/dependabot.yml` — une PR groupée par mois (npm + actions), jamais fusionnée toute seule. (Ce fichier-là est actif dès qu'il est fusionné.)
