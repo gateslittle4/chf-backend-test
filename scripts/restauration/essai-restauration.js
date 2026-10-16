@@ -37,8 +37,10 @@ const mo = (o) => (o / 1048576).toFixed(0) + ' Mo';
 let picMemoire = 0;
 const surveiller = () => { picMemoire = Math.max(picMemoire, process.memoryUsage().rss); };
 
-const TABLES = ['dossiers', 'episodes', 'fiches', 'paiements', 'pieces_jointes', 'transferts_service', 'demandes_exoneration', 'catalog', 'cloture_caisse', 'ong_partenaires', 'users',
-  'audit_log', 'requisitions', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations', 'doublons_ignores', 'migrations_appliquees'];
+// ong_partenaires AVANT episodes et paiements : un déclencheur (rattacher_partenaire_id) retrouve l'identifiant du partenaire À PARTIR DU NOM à chaque insertion ; si le partenaire n'est
+// pas encore restauré, l'identifiant resterait vide (constaté par cet essai le 16/10) et les lots par partenaire perdraient le lien.
+const TABLES = ['ong_partenaires', 'dossiers', 'episodes', 'fiches', 'paiements', 'pieces_jointes', 'transferts_service', 'demandes_exoneration', 'catalog', 'cloture_caisse', 'users',
+  'audit_log', 'requisitions', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees'];
 const CLES = { catalog: 'type', decrements_stock_appliques: 'local_id', invitations: 'token', doublons_ignores: 'dossier_a,dossier_b', migrations_appliquees: 'nom' };
 const ORDRE = TABLES.map(t => [t, CLES[t] || 'id']);
 // Ces colonnes sont, par conception, remises à l'heure de la base à chaque insertion (déclencheurs) : elles ne se comparent pas.
@@ -90,17 +92,24 @@ function reconstruireSchema(base) {
   for (const f of scripts) lancer(path.join(RACINE, 'sql', f), f);
   const apres = listes();
   const derives = [];
+  // Une contrainte CHECK écrite dans un script s'affiche avec d'autres parenthèses selon la version de PostgreSQL (la production est en 15, ce banc d'essai en 16) : même
+  // condition, autre mise en forme. On compare donc sans parenthèses ni espaces.
+  const norme = (k, x) => (k === 'contraintes' ? x.replace(/[()\s]/g, '') : x);
   for (const k of ['contraintes', 'index']) {
-    for (const x of avant[k]) if (!apres[k].includes(x)) derives.push(`${k} : supprimé/modifié par les scripts → ${x.slice(0, 200)}`);
-    for (const x of apres[k]) if (!avant[k].includes(x)) derives.push(`${k} : ajouté par les scripts → ${x.slice(0, 200)}`);
+    const normAvant = new Set(avant[k].map(x => norme(k, x))), normApres = new Set(apres[k].map(x => norme(k, x)));
+    for (const x of avant[k]) if (!normApres.has(norme(k, x))) derives.push(`${k} : supprimé/modifié par les scripts → ${x.slice(0, 200)}`);
+    for (const x of apres[k]) if (!normAvant.has(norme(k, x))) derives.push(`${k} : ajouté par les scripts → ${x.slice(0, 200)}`);
   }
   return { scripts: scripts.length, erreurs, derives };
 }
 
+// Les colonnes « numeric » se comparent par leur VALEUR : 61.50 (lu en base) et 61.5 (relu depuis le fichier JSON) sont le même poids.
+const colonnesNumeriques = (base, table) => json(base, `select coalesce(jsonb_agg(column_name), '[]'::jsonb) from information_schema.columns where table_schema = 'public' and table_name = '${table}' and data_type = 'numeric'`);
 function empreinte(base, table) {
   const cle = (CLES[table] || 'id').split(',').join(', ');
   const retire = IGNOREES.map(c => `- '${c}'`).join(' ');
-  return json(base, `select jsonb_build_object('lignes', count(*), 'md5', md5(coalesce(string_agg((to_jsonb(t) ${retire})::text, '|' order by ${cle}), ''))) from public.${table} t`);
+  const numeriques = colonnesNumeriques(base, table).map(c => ` || jsonb_build_object('${c}', t."${c}"::float8)`).join('');
+  return json(base, `select jsonb_build_object('lignes', count(*), 'md5', md5(coalesce(string_agg(((to_jsonb(t) ${retire})${numeriques})::text, '|' order by ${cle}), ''))) from public.${table} t`);
 }
 
 async function main() {
@@ -168,7 +177,9 @@ async function main() {
       if (!identique) {
         const cle = (CLES[t] || 'id').split(',').join(', ');
         for (const c of json('source', `select jsonb_agg(column_name) from information_schema.columns where table_schema = 'public' and table_name = '${t}'`)) {
-          const h = (b) => json(b, `select md5(coalesce(string_agg("${c}"::text, '|' order by ${cle}), '')) from public.${t}`);
+          if (IGNOREES.includes(c)) continue;
+          const numerique = colonnesNumeriques('source', t).includes(c);
+          const h = (b) => json(b, `select md5(coalesce(string_agg("${c}"${numerique ? '::float8' : ''}::text, '|' order by ${cle}), '')) from public.${t}`);
           if (h('source') !== h('cible')) console.log(`       ↳ colonne différente : ${c}`);
         }
       }

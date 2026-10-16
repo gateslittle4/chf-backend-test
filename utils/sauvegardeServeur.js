@@ -228,6 +228,18 @@ function creerServiceSauvegarde({
       rapport.lignesSauvegarde += lignes.length;
       let aInserer = lignes.filter(l => !existantes.has(cleDe(table, l)));
       rapport.dejaPresentes += lignes.length - aInserer.length;
+      // Compteurs (numéros de dossier, de fiche) : une base neuve en contient déjà une ligne de départ (créée par les scripts SQL) ; la laisser telle quelle ferait repartir la
+      // numérotation de zéro. Pour un compteur, la sauvegarde l'emporte si elle est PLUS HAUTE — jamais l'inverse (on ne fait jamais reculer un compteur).
+      if (table === 'compteurs') {
+        for (const l of lignes.filter(x => existantes.has(cleDe(table, x)))) {
+          const { data: lues } = await supabase.from('compteurs').select('derniernumero').eq('id', l.id);
+          const actuelle = (lues || [])[0];
+          if (actuelle && Number(l.derniernumero) > Number(actuelle.derniernumero || 0)) {
+            const { error } = await supabase.from('compteurs').update({ derniernumero: l.derniernumero, updated_at: l.updated_at }).eq('id', l.id);
+            if (error) rapport.lignesEnEchec.push({ id: l.id, erreur: `compteur : ${error.message}` }); else rapport.inserees++;
+          }
+        }
+      }
       if (table === 'dossiers') {
         aInserer = aInserer.map(l => {
           if (l.fusionne_dans || l.mere_dossier_id) liens.push({ id: l.id, fusionne_dans: l.fusionne_dans || null, mere_dossier_id: l.mere_dossier_id || null });

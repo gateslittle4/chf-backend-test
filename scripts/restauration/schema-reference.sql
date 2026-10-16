@@ -131,3 +131,12 @@ CREATE INDEX idx_requisitions_date ON public.requisitions USING btree (date_requ
 CREATE UNIQUE INDEX idx_requisitions_local_id ON public.requisitions USING btree (local_id) WHERE (local_id IS NOT NULL);
 CREATE INDEX idx_requisitions_service ON public.requisitions USING btree (service_demandeur);
 CREATE INDEX idx_transferts_episode ON public.transferts_service USING btree (episode_id);
+-- Index de croissance (sql/croissance_index_et_postes_ouverts.sql, appliqué en production le 16/10).
+CREATE INDEX idx_audit_log_date ON public.audit_log USING btree (date DESC);
+CREATE INDEX idx_dossiers_modifie_le ON public.dossiers USING btree (modifie_le);
+CREATE INDEX idx_episodes_date_ouverture ON public.episodes USING btree (date_ouverture DESC, id) WHERE (supprime_le IS NULL);
+CREATE INDEX idx_episodes_modifie_le ON public.episodes USING btree (modifie_le);
+CREATE INDEX idx_fiches_modifie_le ON public.fiches USING btree (modifie_le);
+CREATE INDEX idx_lignes_effacees_efface_le ON public.lignes_effacees USING btree (efface_le);
+CREATE INDEX idx_paiements_date_paiement ON public.paiements USING btree (date_paiement DESC, id) WHERE (supprime_le IS NULL);
+CREATE INDEX idx_paiements_modifie_le ON public.paiements USING btree (modifie_le);

@@ -69,3 +69,7 @@ INSERT INTO doublons_ignores (dossier_a, dossier_b, ignore_par)
 SELECT LEAST(a.id, b.id), GREATEST(a.id, b.id), 'direction' FROM (SELECT id, row_number() OVER (ORDER BY id) rn FROM dossiers) a JOIN (SELECT id, row_number() OVER (ORDER BY id) rn FROM dossiers) b ON b.rn = a.rn + 1 WHERE a.rn % 97 = 0;
 INSERT INTO migrations_appliquees (nom, somme_controle, applique_par, remarque) SELECT 'script_' || g || '.sql', md5(g::text), 'test', 'essai' FROM generate_series(1, 5) g;
 ANALYZE;
+
+-- Compteur des numéros de dossier : la base source est « en service » (dernier numéro donné : 1500) ; la base cible, fraîche, a seulement la ligne de départ (0) créée par les scripts.
+INSERT INTO compteurs (id, derniernumero, updated_at) VALUES ('dossiers', 1500, '2026-10-16 10:00:00+00')
+ON CONFLICT (id) DO UPDATE SET derniernumero = 1500, updated_at = '2026-10-16 10:00:00+00';

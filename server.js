@@ -4087,9 +4087,11 @@ app.get('/api/admin/derniere-sauvegarde', async (req, res) => {
 // primaire précisée quand ce n'est pas "id" (catalog: type, invitations: token,
 // decrements_stock_appliques: local_id).
 const ORDRE_RESTAURATION = [
-  ['dossiers', 'id'], ['episodes', 'id'], ['fiches', 'id'], ['paiements', 'id'],
+  // ong_partenaires EN PREMIER (16/10, essai de restauration) : le déclencheur rattacher_partenaire_id retrouve l'identifiant du partenaire d'après son NOM à chaque insertion
+  // d'épisode ou de paiement ; restauré après eux, le partenaire n'existait pas encore et l'identifiant restait vide.
+  ['ong_partenaires', 'id'], ['dossiers', 'id'], ['episodes', 'id'], ['fiches', 'id'], ['paiements', 'id'],
   ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
-  ['catalog', 'type'], ['cloture_caisse', 'id'], ['ong_partenaires', 'id'], ['users', 'id'],
+  ['catalog', 'type'], ['cloture_caisse', 'id'], ['users', 'id'],
   ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
   ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
 ];
