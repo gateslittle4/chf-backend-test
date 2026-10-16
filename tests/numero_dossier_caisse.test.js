@@ -412,3 +412,12 @@ test("plus tard, une consultation ordinaire du même patient lui donne un VRAI n
   assert.ok(N.erreurNumeroDossier('EXAMEN-1')); assert.ok(N.erreurNumeroDossier('examen-1'));
   assert.ok(N.estExamensSeulement(N.numeroExamens())); assert.ok(N.estSansVraiNumero(N.numeroExamens())); assert.ok(N.estSansVraiNumero(N.numeroProvisoire())); assert.ok(!N.estSansVraiNumero('4001'));
 });
+
+test("PUT /api/dossiers/:id : la caisse (caisse_travailler) peut modifier un dossier depuis Facturation, même sans fiche_patient_modifier ; un rôle sans l'un ni l'autre est refusé (403)", async () => {
+  const caisse = routeModification({ droits: ['caisse_travailler'] });
+  const r = await caisse.appeler({ telephone: '34567890', numero_dossier: 'EN-ATTENTE-AAAAAAAAAA' });
+  assert.strictEqual(r.code, 200); assert.strictEqual(caisse.maj.length, 1);
+  const lecteur = routeModification({ droits: ['episode_creer'] });
+  const r2 = await lecteur.appeler({ telephone: '34567890' });
+  assert.strictEqual(r2.code, 403); assert.strictEqual(lecteur.maj.length, 0);
+});
