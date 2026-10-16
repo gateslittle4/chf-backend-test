@@ -53,12 +53,25 @@ function sessionsAFermer(sessions, maintenantMs) {
     .filter(x => x.limite !== null && maintenantMs >= x.limite);
 }
 
+// Lit les postes OUVERTS seulement (fonction SQL sessions_caisse_ouvertes, sql/croissance_index_et_postes_ouverts.sql) : la liste complète des sessions grossit sans fin et
+// cette lecture a lieu chaque minute. Tant que la fonction n'existe pas en base, ou si elle échoue, on retombe sur l'ancienne lecture complète — jamais de poste oublié ouvert pour ça.
+// Renvoie la liste, ou null si rien n'est lisible (déjà journalisé).
+async function lireSessionsOuvertes(supabase, journal) {
+  try {
+    const { data, error } = await supabase.rpc('sessions_caisse_ouvertes');
+    if (!error && Array.isArray(data)) return data;
+  } catch (_) { /* repli ci-dessous */ }
+  const { data: ligne, error } = await supabase.from('catalog').select('items').eq('type', 'sessions_caisse').maybeSingle();
+  if (error) { if (error.code !== '42P01') journal.warn('Fermeture auto des postes : lecture impossible — ' + error.message); return null; }
+  return (ligne && ligne.items) || [];
+}
+
 // Ferme tous les postes expirés. Relit la liste juste avant d'écrire. Ne lève jamais : renvoie le nombre de postes fermés.
 async function fermerPostesExpires({ supabase, maintenant = () => Date.now(), journal = console }) {
   try {
-    const { data: ligne, error } = await supabase.from('catalog').select('items').eq('type', 'sessions_caisse').maybeSingle();
-    if (error) { if (error.code !== '42P01') journal.warn('Fermeture auto des postes : lecture impossible — ' + error.message); return 0; }
-    const aFermer = sessionsAFermer((ligne && ligne.items) || [], maintenant());
+    const sessions = await lireSessionsOuvertes(supabase, journal);
+    if (sessions === null) return 0;
+    const aFermer = sessionsAFermer(sessions, maintenant());
     if (aFermer.length === 0) return 0;
     const maj = aFermer.map(({ session, limite }) => ({ id: session.id, champs: {
       fermetureISO: new Date(limite).toISOString(), comptantRemis: null, fondConserve: null, statut: 'fermee', fermetureAuto: true,

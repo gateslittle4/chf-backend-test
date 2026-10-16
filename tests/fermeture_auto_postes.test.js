@@ -32,16 +32,22 @@ test("sessionsAFermer : seulement les postes ouverts dont la limite est atteinte
   assert.deepStrictEqual(sessionsAFermer([{ ...ouvert, prolongeJusqua: '2026-10-15T20:10:00Z' }], t('2026-10-15T20:05:00Z')), []);
 });
 
-function faux(items, { erreurEcriture = null } = {}) {
-  const ecrit = []; const audits = [];
+function faux(items, { erreurEcriture = null, sansFonctionOuvertes = false } = {}) {
+  const ecrit = []; const audits = []; const lectures = { complete: 0, ouvertes: 0 };
   return {
-    ecrit, audits,
+    ecrit, audits, lectures,
     from(table) {
-      if (table === 'catalog') return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { items }, error: null }) }) }) };
+      if (table === 'catalog') return { select: () => ({ eq: () => ({ maybeSingle: async () => { lectures.complete++; return { data: { items }, error: null }; } }) }) };
       if (table === 'audit_log') return { insert: async (l) => { audits.push(l); return { error: null }; } };
       throw new Error('table ' + table);
     },
-    async rpc(nom, args) { ecrit.push([nom, args]); return { data: null, error: erreurEcriture }; },
+    async rpc(nom, args) {
+      if (nom === 'sessions_caisse_ouvertes') {
+        if (sansFonctionOuvertes) return { data: null, error: { code: '42883', message: 'function does not exist' } };
+        lectures.ouvertes++; return { data: items.filter(s => s.statut === 'ouverte'), error: null };
+      }
+      ecrit.push([nom, args]); return { data: null, error: erreurEcriture };
+    },
   };
 }
 const silencieux = { log() {}, warn() {} };
@@ -83,4 +89,21 @@ test("server.js : vérification chaque minute ET au réveil du serveur", () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /cron\.schedule\('\* \* \* \* \*', \(\) => \{ fermerPostesExpires\(\{ supabase \}\); \}\);/);
   assert.match(src, /setTimeout\(\(\) => \{ fermerPostesExpires\(\{ supabase \}\); \}, 20000\)\.unref\(\);/);
+});
+
+test("La fermeture automatique ne lit QUE les postes ouverts (la liste complète grossit sans fin et est relue chaque minute)", async () => {
+  const supabase = faux([
+    { id: 'vieux', statut: 'fermee', poste: 'jour', ouvertureISO: '2026-10-01T13:00:00Z' },
+    { id: 'e', statut: 'ouverte', poste: 'jour', ouvertureISO: '2026-10-14T17:27:50.306Z' },
+  ]);
+  const n = await fermerPostesExpires({ supabase, maintenant: () => new Date('2026-10-15T16:55:00Z').getTime(), journal: silencieux });
+  assert.strictEqual(n, 1);
+  assert.deepStrictEqual(supabase.lectures, { complete: 0, ouvertes: 1 }, 'aucune lecture de la liste complète');
+});
+
+test("Tant que la fonction SQL n'existe pas en base, on retombe sur l'ancienne lecture complète : un poste oublié est quand même fermé", async () => {
+  const supabase = faux([{ id: 'e', statut: 'ouverte', poste: 'jour', ouvertureISO: '2026-10-14T17:27:50.306Z' }], { sansFonctionOuvertes: true });
+  const n = await fermerPostesExpires({ supabase, maintenant: () => new Date('2026-10-15T16:55:00Z').getTime(), journal: silencieux });
+  assert.strictEqual(n, 1);
+  assert.strictEqual(supabase.lectures.complete, 1);
 });
