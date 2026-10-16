@@ -2865,6 +2865,26 @@ app.post('/api/lots/prochain-numero', async (req, res) => {
   res.json({ numero: data });
 });
 
+// Renommer un partenaire (16/10) : le nom du partenaire, celui de tous ses épisodes et paiements, et la clé de ses dons de médicaments changent EN UN BLOC
+// (fonction SQL renommer_partenaire, sql/renommer_partenaire_avec_dons.sql) — l'historique reste d'un seul morceau. RÉSERVÉ aux rôles « administrateur » et « direction »
+// (demande d'Esdras) : volontairement un contrôle de rôle et non une permission, comme /api/admin/anomalies, donc pas modifiable par l'écran Rôles & permissions.
+app.patch('/api/ong-partenaires/:id/renommer', async (req, res) => {
+  const { data: profil, error: erreurProfil } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (erreurProfil) return res.status(500).json({ error: erreurProfil.message });
+  if (!profil || !['administrateur', 'direction'].includes(profil.role)) return res.status(403).json({ error: "Réservé à l'administrateur et à la direction." });
+  const nouveauNom = typeof req.body.nom === 'string' ? req.body.nom.trim().replace(/\s+/g, ' ') : '';
+  if (!nouveauNom) return res.status(400).json({ error: 'Le nouveau nom est requis.' });
+  if (nouveauNom.length > 100) return res.status(400).json({ error: 'Le nom est trop long (100 caractères au plus).' });
+  const { data: avant } = await supabase.from('ong_partenaires').select('nom').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
+  const { data, error } = await supabase.rpc('renommer_partenaire', { p_id: req.params.id, p_nouveau_nom: nouveauNom });
+  if (error) {
+    const statut = { CHF20: 400, CHF21: 404, CHF22: 409 }[error.code] || 500;
+    return res.status(statut).json({ error: error.message });
+  }
+  if (!data.inchange) await enregistrerAuditServeur(req, 'renommer_partenaire', { id: req.params.id, ancien_nom: avant ? avant.nom : null, nouveau_nom: nouveauNom, episodes: data.episodes, paiements: data.paiements, dons: data.dons });
+  res.json({ ...data, nom: nouveauNom });
+});
+
 // Décrémente le stock de façon atomique (voir fonction_decrementer_stock_et_numerotation_lots.sql) — remplace le
 // calcul côté navigateur + réécriture complète du catalogue, qui pouvait perdre une vente si
 // 2 ventes du même médicament arrivaient presque en même temps (2e écriture qui efface la

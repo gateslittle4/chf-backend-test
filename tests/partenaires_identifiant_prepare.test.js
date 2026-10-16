@@ -30,6 +30,8 @@ test("renommer_partenaire est réservée au serveur ; un nom ambigu n'est jamais
   assert.match(sansCommentaires, /CASE WHEN count\(\*\) = 1 THEN min\(id\) END/);
 });
 
-test("Préparé, pas activé : le serveur ne lit ni n'écrit ong_partenaire_id", () => {
-  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8'), /ong_partenaire_id|renommer_partenaire/);
+test("Le serveur ne lit ni n'écrit ong_partenaire_id ; seule la route de renommage appelle renommer_partenaire (voir renommer_partenaire.test.js)", () => {
+  const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.doesNotMatch(serveur, /ong_partenaire_id/);
+  assert.strictEqual((serveur.match(/rpc\('renommer_partenaire'/g) || []).length, 1);
 });
