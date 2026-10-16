@@ -206,7 +206,7 @@ test("PUT /api/dossiers/:id : un numéro INCHANGÉ passe pour tout le monde, un 
 });
 
 test("le compteur des numéros est sauvegardé ET restauré (table compteurs)", () => {
-  assert.match(serveur, /'invitations', 'compteurs',\n\];/);
+  assert.match(serveur, /'invitations', 'compteurs'/);
   assert.match(serveur, /\['compteurs', 'id'\]/);
 });
 

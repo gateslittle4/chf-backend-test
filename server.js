@@ -39,6 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
+const { creerServiceSauvegarde } = require('./utils/sauvegardeServeur');
 const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement } = require('./utils/numeroDossier');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
@@ -3544,83 +3545,22 @@ const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
 // quelle remise et pour quel montant (donnée financière sensible). Les 4 autres :
 // pieces_jointes (documents des patients), requisitions, transferts_service (mouvements des
 // patients entre services) et salaires_service (base du calcul de rentabilité dans Analytics).
+// 16/10 : + compteurs (numéros de dossier), doublons_ignores (paires de dossiers que la caisse a écartées) et migrations_appliquees (journal des scripts SQL).
 const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
   'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
-  'invitations', 'compteurs',
+  'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees',
 ];
 // Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
 // information_schema.table_constraints — mêmes valeurs que ORDRE_RESTAURATION plus bas). Sert au
 // tri TOTAL qu'exige la lecture paginée de la sauvegarde (voir lireToutesLesPages).
-const CLE_PRIMAIRE_SAUVEGARDE = { catalog: 'type', decrements_stock_appliques: 'local_id', invitations: 'token' };
+const CLE_PRIMAIRE_SAUVEGARDE = { catalog: 'type', decrements_stock_appliques: 'local_id', invitations: 'token', doublons_ignores: 'dossier_a,dossier_b', migrations_appliquees: 'nom' };
 
-async function sauvegarderVersStorage() {
-  const contenu = { genere_le: new Date().toISOString() };
-  // Une table illisible (pas encore créée, renommée, RLS trop stricte) faisait échouer la
-  // sauvegarde ENTIÈRE : plus aucune donnée protégée, pour une seule table en défaut. On continue
-  // désormais table par table et on remonte la liste des échecs — une sauvegarde partielle vaut
-  // infiniment mieux que pas de sauvegarde du tout, à condition que le trou soit annoncé (il
-  // l'est : dans le fichier lui-même, dans les logs, et dans l'alerte WhatsApp quotidienne).
-  const tablesEnEchec = [];
-  // Lecture PAGINÉE (25/09, audit avant mise en production) : un simple select('*') s'arrêtait au
-  // plafond de lignes de Supabase (1000 par défaut) SANS erreur — dès qu'une table le dépassait
-  // (audit_log en premier, puis paiements/fiches), la sauvegarde n'en gardait qu'une partie, en
-  // silence, et la restauration aurait rendu une base amputée. Même piège que celui corrigé le
-  // 31/08 pour GET /api/episodes, qui avait épargné la sauvegarde.
-  for (const table of TABLES_A_SAUVEGARDER) {
-    let data;
-    try {
-      data = await lireToutesLesPages(() => supabase.from(table).select('*').order(CLE_PRIMAIRE_SAUVEGARDE[table] || 'id'));
-    } catch (error) {
-      console.error(`⚠️ Sauvegarde : table "${table}" illisible — ${error.message}`);
-      tablesEnEchec.push(`${table} (${error.message})`);
-      continue;
-    }
-    contenu[table] = data;
-  }
-  if (tablesEnEchec.length > 0) contenu._tables_en_echec = tablesEnEchec;
-  if (Object.keys(contenu).filter(k => !k.startsWith('_') && k !== 'genere_le').length === 0) {
-    throw new Error(`Aucune table n'a pu être lue : ${tablesEnEchec.join(' ; ')}`);
-  }
-
-  const { data: buckets, error: erreurListeBuckets } = await supabase.storage.listBuckets();
-  if (erreurListeBuckets) throw new Error(`Liste des buckets : ${erreurListeBuckets.message}`);
-  if (!buckets.some(b => b.name === BUCKET_SAUVEGARDES)) {
-    const { error: erreurCreation } = await supabase.storage.createBucket(BUCKET_SAUVEGARDES, { public: false });
-    if (erreurCreation) throw new Error(`Création du bucket : ${erreurCreation.message}`);
-  }
-
-  // en-CA donne nativement le format YYYY-MM-DD ; timeZone: FUSEAU_HAITI (pas .toISOString(), qui
-  // ne connaît que l'UTC) pour qu'un déclenchement manuel entre 20h et minuit heure d'Haïti (le
-  // "Tester la sauvegarde" d'Esdras) ne nomme pas le fichier avec la date de DEMAIN.
-  const nomFichier = `backup-${new Date().toLocaleDateString('en-CA', { timeZone: FUSEAU_HAITI })}.json`;
-  // Gardé pour la copie hors Supabase plus bas (envoyerCopieHorsSupabase) : sérialiser deux fois la même
-  // sauvegarde (une pour Storage, une pour l'email) risquerait de produire deux fichiers
-  // légèrement différents si un appel concurrent modifiait `contenu` entre les deux — improbable
-  // ici (fonction locale, pas de mutation externe possible) mais une seule sérialisation reste la
-  // seule garantie que les deux copies sont VRAIMENT identiques.
-  const contenuBuffer = Buffer.from(JSON.stringify(contenu));
-  const { error: erreurUpload } = await supabase.storage
-    .from(BUCKET_SAUVEGARDES)
-    .upload(nomFichier, contenuBuffer, { contentType: 'application/json', upsert: true });
-  if (erreurUpload) throw new Error(`Envoi vers Storage : ${erreurUpload.message}`);
-
-  // Rétention : garde les 30 dernières sauvegardes quotidiennes (~1 mois), supprime le reste —
-  // sinon le bucket grossit indéfiniment. upsert:true ci-dessus évite déjà les doublons si le
-  // job tourne 2 fois le même jour (même nom de fichier, écrase plutôt que d'empiler).
-  const { data: fichiers, error: erreurListeFichiers } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
-  if (!erreurListeFichiers && fichiers && fichiers.length > 30) {
-    const aSupprimer = fichiers.sort((a, b) => a.name.localeCompare(b.name)).slice(0, fichiers.length - 30).map(f => f.name);
-    await supabase.storage.from(BUCKET_SAUVEGARDES).remove(aSupprimer);
-  }
-
-  const nombreLignes = Object.fromEntries(
-    TABLES_A_SAUVEGARDER.filter(t => contenu[t]).map(t => [t, contenu[t].length])
-  );
-  return { fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer };
-}
-
+// 16/10 — sauvegarde COMPRESSÉE (format 2) : un dossier par sauvegarde (backup-AAAA-MM-JJ/), une ou plusieurs tranches .ndjson.gz par table (16 Mo de texte au plus chacune,
+// donc jamais un énorme fichier unique en mémoire), et un manifeste (sommes SHA-256, nombre de lignes) écrit EN DERNIER. Toute la logique — sauvegarde, vérification,
+// conservation (30 jours + 1 par mois sur 12 mois), restauration — vit dans utils/sauvegardeServeur.js, testée contre deux vraies bases PostgreSQL
+// (scripts/restauration/essai-restauration.js). Les anciennes sauvegardes .json (format 1) restent lisibles et restaurables.
 // Copie HORS SUPABASE (retour d'Esdras, 02/09 : "pourquoi la sauvegarde est sur Supabase ?" — la
 // bonne question à se poser). Une sauvegarde qui vit dans le MÊME projet que les données qu'elle
 // protège ne protège de rien en cas d'incident sur ce projet précis (panne, suspension pour
@@ -3668,96 +3608,113 @@ async function appelB2(url, options, gardeFouMs = DELAI_MAX_APPEL_B2_MS) {
   }
 }
 
-async function envoyerCopieHorsSupabase(nomFichier, contenuBuffer) {
+const DELAI_MAX_ENVOI_B2_MS = 120000; // une tranche compressée pèse jusqu'à quelques Mo : plus de temps que pour un simple appel d'API
+
+// Ouvre UNE session Backblaze B2 pour toute la sauvegarde (authentification et recherche du bucket une seule fois), puis envoie les fichiers un par un.
+// Renvoie null si B2 n'est pas configuré (variables d'environnement absentes) : la sauvegarde Supabase continue seule, avec un avertissement dans les logs.
+async function ouvrirSessionB2() {
   const keyId = process.env.B2_KEY_ID;
   const applicationKey = process.env.B2_APPLICATION_KEY;
   const nomBucket = process.env.B2_BUCKET_NAME;
   if (!keyId || !applicationKey || !nomBucket) {
     console.warn('Copie hors Supabase NON envoyée — B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME manquant(s) dans les variables d\'environnement Render.');
-    return;
+    return null;
   }
-  console.log(`📦 Copie hors Supabase : tentative d'envoi vers Backblaze B2 (bucket "${nomBucket}")...`);
-  try {
-    // 1. S'authentifier — renvoie un jeton + l'URL de l'API à utiliser pour CE compte (varie
-    // selon la région Backblaze attribuée à Esdras, jamais fixe).
-    const identifiants = Buffer.from(`${keyId}:${applicationKey}`).toString('base64');
-    const auth = await appelB2('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
-      headers: { Authorization: `Basic ${identifiants}` },
-    });
-    const apiUrl = auth.apiInfo?.storageApi?.apiUrl || auth.apiUrl;
+  console.log(`📦 Copie hors Supabase : ouverture de la session Backblaze B2 (bucket "${nomBucket}")...`);
+  // 1. S'authentifier — renvoie un jeton + l'URL de l'API à utiliser pour CE compte (varie selon la région Backblaze, jamais fixe).
+  const identifiants = Buffer.from(`${keyId}:${applicationKey}`).toString('base64');
+  const auth = await appelB2('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', { headers: { Authorization: `Basic ${identifiants}` } });
+  const apiUrl = auth.apiInfo?.storageApi?.apiUrl || auth.apiUrl;
+  // 2. Retrouver l'ID interne du bucket à partir de son NOM (b2_get_upload_url exige l'ID, pas le nom).
+  const listeBuckets = await appelB2(`${apiUrl}/b2api/v2/b2_list_buckets`, {
+    method: 'POST', headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId: auth.accountId, bucketName: nomBucket }),
+  });
+  const bucket = (listeBuckets.buckets || [])[0];
+  if (!bucket) throw new Error(`Bucket "${nomBucket}" introuvable — vérifie B2_BUCKET_NAME et que la clé d'application y a bien accès.`);
 
-    // 2. Retrouver l'ID interne du bucket à partir de son NOM (b2_get_upload_url exige l'ID, pas
-    // le nom) — évite de demander à Esdras un identifiant technique qu'il ne voit nulle part
-    // dans son tableau de bord, seul le nom du bucket y est affiché.
-    const listeBuckets = await appelB2(`${apiUrl}/b2api/v2/b2_list_buckets`, {
-      method: 'POST',
-      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountId: auth.accountId, bucketName: nomBucket }),
-    });
-    const bucket = (listeBuckets.buckets || [])[0];
-    if (!bucket) throw new Error(`Bucket "${nomBucket}" introuvable — vérifie B2_BUCKET_NAME et que la clé d'application y a bien accès.`);
-
-    // 3. Obtenir une URL d'upload à usage unique (B2 en distribue une par appel, jamais réutilisée).
-    const upload = await appelB2(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
-      method: 'POST',
-      headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bucketId: bucket.bucketId }),
-    });
-
-    // 4. Envoyer le fichier — B2 exige le SHA1 du contenu en en-tête pour vérifier l'intégrité
-    // de la copie reçue (rejette l'upload si ça ne correspond pas).
-    const sha1 = crypto.createHash('sha1').update(contenuBuffer).digest('hex');
-    const controleur = new AbortController();
-    const gardeFou = setTimeout(() => controleur.abort(), DELAI_MAX_APPEL_B2_MS);
-    let reponseUpload;
-    try {
-      reponseUpload = await fetch(upload.uploadUrl, {
-        method: 'POST',
-        signal: controleur.signal,
-        headers: {
-          Authorization: upload.authorizationToken,
-          'X-Bz-File-Name': encodeURIComponent(nomFichier),
-          'Content-Type': 'application/json',
-          'X-Bz-Content-Sha1': sha1,
-          'Content-Length': String(contenuBuffer.length),
-        },
-        body: contenuBuffer,
+  return {
+    // 3+4. Une URL d'envoi à usage unique par fichier, puis l'envoi — B2 exige le SHA1 du contenu en en-tête (il rejette l'envoi si ça ne correspond pas).
+    async envoyer(chemin, contenu) {
+      const upload = await appelB2(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
+        method: 'POST', headers: { Authorization: auth.authorizationToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bucketId: bucket.bucketId }),
       });
-    } catch (e) {
-      throw e.name === 'AbortError' ? new Error(`Aucune réponse de Backblaze B2 après ${DELAI_MAX_APPEL_B2_MS / 1000}s (upload).`) : e;
-    } finally {
-      clearTimeout(gardeFou);
-    }
-    const corpsUpload = await reponseUpload.text();
-    if (!reponseUpload.ok) throw new Error(`B2 a refusé l'upload (HTTP ${reponseUpload.status}) — ${corpsUpload}`);
-    let fileId = '?';
-    try { fileId = JSON.parse(corpsUpload).fileId || '?'; } catch { /* corps non-JSON, fileId restera '?' */ }
-    console.log(`✅ Copie hors Supabase envoyée vers Backblaze B2 — fileId=${fileId}`);
-  } catch (e) {
-    console.error(`❌ Échec d'envoi de la copie hors Supabase vers B2 : ${e.message}`);
-    throw e;
-  }
+      const sha1 = crypto.createHash('sha1').update(contenu).digest('hex');
+      const controleur = new AbortController();
+      const gardeFou = setTimeout(() => controleur.abort(), DELAI_MAX_ENVOI_B2_MS);
+      let reponse;
+      try {
+        reponse = await fetch(upload.uploadUrl, {
+          method: 'POST', signal: controleur.signal,
+          headers: {
+            Authorization: upload.authorizationToken, 'X-Bz-File-Name': chemin.split('/').map(encodeURIComponent).join('/'),
+            'Content-Type': chemin.endsWith('.json') ? 'application/json' : 'application/gzip', 'X-Bz-Content-Sha1': sha1, 'Content-Length': String(contenu.length),
+          },
+          body: contenu,
+        });
+      } catch (e) {
+        throw e.name === 'AbortError' ? new Error(`Aucune réponse de Backblaze B2 après ${DELAI_MAX_ENVOI_B2_MS / 1000}s (envoi de ${chemin}).`) : e;
+      } finally {
+        clearTimeout(gardeFou);
+      }
+      const corps = await reponse.text();
+      if (!reponse.ok) throw new Error(`B2 a refusé l'envoi de ${chemin} (HTTP ${reponse.status}) — ${corps}`);
+    },
+    // Notification email best-effort, SANS pièce jointe (les fichiers vivent sur B2) — un échec ici ne doit jamais annuler le succès de la copie.
+    async terminer({ dossier, manifeste }) {
+      console.log(`✅ Copie hors Supabase envoyée vers Backblaze B2 — ${dossier}`);
+      const cleApi = process.env.RESEND_API_KEY;
+      const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
+      if (!cleApi || !destinataire) return;
+      await appelB2('https://api.resend.com/emails', {
+        method: 'POST', headers: { Authorization: `Bearer ${cleApi}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: 'Sauvegarde CHF <onboarding@resend.dev>', to: [destinataire], subject: `Sauvegarde CHF — ${dossier}`,
+          text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR', { timeZone: FUSEAU_HAITI })} envoyée sur Backblaze B2 (bucket "${process.env.B2_BUCKET_NAME}") : ${manifeste.totalLignes} lignes, ${manifeste.totalFichiers} fichiers compressés.\n\nPas de pièce jointe — regarde/télécharge les fichiers directement depuis ton tableau de bord Backblaze si besoin.`,
+        }),
+      });
+    },
+  };
+}
 
-  // Notification email best-effort, SANS pièce jointe (le fichier vit sur B2, pas de limite de
-  // taille à surveiller ici) — un échec de cette étape ne doit jamais annuler le succès B2
-  // ci-dessus, juste rester dans les logs.
-  try {
-    const cleApi = process.env.RESEND_API_KEY;
-    const destinataire = process.env.EMAIL_SAUVEGARDE_DESTINATAIRE;
-    if (!cleApi || !destinataire) return;
-    await appelB2('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cleApi}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: 'Sauvegarde CHF <onboarding@resend.dev>',
-        to: [destinataire],
-        subject: `Sauvegarde CHF — ${nomFichier}`,
-        text: `Sauvegarde automatique du ${new Date().toLocaleDateString('fr-FR', { timeZone: FUSEAU_HAITI })} envoyée sur Backblaze B2 (bucket "${process.env.B2_BUCKET_NAME}").\n\nPas de pièce jointe cette fois — regarde/télécharge le fichier directement depuis ton tableau de bord Backblaze si besoin.`,
-      }),
-    });
-  } catch (e) {
-    console.warn(`⚠️ Copie B2 réussie, mais la notification email a échoué (sans impact sur la sauvegarde) : ${e.message}`);
-  }
+// ============================================================
+// RESTAURATION DEPUIS UNE SAUVEGARDE AUTOMATIQUE (13/09) — jusqu'ici la sauvegarde s'écrivait
+// fidèlement chaque nuit (voir sauvegarderVersStorage ci-dessus, confirmé fonctionnel le 11/09),
+// mais RIEN ne savait la relire : le seul bouton "Restore" côté app (AppHospitaliere.js) attendait
+// un format totalement différent (l'ancien export manuel chiffré, { verifications, ongTargets,
+// medicaments, actes } — sans même paiements) et affichait "Restauration terminée" même quand 0
+// ligne avait été touchée. Testé pour de vrai le 13/09 : base Supabase jetable + vraie sauvegarde
+// tirée du bucket + comptage table par table (voir NOTES_POUR_PROCHAIN_CLAUDE.md).
+//
+// Ordre de restauration : respecte les FK entre les 17 tables sauvegardées (recoupé le 13/09 dans
+// information_schema.table_constraints) — dossiers→episodes→fiches→paiements est la seule vraie
+// chaîne ; pieces_jointes/transferts_service/demandes_exoneration dépendent chacune d'UNE seule
+// des 4 précédentes, jamais entre elles ; les 10 autres tables n'ont aucune dépendance. Clé
+// primaire précisée quand ce n'est pas "id" (catalog: type, invitations: token,
+// decrements_stock_appliques: local_id).
+const ORDRE_RESTAURATION = [
+  // ong_partenaires EN PREMIER (16/10, essai de restauration) : le déclencheur rattacher_partenaire_id retrouve l'identifiant du partenaire d'après son NOM à chaque insertion
+  // d'épisode ou de paiement ; restauré après eux, le partenaire n'existait pas encore et l'identifiant restait vide.
+  ['ong_partenaires', 'id'], ['dossiers', 'id'], ['episodes', 'id'], ['fiches', 'id'], ['paiements', 'id'],
+  ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
+  ['catalog', 'type'], ['cloture_caisse', 'id'], ['users', 'id'],
+  ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
+  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
+  ['doublons_ignores', 'dossier_a,dossier_b'], ['migrations_appliquees', 'nom'],
+];
+
+const serviceSauvegarde = creerServiceSauvegarde({
+  supabase, bucket: BUCKET_SAUVEGARDES, tables: TABLES_A_SAUVEGARDER, clesPrimaires: CLE_PRIMAIRE_SAUVEGARDE, ordreRestauration: ORDRE_RESTAURATION,
+  ouvrirCopieHorsSite: ouvrirSessionB2, journal: console, fuseau: FUSEAU_HAITI,
+});
+
+// Une seule sauvegarde à la fois : le minuteur de 6h UTC, le rattrapage au réveil et le bouton « Tester la sauvegarde » peuvent tomber au même moment.
+let sauvegardeEnCours = null;
+function sauvegarderVersStorage() {
+  if (sauvegardeEnCours) return sauvegardeEnCours;
+  sauvegardeEnCours = serviceSauvegarde.sauvegarder().finally(() => { sauvegardeEnCours = null; });
+  return sauvegardeEnCours;
 }
 
 // Corps de la sauvegarde quotidienne, partagé par les DEUX déclencheurs : le minuteur de 6h UTC
@@ -3773,15 +3730,17 @@ async function executerSauvegardeQuotidienne(origine) {
     if (resultat.tablesEnEchec && resultat.tablesEnEchec.length > 0) {
       await envoyerCallMeBot(`⚠️ CHF : sauvegarde faite, mais ${resultat.tablesEnEchec.length} table(s) n'ont PAS pu être sauvegardées — ${resultat.tablesEnEchec.join(' ; ')}`);
     }
+    // Relecture de ce qui vient d'être écrit (sommes de contrôle, comptage des lignes) : une sauvegarde abîmée à l'envoi se découvre ce soir, pas le jour de la restauration.
+    if (resultat.verification && !resultat.verification.ok) {
+      await envoyerCallMeBot(`⚠️ CHF : la sauvegarde du jour est écrite mais sa RELECTURE a trouvé un problème — ${(resultat.verification.erreurs || []).slice(0, 3).join(' ; ')}`);
+    }
     // Copie hors Supabase (02/09) — échec séparé de la sauvegarde principale : Supabase a déjà
     // sa copie, celle-ci n'en est qu'une seconde. Un échec ici mérite quand même une alerte : une
     // copie hors site qui ne part plus, en silence, pendant des semaines n'a plus aucune valeur
     // le jour où on en a besoin.
-    try {
-      await envoyerCopieHorsSupabase(resultat.fichier, resultat.contenuBuffer);
-    } catch (e) {
-      console.error('❌ Échec de la copie de sauvegarde par email :', e.message);
-      await envoyerCallMeBot(`⚠️ CHF : sauvegarde Supabase faite, mais la copie par email a échoué (${e.message}).`);
+    if (resultat.copie && resultat.copie.erreur) {
+      console.error('❌ Échec de la copie de sauvegarde hors Supabase :', resultat.copie.erreur);
+      await envoyerCallMeBot(`⚠️ CHF : sauvegarde Supabase faite, mais la copie hors Supabase a échoué (${resultat.copie.erreur}).`);
     }
   } catch (e) {
     console.error(`❌ Échec de la sauvegarde automatique (${origine}) :`, e.message);
@@ -3812,14 +3771,7 @@ cron.schedule('0 6 * * *', () => executerSauvegardeQuotidienne('minuteur 6h UTC'
 // pas de sauvegarde. Mais un jour sans utilisation est aussi un jour sans nouvelle donnée.
 const DELAI_RATTRAPAGE_DEMARRAGE_MS = 30000;
 
-async function sauvegardeDuJourExisteDeja() {
-  // Même format de nom que sauvegarderVersStorage (en-CA = YYYY-MM-DD), et même fuseau : comparer
-  // avec la date UTC ferait rater/refaire une sauvegarde entre 20h et minuit heure d'Haïti.
-  const aujourdhui = new Date().toLocaleDateString('en-CA', { timeZone: FUSEAU_HAITI });
-  const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
-  if (error) throw new Error(error.message);
-  return (fichiers || []).some(f => f.name === `backup-${aujourdhui}.json`);
-}
+const sauvegardeDuJourExisteDeja = () => serviceSauvegarde.sauvegardeDuJourExisteDeja(); // une sauvegarde COMPLÈTE (avec manifeste) datée d'aujourd'hui, heure d'Haïti
 
 async function rattraperSauvegardeAuDemarrage() {
   try {
@@ -4026,26 +3978,15 @@ app.post('/api/admin/backup-manuel', async (req, res) => {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
   // Log d'entrée (09/09) : sans ça, un clic sur "Tester la sauvegarde" ne laisse AUCUNE trace
-  // dans les logs Render en cas de succès (sauvegarderVersStorage()/envoyerCopieHorsSupabase() ne
-  // logguent que leurs propres échecs) — impossible de distinguer "il n'a jamais cliqué"/"la
+  // dans les logs Render en cas de succès — impossible de distinguer "il n'a jamais cliqué"/"la
   // requête n'est jamais arrivée jusqu'ici" de "elle est arrivée mais qqch a échoué en silence".
   console.log(`🧪 Sauvegarde manuelle demandée par ${req.user.email || req.user.id}...`);
   try {
     const resultat = await sauvegarderVersStorage();
     console.log(`✅ Sauvegarde manuelle vers Storage réussie : ${resultat.fichier}`);
-    // La copie hors Supabase (B2) suit le même sort qu'à 6h UTC : un échec ici ne doit jamais
-    // transformer un succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour
-    // vérifier que tout fonctionne) mérite de savoir si cette 2e copie est vraiment partie, pas
-    // seulement la 1re. Champs renommés le 10/09 (B2 a remplacé l'email comme copie hors
-    // Supabase) — copieEnvoyee/erreurCopie, plus copieEnvoyee/erreurEmail qui ne décrivaient plus
-    // ce qui se passait réellement une fois l'email réduit à une simple notification.
-    let copieEnvoyee = false, erreurCopie = null;
-    try {
-      await envoyerCopieHorsSupabase(resultat.fichier, resultat.contenuBuffer);
-      copieEnvoyee = true;
-    } catch (e) { erreurCopie = e.message; }
-    const { contenuBuffer, ...resultatSansBuffer } = resultat;
-    res.json({ success: true, ...resultatSansBuffer, copieEnvoyee, erreurCopie });
+    // La copie hors Supabase (B2) ne transforme jamais un succès Supabase réel en 500 — mais l'appelant (qui a justement cliqué pour vérifier que tout fonctionne) mérite de
+    // savoir si cette 2e copie est vraiment partie, pas seulement la 1re (champs copieEnvoyee / erreurCopie, lus par l'écran).
+    res.json({ success: true, ...resultat, copieEnvoyee: !!resultat.copie.envoyee, erreurCopie: resultat.copie.erreur });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -4060,140 +4001,43 @@ app.get('/api/admin/derniere-sauvegarde', async (req, res) => {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
   try {
-    const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
-    if (error) throw new Error(error.message);
-    if (!fichiers || fichiers.length === 0) return res.json({ date: null });
-    const plusRecent = fichiers.sort((a, b) => b.name.localeCompare(a.name))[0];
-    const date = (plusRecent.name.match(/backup-(\d{4}-\d{2}-\d{2})/) || [])[1] || null;
-    res.json({ date });
+    res.json({ date: await serviceSauvegarde.dateDerniereSauvegarde() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ============================================================
-// RESTAURATION DEPUIS UNE SAUVEGARDE AUTOMATIQUE (13/09) — jusqu'ici la sauvegarde s'écrivait
-// fidèlement chaque nuit (voir sauvegarderVersStorage ci-dessus, confirmé fonctionnel le 11/09),
-// mais RIEN ne savait la relire : le seul bouton "Restore" côté app (AppHospitaliere.js) attendait
-// un format totalement différent (l'ancien export manuel chiffré, { verifications, ongTargets,
-// medicaments, actes } — sans même paiements) et affichait "Restauration terminée" même quand 0
-// ligne avait été touchée. Testé pour de vrai le 13/09 : base Supabase jetable + vraie sauvegarde
-// tirée du bucket + comptage table par table (voir NOTES_POUR_PROCHAIN_CLAUDE.md).
-//
-// Ordre de restauration : respecte les FK entre les 17 tables sauvegardées (recoupé le 13/09 dans
-// information_schema.table_constraints) — dossiers→episodes→fiches→paiements est la seule vraie
-// chaîne ; pieces_jointes/transferts_service/demandes_exoneration dépendent chacune d'UNE seule
-// des 4 précédentes, jamais entre elles ; les 10 autres tables n'ont aucune dépendance. Clé
-// primaire précisée quand ce n'est pas "id" (catalog: type, invitations: token,
-// decrements_stock_appliques: local_id).
-const ORDRE_RESTAURATION = [
-  ['dossiers', 'id'], ['episodes', 'id'], ['fiches', 'id'], ['paiements', 'id'],
-  ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
-  ['catalog', 'type'], ['cloture_caisse', 'id'], ['ong_partenaires', 'id'], ['users', 'id'],
-  ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
-  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
-];
-const TAILLE_LOT_RESTAURATION = 500;
-
-function decouperEnLots(tableau, taille) {
-  const lots = [];
-  for (let i = 0; i < tableau.length; i += taille) lots.push(tableau.slice(i, i + taille));
-  return lots;
-}
-
-// Restaure UNIQUEMENT ce qui manque — jamais un vrai retour dans le temps (rien n'écrase une ligne
-// déjà présente, même si son contenu a changé depuis la sauvegarde) : Supabase (PostgREST, pas une
-// connexion SQL directe) ne permet pas d'ouvrir une vraie transaction multi-tables ici, donc
-// écraser serait risquer de perdre une modification plus récente que le fichier pour un gain nul —
-// une ligne déjà là aujourd'hui est forcément plus récente ou identique à celle de la sauvegarde
-// (le fichier date d'hier soir au plus tôt). N'affirme JAMAIS un succès sans l'avoir vérifié :
-// chaque insertion relit le nombre de lignes RÉELLEMENT écrites (même piège que le reste du projet,
-// audit du 31/08). Un lot entier refusé (souvent une seule ligne fautive, ex: contrainte violée) est
-// retenté ligne par ligne — sinon une seule mauvaise ligne bloquerait les 499 bonnes du même lot,
-// même philosophie que "une sauvegarde partielle vaut mieux que pas de sauvegarde" plus haut.
-async function restaurerDepuisSauvegarde(contenu) {
-  const rapport = [];
-  for (const [table, colonneId] of ORDRE_RESTAURATION) {
-    const lignes = contenu[table];
-    if (!Array.isArray(lignes) || lignes.length === 0) {
-      rapport.push({ table, lignesSauvegarde: 0, dejaPresentes: 0, inserees: 0, lignesEnEchec: [] });
-      continue;
-    }
-    try {
-      // Ids déjà en base : lus EN ENTIER, page par page, colonne clé seule (25/09, audit avant mise
-      // en production). Avant : un `.in(colonneId, lot)` par lot de 500 ids — tous DANS l'URL, soit
-      // ~19 ko pour 500 UUID, au-delà de ce qu'acceptent PostgREST/son proxy (voir TAILLE_LOT_IDS,
-      // qui s'en tient à 200). Le jour où une table dépassait 500 lignes, sa restauration échouait
-      // en bloc — précisément le jour où on en aurait eu besoin. Lire toute la colonne n'a aucune
-      // limite de taille d'URL, et reste léger (une seule colonne, 500 lignes par requête).
-      const idsExistants = new Set();
-      try {
-        const existants = await lireToutesLesPages(() => supabase.from(table).select(colonneId).order(colonneId));
-        existants.forEach(r => idsExistants.add(r[colonneId]));
-      } catch (error) {
-        throw new Error(`Lecture des lignes déjà présentes : ${error.message}`);
-      }
-      const aInserer = lignes.filter(l => !idsExistants.has(l[colonneId]));
-      const dejaPresentes = lignes.length - aInserer.length;
-
-      let inserees = 0;
-      const lignesEnEchec = [];
-      for (const lot of decouperEnLots(aInserer, TAILLE_LOT_RESTAURATION)) {
-        if (lot.length === 0) continue;
-        const { data, error } = await supabase.from(table).insert(lot).select(colonneId);
-        if (!error) { inserees += (data || []).length; continue; }
-        for (const ligne of lot) {
-          const { data: d2, error: e2 } = await supabase.from(table).insert([ligne]).select(colonneId);
-          if (e2) lignesEnEchec.push({ id: ligne[colonneId], erreur: e2.message });
-          else inserees += (d2 || []).length;
-        }
-      }
-      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes, inserees, lignesEnEchec });
-    } catch (e) {
-      rapport.push({ table, lignesSauvegarde: lignes.length, dejaPresentes: 0, inserees: 0, lignesEnEchec: [{ id: null, erreur: e.message }] });
-    }
-  }
-  return rapport;
-}
+// (La liste ORDRE_RESTAURATION et la restauration vivent plus haut, avec la sauvegarde — voir utils/sauvegardeServeur.js.)
 
 // Liste les sauvegardes disponibles dans Storage — alimente le sélecteur côté app (jamais une
 // restauration "à l'aveugle" sur la dernière en date sans que l'admin choisisse explicitement).
+// 16/10 : anciens fichiers backup-AAAA-MM-JJ.json (format 1) ET dossiers backup-AAAA-MM-JJ (format 2, seulement s'ils sont COMPLETS).
 app.get('/api/admin/sauvegardes', async (req, res) => {
   if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
-  const { data: fichiers, error } = await supabase.storage.from(BUCKET_SAUVEGARDES).list();
-  if (error) return res.status(500).json({ error: error.message });
-  res.json((fichiers || [])
-    .filter(f => f.name.startsWith('backup-'))
-    .sort((a, b) => b.name.localeCompare(a.name))
-    .map(f => ({ nom: f.name, taille: (f.metadata && f.metadata.size) || null, creeLe: f.created_at || null })));
+  try {
+    res.json(await serviceSauvegarde.listerSauvegardes());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
+// Corps : { fichier, verifierSeulement? }. verifierSeulement: true relit la sauvegarde (sommes de contrôle, décompression, comptage) SANS rien écrire — le test à faire régulièrement.
 app.post('/api/admin/restaurer-sauvegarde', async (req, res) => {
   if (!(await aPermission(req.user.id, 'sauvegarde_gerer'))) {
     return res.status(403).json({ error: "Permission 'sauvegarde_gerer' requise." });
   }
-  const { fichier } = req.body;
-  if (!fichier) return res.status(400).json({ error: 'fichier requis (voir GET /api/admin/sauvegardes).' });
-  console.log(`🧪 Restauration depuis sauvegarde demandée par ${req.user.email || req.user.id} : ${fichier}`);
+  const { fichier, verifierSeulement } = req.body || {};
+  if (!fichier || typeof fichier !== 'string') return res.status(400).json({ error: 'fichier requis (voir GET /api/admin/sauvegardes).' });
+  console.log(`🧪 ${verifierSeulement === true ? 'Vérification' : 'Restauration'} de sauvegarde demandée par ${req.user.email || req.user.id} : ${fichier}`);
   try {
-    const { data: blob, error: erreurTelechargement } = await supabase.storage.from(BUCKET_SAUVEGARDES).download(fichier);
-    if (erreurTelechargement) throw new Error(`Téléchargement : ${erreurTelechargement.message}`);
-    const texte = await blob.text();
-    let contenu;
-    try { contenu = JSON.parse(texte); }
-    catch (e) { throw new Error("Le fichier n'est pas un JSON valide."); }
-    if (!contenu || typeof contenu !== 'object' || !ORDRE_RESTAURATION.some(([table]) => Array.isArray(contenu[table]))) {
-      throw new Error("Ce fichier ne ressemble pas à une sauvegarde automatique (aucune des tables attendues n'y figure).");
-    }
-    const rapport = await restaurerDepuisSauvegarde(contenu);
-    const totalInsere = rapport.reduce((s, r) => s + r.inserees, 0);
-    const totalEnEchec = rapport.reduce((s, r) => s + r.lignesEnEchec.length, 0);
-    console.log(`${totalEnEchec > 0 ? '⚠️' : '✅'} Restauration ${fichier} : ${totalInsere} ligne(s) insérée(s), ${totalEnEchec} en échec.`);
+    const resultat = await serviceSauvegarde.restaurer(fichier, { verifierSeulement: verifierSeulement === true });
+    if (resultat.verification) return res.json(resultat);
+    console.log(`${resultat.totalEnEchec > 0 ? '⚠️' : '✅'} Restauration ${fichier} : ${resultat.totalInsere} ligne(s) insérée(s), ${resultat.totalEnEchec} en échec.`);
     // Pas de champ "success" générique volontairement — l'appelant DOIT lire rapport/totalInsere/
     // totalEnEchec, jamais afficher "réussi" sans avoir vraiment regardé ce qui a été écrit.
-    res.json({ fichier, rapport, totalInsere, totalEnEchec });
+    res.json(resultat);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

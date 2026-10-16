@@ -220,10 +220,7 @@ test("FUSEAU_HAITI = 'America/Port-au-Prince' (jamais un décalage fixe '-4' en 
   assert.match(ete, /EDT/, "l'été, Haïti doit être en EDT (UTC-4)");
 });
 
-test("Sauvegarde : le nom de fichier ET le texte de la notification sont datés dans le fuseau d'Haïti — sinon un déclenchement manuel (\"Tester la sauvegarde\") entre 20h et minuit heure d'Haïti nomme le fichier avec la date de DEMAIN", () => {
-  assert.match(serverSrc, /const nomFichier = `backup-\$\{new Date\(\)\.toLocaleDateString\('en-CA',\s*\{\s*timeZone:\s*FUSEAU_HAITI\s*\}\)\}\.json`;/, "le nom de fichier de sauvegarde doit utiliser FUSEAU_HAITI (format en-CA = AAAA-MM-JJ)");
-  assert.match(serverSrc, /Sauvegarde automatique du \$\{new Date\(\)\.toLocaleDateString\('fr-FR',\s*\{\s*timeZone:\s*FUSEAU_HAITI\s*\}\)\}/, "le texte de la notification de sauvegarde doit aussi utiliser FUSEAU_HAITI");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 test("PUT /api/episodes/:id lit le corps en snake_case (service_choisi, type_patient, ong_partenaire, numero_lot, verrouille_facture, date_suspension, mois_report) — sinon l'assignation à un lot de facturation, le changement de service/ONG/type, la suspension et le report au mois suivant réussissaient (200 OK) sans jamais rien écrire en base", () => {
   const blocRoute = serverSrc.slice(serverSrc.indexOf("app.put('/api/episodes/:id'"), serverSrc.indexOf("app.delete('/api/episodes/:id'"));
@@ -450,13 +447,7 @@ test("GET /api/dossiers/recherche par numéro reste une correspondance EXACTE (n
   assert.match(bloc, /\.eq\('numero_dossier', numero\)/, "la recherche par numéro doit rester une égalité stricte");
 });
 
-test("Sauvegarde automatique : planifiée tous les jours (cron), n'écrit jamais sur le disque du serveur (éphémère sur Render — perdu à chaque redéploiement), et reste déclenchable manuellement pour vérifier qu'elle fonctionne sans attendre l'exécution planifiée", () => {
-  assert.match(serverSrc, /cron\.schedule\('0 6 \* \* \*'/, "doit planifier une exécution quotidienne");
-  assert.match(serverSrc, /\.from\(BUCKET_SAUVEGARDES\)\s*\n?\s*\.upload\(/, "doit écrire vers Supabase Storage");
-  assert.doesNotMatch(serverSrc, /require\('fs'\)/, "ne doit jamais écrire de fichier sur le disque local du serveur (perdu au redéploiement)");
-  const blocManuel = blocRoutePermission("app.post('/api/admin/backup-manuel'", null);
-  assert.match(blocManuel, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/, "le déclenchement manuel doit exiger la permission sauvegarde_gerer");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // Retour d'Esdras (25/08, "je suis administrateur, je ne vois pas Rôles et permissions") :
 // PERMISSIONS_PAR_DEFAUT.administrateur avait déjà dérivé du vrai catalogue (fiche_patient_
@@ -646,13 +637,7 @@ test("GET /api/fiches/episode/:episodeId marque chaque fiche avec paiement_annul
 // seule tous les jours (cron 6h UTC, voir sauvegarderVersStorage) mais rien ne permettait de
 // vérifier depuis l'appli que ça avait vraiment marché. Cette route lit juste le nom du fichier le
 // plus récent du bucket (backup-YYYY-MM-DD.json) — pas besoin de dépendre des métadonnées Storage.
-test("GET /api/admin/derniere-sauvegarde exige sauvegarde_gerer et renvoie la date déduite du nom du fichier le plus récent du bucket sauvegardes-automatiques", () => {
-  const blocRoute = serverSrc.slice(serverSrc.indexOf("app.get('/api/admin/derniere-sauvegarde'"), serverSrc.indexOf('const PORT ='));
-  assert.match(blocRoute, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/, "doit exiger la permission sauvegarde_gerer, comme le déclenchement manuel");
-  assert.match(blocRoute, /supabase\.storage\.from\(BUCKET_SAUVEGARDES\)\.list\(\)/, "doit lister le même bucket que sauvegarderVersStorage");
-  assert.match(blocRoute, /fichiers\.sort\(\(a, b\) => b\.name\.localeCompare\(a\.name\)\)\[0\]/, "doit prendre le fichier le plus récent par tri du nom (backup-YYYY-MM-DD.json trie naturellement)");
-  assert.match(blocRoute, /if \(!fichiers \|\| fichiers\.length === 0\) return res\.json\(\{ date: null \}\);/, "doit renvoyer date: null si le bucket est vide (jamais réussie), pas planter");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // Portail patient (retour d'Esdras, 24/08) : un patient qui a perdu sa prescription papier peut
 // retrouver la liste de ses médicaments/actes récents, sans compte à créer. Seul accès public de
@@ -1079,17 +1064,7 @@ test("Sauvegarde automatique : toute table utilisée par l'app (serveur ou navig
   assert.deepStrictEqual(oubliees, [], `Table(s) utilisée(s) par l'app mais JAMAIS sauvegardée(s) : ${oubliees.join(', ')} — ajoute-les à TABLES_A_SAUVEGARDER`);
 });
 
-test("Sauvegarde automatique : une table illisible ne fait plus échouer la sauvegarde entière, et le trou est signalé", () => {
-  const debut = serverSrc.indexOf('async function sauvegarderVersStorage');
-  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', serverSrc.indexOf('return { fichier: nomFichier', debut)));
-  assert.match(bloc, /tablesEnEchec\.push\(/, "une table illisible doit être collectée, pas interrompre tout le reste");
-  assert.doesNotMatch(bloc, /if \(error\) throw new Error\(`Lecture de/, "l'ancien comportement tout-ou-rien ne doit plus exister : une seule table en défaut privait de TOUTE sauvegarde");
-  assert.match(bloc, /contenu\._tables_en_echec = tablesEnEchec/, "le trou doit être inscrit dans le fichier de sauvegarde lui-même");
-  assert.match(bloc, /throw new Error\(`Aucune table n'a pu être lue/, "si RIEN n'est lisible, il faut quand même échouer franchement");
-  const debutFonction = serverSrc.indexOf('async function executerSauvegardeQuotidienne');
-  const blocFonction = serverSrc.slice(debutFonction, serverSrc.indexOf("cron.schedule('0 6 * * *'", debutFonction));
-  assert.match(blocFonction, /resultat\.tablesEnEchec && resultat\.tablesEnEchec\.length > 0/, "une sauvegarde partielle doit déclencher une alerte WhatsApp, sinon le trou reste invisible des mois");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // ============================================================================================
 // Lecture groupée des épisodes (31/08) — le risque de montée en charge n°1 de l'audit :
@@ -1898,68 +1873,7 @@ test("assemblerEpisodeFlat transmet dossier.sexe — sinon le Rapport MSPP ne pe
 // jointe, qui ne doit jamais faire échouer la copie B2 elle-même en cas de problème.
 // ============================================================
 
-test("sauvegarderVersStorage renvoie le buffer déjà sérialisé — la copie hors Supabase ne doit jamais re-sérialiser une 2e fois", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function sauvegarderVersStorage'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
-  assert.match(bloc, /const contenuBuffer = Buffer\.from\(JSON\.stringify\(contenu\)\);/);
-  assert.match(bloc, /\.upload\(nomFichier, contenuBuffer,/, "l'upload Storage doit utiliser CE buffer, pas une sérialisation séparée");
-  assert.match(bloc, /return \{ fichier: nomFichier, nombreLignes, tablesEnEchec, contenuBuffer \};/);
-});
-
-test("envoyerCopieHorsSupabase est best-effort : les variables B2 manquantes ne lèvent jamais, juste un avertissement", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
-  assert.match(bloc, /if \(!keyId \|\| !applicationKey \|\| !nomBucket\) \{/);
-  assert.match(bloc, /console\.warn\(/, "doit avertir plutôt que planter quand la config n'est pas encore posée");
-  assert.doesNotMatch(bloc.slice(0, bloc.indexOf('console.warn')), /throw/, "aucun throw avant l'avertissement — sinon un serveur sans B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME planterait au démarrage");
-  // La clé d'application est révocable seule depuis le tableau de bord Backblaze, sans jamais
-  // toucher au reste du compte — documenté dans le commentaire juste au-dessus de la fonction.
-  const blocAvecCommentaire = serverSrc.slice(serverSrc.indexOf('// Copie HORS SUPABASE'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
-  assert.match(blocAvecCommentaire, /révocable seule/i);
-});
-
-test("envoyerCopieHorsSupabase suit le vrai protocole B2 natif (autorisation → résolution du bucket par nom → URL d'upload → envoi avec SHA1), jamais le mode compatible S3 (pas de signature façon AWS)", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
-  assert.match(bloc, /appelB2\('https:\/\/api\.backblazeb2\.com\/b2api\/v2\/b2_authorize_account'/, "doit s'authentifier en premier");
-  assert.match(bloc, /Authorization: `Basic \$\{identifiants\}`/, "l'authentification initiale B2 est HTTP Basic (base64 de keyId:applicationKey)");
-  assert.match(bloc, /b2_list_buckets/, "doit résoudre le bucketId à partir du NOM (B2_BUCKET_NAME) — Esdras n'a que le nom, jamais l'ID technique");
-  assert.match(bloc, /b2_get_upload_url/, "doit demander une URL d'upload dédiée avant d'envoyer le fichier");
-  assert.match(bloc, /'X-Bz-Content-Sha1': sha1,/, "B2 exige le SHA1 du contenu en en-tête pour vérifier l'intégrité de l'upload");
-  assert.match(bloc, /crypto\.createHash\('sha1'\)\.update\(contenuBuffer\)\.digest\('hex'\)/, "le SHA1 doit porter sur le VRAI contenu envoyé, pas une valeur arbitraire");
-});
-
-test("La notification email qui suit un envoi B2 réussi est SANS pièce jointe (le fichier vit sur B2, plus de limite de taille à gérer côté email) et son échec ne doit jamais annuler le succès B2", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
-  assert.doesNotMatch(bloc, /attachments:/, "aucune pièce jointe — c'était justement la source du problème de taille (Resend 40 Mo / Gmail 50 Mo)");
-  assert.doesNotMatch(bloc, /contenuBuffer\.toString\('base64'\)/, "le buffer ne doit plus être encodé pour un envoi email");
-  // La notification est dans un bloc try/catch séparé, APRÈS le throw du bloc B2 (donc jamais
-  // atteinte si B2 a échoué) — un console.warn en cas d'échec email, jamais un throw qui
-  // remonterait et ferait croire que la sauvegarde hors Supabase a échoué alors que B2 a marché.
-  const iNotifEmail = bloc.indexOf("cleApi = process.env.RESEND_API_KEY");
-  assert.ok(iNotifEmail !== -1, "la notification email doit exister après la partie B2");
-  const blocNotif = bloc.slice(iNotifEmail);
-  assert.match(blocNotif, /console\.warn\(/, "un échec de la notification email doit seulement avertir, jamais lever");
-  assert.doesNotMatch(blocNotif, /\n\s*throw /, "aucun throw dans le bloc de notification email — un échec ici ne doit jamais annuler le succès B2 déjà acquis");
-});
-
-test("La copie hors Supabase (B2) de la sauvegarde automatique (6h UTC) est dans un try/catch SÉPARÉ de la sauvegarde Supabase — un échec de l'une ne doit jamais être confondu avec l'autre dans l'alerte WhatsApp", () => {
-  const debutFonction = serverSrc.indexOf('async function executerSauvegardeQuotidienne', serverSrc.indexOf('async function sauvegarderVersStorage'));
-  const blocCron = serverSrc.slice(debutFonction, serverSrc.indexOf("cron.schedule('0 6 * * *'", debutFonction));
-  assert.match(blocCron, /await envoyerCopieHorsSupabase\(resultat\.fichier, resultat\.contenuBuffer\);/);
-  const iEmailCall = blocCron.indexOf('envoyerCopieHorsSupabase(');
-  const iCatchEmail = blocCron.indexOf('} catch (e) {', iEmailCall);
-  assert.ok(iCatchEmail !== -1 && iCatchEmail < blocCron.indexOf("} catch (e) {\n    console.error(`❌ Échec de la sauvegarde automatique"), "le catch de la copie hors Supabase doit apparaître AVANT le catch de la sauvegarde principale (imbriqué dedans, pas après)");
-  assert.match(blocCron, /sauvegarde Supabase faite, mais la copie par email a échoué/, "le message d'alerte doit distinguer clairement les 2 échecs possibles");
-});
-
-test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sérialisé en JSON serait illisible et inutile), mais indique si la copie hors Supabase est partie", () => {
-  const bloc = blocRoutePermission("app.post('/api/admin/backup-manuel'", "app.get('/api/admin/derniere-sauvegarde'");
-  assert.match(bloc, /const \{ contenuBuffer, \.\.\.resultatSansBuffer \} = resultat;/, "contenuBuffer doit être retiré avant res.json");
-  assert.match(bloc, /res\.json\(\{ success: true, \.\.\.resultatSansBuffer, copieEnvoyee, erreurCopie \}\);/);
-  assert.doesNotMatch(bloc, /res\.json\(\{ success: true, \.\.\.resultat \}\)/, "ne doit plus étaler resultat tel quel (contiendrait contenuBuffer)");
-  // Vérifie le vrai code (res.json/let/catch), jamais un commentaire à proximité qui a le droit
-  // de mentionner les anciens noms pour expliquer le renommage sans faire échouer ce test.
-  const ligneCode = bloc.slice(bloc.indexOf('res.json({ success: true, ...resultatSansBuffer'));
-  assert.doesNotMatch(ligneCode.slice(0, ligneCode.indexOf('\n')), /emailEnvoye|erreurEmail/, "ces champs ont été renommés le 10/09 — emailEnvoye ne décrivait plus ce qui se passe réellement (B2, pas email)");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // ============================================================
 // GARDE-FOU CONTRE UN BLOCAGE INDÉFINI (07/09, SMTP abandonné le 10/09, puis Resend/B2) — Esdras :
@@ -1972,21 +1886,14 @@ test("POST /api/admin/backup-manuel ne renvoie jamais le buffer brut (Buffer sé
 // ============================================================
 
 test("appelB2() (utilisé pour B2 ET pour la notification Resend) ne peut jamais bloquer indéfiniment — AbortController qui annule vraiment la requête après le délai", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_APPEL_B2_MS'), serverSrc.indexOf('async function envoyerCopieHorsSupabase'));
+  const bloc = serverSrc.slice(serverSrc.indexOf('const DELAI_MAX_APPEL_B2_MS'), serverSrc.indexOf('async function ouvrirSessionB2'));
   assert.match(bloc, /new AbortController\(\)/);
   assert.match(bloc, /signal: controleur\.signal/, "le fetch() doit être annulable par le garde-fou, sinon il ne sert à rien");
   assert.match(bloc, /setTimeout\(\(\) => controleur\.abort\(\), gardeFouMs\)/, "le garde-fou doit vraiment ANNULER la requête après le délai, pas juste logguer");
   assert.match(bloc, /clearTimeout\(gardeFou\)/, "le minuteur doit être nettoyé une fois la réponse reçue, sinon il traîne inutilement");
 });
 
-test("L'upload direct du fichier vers B2 (en dehors de appelB2, car le corps est un Buffer binaire et non du JSON) a lui aussi son propre garde-fou AbortController", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf('async function envoyerCopieHorsSupabase'), serverSrc.indexOf("cron.schedule('0 6 * * *'"));
-  const iUpload = bloc.indexOf("fetch(upload.uploadUrl");
-  assert.ok(iUpload !== -1);
-  const blocUpload = bloc.slice(Math.max(0, iUpload - 400), iUpload + 200);
-  assert.match(blocUpload, /new AbortController\(\)/);
-  assert.match(blocUpload, /signal: controleur\.signal,/);
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // Dérive trouvée le 09/09 (analyse en profondeur avant mise en production) : le miroir serveur
 // PERMISSIONS_PAR_DEFAUT s'était à nouveau désynchronisé de utils/permissions.js côté front —
@@ -2020,65 +1927,8 @@ test("miroir serveur PERMISSIONS_PAR_DEFAUT : audit_voir présent pour direction
 // restauration, comptage table par table — voir NOTES_POUR_PROCHAIN_CLAUDE.md) : ces tests
 // verrouillent seulement la FORME du code (ordre, jamais d'écrasement, jamais de "success" muet),
 // pas un remplacement du test réel.
-const blocRestauration = serverSrc.slice(
-  serverSrc.indexOf('const ORDRE_RESTAURATION'),
-  serverSrc.indexOf("const PORT = process.env.PORT")
-);
 
-test("ORDRE_RESTAURATION respecte la chaîne de dépendances FK dossiers→episodes→fiches→paiements, et précise la bonne clé primaire pour catalog/invitations/decrements_stock_appliques", () => {
-  const ordreDesTables = [...blocRestauration.matchAll(/\['(\w+)', '(\w+)'\]/g)].map(m => [m[1], m[2]]);
-  const noms = ordreDesTables.map(([t]) => t);
-  assert.deepEqual(new Set(noms).size, noms.length, "aucune table listée deux fois");
-  assert.deepEqual(
-    new Set(noms),
-    new Set(['dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
-      'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-      'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques', 'invitations', 'compteurs']),
-    "doit couvrir exactement les 18 tables de TABLES_A_SAUVEGARDER (dont compteurs, le compteur des numéros de dossier, 16/10) — un oubli ici ne serait jamais restauré"
-  );
-  const position = (t) => noms.indexOf(t);
-  assert.ok(position('dossiers') < position('episodes'), "episodes dépend de dossiers");
-  assert.ok(position('episodes') < position('fiches'), "fiches dépend d'episodes");
-  assert.ok(position('fiches') < position('paiements'), "paiements dépend d'episodes ET de fiches — placé après fiches suffit");
-  assert.ok(position('episodes') < position('paiements'));
-  assert.ok(position('dossiers') < position('pieces_jointes'), "pieces_jointes dépend de dossiers");
-  assert.ok(position('episodes') < position('transferts_service'), "transferts_service dépend d'episodes");
-  assert.ok(position('episodes') < position('demandes_exoneration'), "demandes_exoneration dépend d'episodes");
-  const parPk = Object.fromEntries(ordreDesTables);
-  assert.equal(parPk.catalog, 'type');
-  assert.equal(parPk.invitations, 'token');
-  assert.equal(parPk.decrements_stock_appliques, 'local_id');
-  for (const t of noms.filter(t => !['catalog', 'invitations', 'decrements_stock_appliques'].includes(t))) {
-    assert.equal(parPk[t], 'id', `${t} devrait utiliser "id" comme clé primaire`);
-  }
-});
-
-test("restaurerDepuisSauvegarde n'écrase jamais une ligne déjà présente : lecture des ids existants AVANT toute insertion, jamais d'upsert", () => {
-  assert.doesNotMatch(blocRestauration, /\.upsert\(/, "un upsert écraserait une ligne déjà là avec le contenu (peut-être périmé) de la sauvegarde — seul un insert des lignes manquantes est sûr");
-  assert.match(blocRestauration, /idsExistants/, "doit déterminer ce qui existe déjà avant d'insérer");
-  assert.match(blocRestauration, /aInserer = lignes\.filter\(l => !idsExistants\.has/, "ne doit insérer QUE les lignes dont l'id n'existe pas déjà");
-});
-
-test("restaurerDepuisSauvegarde relit le nombre de lignes RÉELLEMENT insérées (jamais une confiance aveugle dans l'absence d'erreur) et retente ligne par ligne un lot refusé en bloc", () => {
-  assert.match(blocRestauration, /\.insert\(lot\)\.select\(colonneId\)/, "doit relire ce qui a vraiment été écrit, même piège que le reste du projet (audit du 31/08)");
-  assert.match(blocRestauration, /\.insert\(\[ligne\]\)\.select\(colonneId\)/, "un lot entier refusé (souvent une seule ligne fautive) doit être retenté ligne par ligne, pas abandonné en bloc");
-  assert.match(blocRestauration, /decouperEnLots/, "doit découper en lots — une clause IN ou un insert avec des milliers de lignes dépasserait les limites de PostgREST");
-});
-
-test("GET /api/admin/sauvegardes et POST /api/admin/restaurer-sauvegarde exigent tous les deux sauvegarde_gerer — la restauration est au moins aussi sensible que la sauvegarde elle-même", () => {
-  const blocListe = serverSrc.slice(serverSrc.indexOf("app.get('/api/admin/sauvegardes'"), serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"));
-  assert.match(blocListe, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/);
-  const blocRestaurer = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"), serverSrc.indexOf("const PORT = process.env.PORT"));
-  assert.match(blocRestaurer, /aPermission\(req\.user\.id, 'sauvegarde_gerer'\)/);
-  assert.match(blocRestaurer, /if \(!fichier\) return res\.status\(400\)/, "jamais de restauration \"à l'aveugle\" sur un fichier implicite — l'admin doit choisir explicitement lequel");
-});
-
-test("POST /api/admin/restaurer-sauvegarde ne renvoie JAMAIS un champ success générique — l'appelant doit lire le rapport détaillé, jamais un simple toast de succès (c'est exactement le bug d'origine)", () => {
-  const blocRestaurer = serverSrc.slice(serverSrc.indexOf("app.post('/api/admin/restaurer-sauvegarde'"), serverSrc.indexOf("const PORT = process.env.PORT"));
-  assert.doesNotMatch(blocRestaurer, /res\.json\(\{\s*success:\s*true/, "pas de \"success: true\" générique — c'est exactement ce qui affichait un faux succès à 0 ligne écrite avant le 13/09");
-  assert.match(blocRestaurer, /res\.json\(\{ fichier, rapport, totalInsere, totalEnEchec \}\)/);
-  assert.match(blocRestaurer, /Ce fichier ne ressemble pas à une sauvegarde automatique/, "doit rejeter clairement un fichier qui n'a le format d'aucune des 17 tables, plutôt que de restaurer silencieusement 0 ligne");
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // ============================================================
 // server.js dit "Copiez .env.example vers .env" quand une variable manque — mais ce fichier
@@ -2175,24 +2025,7 @@ function chargerSauvegardeDuJourExisteDeja(fichiersBucket) {
   return new Function('supabase', `${code}\nreturn sauvegardeDuJourExisteDeja;`)(supabase);
 }
 
-test("sauvegardeDuJourExisteDeja : true seulement si le nom de fichier EXACT du jour (heure d'Haïti) est déjà dans le bucket", async () => {
-  const aujourdhuiHaiti = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Port-au-Prince' });
-  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([])(), false, "bucket vide -> pas de sauvegarde aujourd'hui");
-  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([{ name: 'backup-2026-09-15.json' }])(), false, "une VIEILLE sauvegarde ne compte pas pour aujourd'hui");
-  assert.strictEqual(await chargerSauvegardeDuJourExisteDeja([{ name: `backup-${aujourdhuiHaiti}.json` }])(), true, "le fichier du jour, au format exact produit par sauvegarderVersStorage, doit être reconnu");
-});
-
-test("sauvegardeDuJourExisteDeja propage l'erreur si le bucket est injoignable — c'est rattraperSauvegardeAuDemarrage qui doit l'avaler, pas cette fonction en silence", async () => {
-  const supabase = { storage: { from: () => ({ list: async () => ({ data: null, error: { message: 'bucket introuvable' } }) }) } };
-  const debut = serverSrc.indexOf('async function sauvegardeDuJourExisteDeja() {');
-  const fin = serverSrc.indexOf('\n}', debut) + 2;
-  const debutFuseau = serverSrc.indexOf("const FUSEAU_HAITI = 'America/Port-au-Prince';");
-  const declarationFuseau = serverSrc.slice(debutFuseau, serverSrc.indexOf('\n', debutFuseau));
-  const debutBucket = serverSrc.indexOf("const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';");
-  const declarationBucket = serverSrc.slice(debutBucket, serverSrc.indexOf('\n', debutBucket));
-  const fn = new Function('supabase', `${declarationFuseau}\n${declarationBucket}\n${serverSrc.slice(debut, fin)}\nreturn sauvegardeDuJourExisteDeja;`)(supabase);
-  await assert.rejects(fn(), /bucket introuvable/);
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 test("Le rattrapage au démarrage est câblé : décalé de 30s (le serveur répond d'abord aux requêtes qui l'ont réveillé), et unref() pour ne jamais empêcher un arrêt propre", () => {
   assert.match(serverSrc, /const DELAI_RATTRAPAGE_DEMARRAGE_MS = 30000;/);
@@ -2285,29 +2118,7 @@ function chargerSauvegarderVersStorage(tables) {
   return { sauvegarderVersStorage, colonnesDeTri, fichierEnvoye: () => fichierEnvoye };
 }
 
-test("Sauvegarde automatique : une table de PLUS de 1000 lignes est sauvegardée EN ENTIER (le plafond Supabase la tronquait en silence)", async () => {
-  const auditLog = Array.from({ length: 2500 }, (_, i) => ({ id: `a-${String(i).padStart(5, '0')}` }));
-  const { sauvegarderVersStorage, fichierEnvoye } = chargerSauvegarderVersStorage({ audit_log: auditLog, paiements: [{ id: 'p1' }] });
-  const resultat = await sauvegarderVersStorage();
-  assert.strictEqual(fichierEnvoye().audit_log.length, 2500, "les 2500 lignes d'audit_log doivent être dans le fichier, pas seulement les 1000 premières");
-  assert.strictEqual(resultat.nombreLignes.audit_log, 2500);
-  assert.strictEqual(new Set(fichierEnvoye().audit_log.map(l => l.id)).size, 2500, "aucune ligne dupliquée ni sautée d'une page à l'autre");
-});
-
-test("Sauvegarde automatique : chaque table est lue avec un tri TOTAL sur sa vraie clé primaire (obligatoire pour paginer sans doublon ni trou)", async () => {
-  const { sauvegarderVersStorage, colonnesDeTri } = chargerSauvegarderVersStorage({});
-  await sauvegarderVersStorage();
-  assert.deepStrictEqual(colonnesDeTri.catalog, ['type'], "catalog n'a pas de colonne id : sa clé primaire est type");
-  assert.deepStrictEqual(colonnesDeTri.invitations, ['token']);
-  assert.deepStrictEqual(colonnesDeTri.decrements_stock_appliques, ['local_id']);
-  assert.deepStrictEqual(colonnesDeTri.paiements, ['id']);
-  // Même clé que la restauration : les deux doivent rester d'accord sur l'identité d'une ligne.
-  const debutOrdre = serverSrc.indexOf('const ORDRE_RESTAURATION = [');
-  const ordreRestauration = serverSrc.slice(debutOrdre, serverSrc.indexOf('];', debutOrdre));
-  for (const [table, cle] of [['catalog', 'type'], ['invitations', 'token'], ['decrements_stock_appliques', 'local_id']]) {
-    assert.ok(ordreRestauration.includes(`['${table}', '${cle}']`), `ORDRE_RESTAURATION doit utiliser la même clé pour ${table}`);
-  }
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 // 2. Corbeille 30 jours (12/09) : supprimer une fiche ou un dossier ne supprime plus ses lignes,
 // il pose supprime_le. Plusieurs lectures ne regardaient pas cette marque :
@@ -2413,28 +2224,7 @@ function chargerRestaurerDepuisSauvegarde(base) {
   return new Function('supabase', `${code}\nreturn restaurerDepuisSauvegarde;`)(supabase);
 }
 
-test("Restauration : une table de plusieurs milliers de lignes se restaure (les ids passaient dans l'URL et dépassaient sa longueur maximale)", async () => {
-  const uuid = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
-  const sauvegarde = Array.from({ length: 1500 }, (_, i) => ({ id: uuid(i), montant: i }));
-  // 700 lignes encore en base (dont une partie au-delà du plafond de 1000 lignes par réponse une
-  // fois qu'on y ajoute des lignes plus récentes que la sauvegarde) : seules les 800 autres manquent.
-  const base = { paiements: [...sauvegarde.slice(0, 700), ...Array.from({ length: 900 }, (_, i) => ({ id: uuid(100000 + i), montant: 0 }))] };
-  const restaurerDepuisSauvegarde = chargerRestaurerDepuisSauvegarde(base);
-  const rapport = await restaurerDepuisSauvegarde({ paiements: sauvegarde });
-  const ligne = rapport.find(r => r.table === 'paiements');
-  assert.deepStrictEqual(ligne.lignesEnEchec, [], `aucune erreur attendue : ${JSON.stringify(ligne.lignesEnEchec).slice(0, 200)}`);
-  assert.strictEqual(ligne.dejaPresentes, 700, "les 700 lignes encore en base doivent être reconnues comme présentes");
-  assert.strictEqual(ligne.inserees, 800, "seules les 800 lignes manquantes doivent être réinsérées");
-  assert.strictEqual(base.paiements.length, 1600 + 800, "aucune ligne existante ne doit être dupliquée");
-});
-
-test("Restauration : plus aucun `.in()` sur les ids de la sauvegarde — leur nombre n'est pas borné, l'URL finirait toujours par être trop longue", () => {
-  const debut = serverSrc.indexOf('async function restaurerDepuisSauvegarde(contenu) {');
-  const bloc = serverSrc.slice(debut, serverSrc.indexOf('\n}', debut));
-  const codeSansCommentaires = bloc.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
-  assert.doesNotMatch(codeSansCommentaires, /\.in\(/);
-  assert.match(bloc, /lireToutesLesPages\(\(\) => supabase\.from\(table\)\.select\(colonneId\)\.order\(colonneId\)\)/);
-});
+// (test déplacé et réécrit pour la sauvegarde compressée : tests/sauvegarde_service.test.js)
 
 test("GET /api/episodes/corbeille : épisodes lus page par page et noms des dossiers lus par lots (jamais tous les ids dans une seule URL)", () => {
   const debut = serverSrc.indexOf("app.get('/api/episodes/corbeille'");
