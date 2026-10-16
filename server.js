@@ -39,7 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
-const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart } = require('./utils/numeroDossier');
+const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode } = require('./utils/numeroDossier');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
@@ -1917,6 +1917,28 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     });
   }
 
+  // 16/10 (Esdras) : le numéro de dossier se donne AUTOMATIQUEMENT dès la création du premier épisode (numero_automatique) — ou, si la personne a déjà un numéro, la caisse le tape
+  // (numero_dossier). Seule la caisse : un autre rôle qui enverrait un numéro est refusé, et une demande automatique d'un autre rôle est simplement ignorée (le dossier reste « en attente »).
+  // Fait AVANT l'insertion : un numéro tapé déjà pris renvoie 409 et aucun épisode n'est créé.
+  let numeroDonne = null;
+  const numeroTape = req.body.numero_dossier !== undefined && req.body.numero_dossier !== null && String(req.body.numero_dossier).trim() !== '';
+  if (numeroTape || req.body.numero_automatique === true) {
+    const caisse = await aPermission(req.user.id, 'caisse_travailler');
+    if (!caisse && numeroTape) {
+      return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier.", code: 'NUMERO_RESERVE_CAISSE' });
+    }
+    if (caisse) {
+      try {
+        numeroDonne = await donnerNumeroAuPremierEpisode({ supabase, dossierId: dossier_id, numeroSaisi: numeroTape ? req.body.numero_dossier : null, automatique: req.body.numero_automatique === true });
+      } catch (e) {
+        return res.status(e.statut || 500).json({ error: e.message, code: e.code });
+      }
+      if (numeroDonne && numeroDonne.ancien !== undefined && numeroDonne.numero !== numeroDonne.ancien) {
+        await enregistrerAuditServeur(req, 'numero_dossier_donne', { dossier_id, ancien_numero: numeroDonne.ancien, nouveau_numero: numeroDonne.numero, automatique: numeroDonne.automatique, a_la_creation_de_l_episode: true });
+      }
+    }
+  }
+
   const { data, error } = await supabase
     .from('episodes')
     .insert({ dossier_id, voie_entree, service: service || null, type_consultation: type_consultation || null, type_patient, ong_partenaire: ong_partenaire || null, est_hospitalisation: !!est_hospitalisation, local_id: local_id || null })
@@ -1928,7 +1950,7 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     }
     return res.status(500).json({ error: error.message });
   }
-  res.status(201).json(data);
+  res.status(201).json(numeroDonne ? { ...data, numero_dossier_donne: numeroDonne.numero } : data);
 });
 
 // Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).

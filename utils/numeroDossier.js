@@ -36,4 +36,43 @@ function erreurNumeroDepart(valeur) {
   return null;
 }
 
-module.exports = { PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, LONGUEUR_MAX, estEnAttente, numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart };
+const SQL_ABSENT = (erreur) => ['42883', 'PGRST202'].includes(String(erreur && erreur.code));
+
+// 16/10 (Esdras) : « le numéro se donne automatiquement dès la création du premier épisode ; il peut être manuel si la personne a déjà un numéro, on rentre alors le sien ».
+// Appelée par la création d'un épisode, APRÈS les contrôles et AVANT l'insertion. Ne fait rien si le dossier a déjà son vrai numéro (« premier épisode » = tant que le dossier est
+// « en attente de numéro »). Le droit de donner un numéro (caisse) est vérifié par l'appelant.
+//   numeroSaisi : le numéro que la caisse a tapé (personne déjà numérotée) → pris tel quel s'il est libre ;
+//   automatique : true → le site prend le prochain numéro libre (nouvel essai si une autre caisse prend le même en même temps).
+// Renvoie { numero, automatique, ancien } si un numéro a été donné, null sinon. Lève { statut, message, code } si le numéro tapé est refusé (épisode alors NON créé).
+async function donnerNumeroAuPremierEpisode({ supabase, dossierId, numeroSaisi, automatique }) {
+  const saisi = numeroSaisi === undefined || numeroSaisi === null ? '' : String(numeroSaisi).trim();
+  if (!saisi && automatique !== true) return null;
+  const { data: dossier, error: erreurLecture } = await supabase.from('dossiers').select('numero_dossier').eq('id', dossierId).maybeSingle();
+  if (erreurLecture || !dossier || !estEnAttente(dossier.numero_dossier)) return null;
+  const echec = (statut, message, code) => Object.assign(new Error(message), { statut, code });
+
+  if (saisi) {
+    const erreurSaisie = erreurNumeroDossier(saisi);
+    if (erreurSaisie) throw echec(400, erreurSaisie, 'NUMERO_INVALIDE');
+    const { data, error } = await supabase.rpc('attribuer_numero_dossier', { p_dossier: dossierId, p_numero: saisi });
+    if (error) {
+      if (SQL_ABSENT(error)) throw echec(503, "Le script sql/numero_dossier_compteur.sql n'est pas encore collé dans Supabase : impossible de donner le numéro.", 'NUMERO_SQL_ABSENT');
+      if (error.code === 'CHF32') throw echec(409, `Le numéro ${saisi} est déjà utilisé par un autre dossier. L'épisode n'a pas été créé : vérifie le numéro (ou cherche ce patient par son numéro).`, 'NUMERO_DEJA_PRIS');
+      throw echec(500, error.message, 'NUMERO_ERREUR');
+    }
+    return { numero: data.numero, automatique: !!data.automatique, ancien: data.ancien };
+  }
+
+  // Automatique : un épisode ne doit JAMAIS échouer à cause du numéro (script SQL pas encore collé, panne passagère) → le dossier reste simplement « en attente » et la caisse
+  // le donnera avec le bouton « Donner le numéro ».
+  for (let essai = 0; essai < 4; essai++) {
+    const { data: propose, error: erreurPropose } = await supabase.rpc('numero_dossier_propose');
+    if (erreurPropose || !propose) return null;
+    const { data, error } = await supabase.rpc('attribuer_numero_dossier', { p_dossier: dossierId, p_numero: propose });
+    if (!error) return { numero: data.numero, automatique: !!data.automatique, ancien: data.ancien };
+    if (error.code !== 'CHF32') return null; // une autre caisse vient de prendre ce numéro → on redemande le suivant
+  }
+  return null;
+}
+
+module.exports = { PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, LONGUEUR_MAX, estEnAttente, numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode };

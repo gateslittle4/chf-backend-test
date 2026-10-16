@@ -257,3 +257,107 @@ test("PUT : la caisse peut changer le numéro ; un numéro réservé ou vide est
   assert.strictEqual((await x.appeler({ numero_dossier: '  ' })).code, 400);
   assert.strictEqual(x.maj.length, 1);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// POST /api/dossiers/:dossierId/episodes : le numéro se donne automatiquement au PREMIER épisode, ou se tape si la personne en a déjà un
+// ---------------------------------------------------------------------------------------------------------------------------------
+function routeEpisode({ droits = ['episode_creer', 'caisse_travailler'], numeroActuel = 'EN-ATTENTE-AAAAAAAAAA', pris = [], prochain = 5002 } = {}) {
+  const debut = serveur.indexOf("app.post('/api/dossiers/:dossierId/episodes'");
+  const fin = serveur.indexOf("app.patch('/api/episodes/:id/hospitaliser'", debut);
+  assert.ok(debut !== -1 && fin > debut);
+  let gestionnaire; const app = { post: (_c, fn) => { gestionnaire = fn; } };
+  const etat = { numero: numeroActuel, episodes: [], audits: [], appelsRpc: [], prochain };
+  const supabase = {
+    from(table) {
+      if (table === 'dossiers') return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { numero_dossier: etat.numero }, error: null }) }) }) };
+      if (table === 'episodes') {
+        const q = { select: () => q, eq: () => q, is: () => q, maybeSingle: async () => ({ data: null, error: null }), then: (ok) => ok({ data: [], error: null }),
+          insert: (ligne) => ({ select: () => ({ single: async () => { const e = { id: 'e-1', ...ligne }; etat.episodes.push(e); return { data: e, error: null }; } }) }) };
+        return q;
+      }
+      throw new Error('table inattendue : ' + table);
+    },
+    rpc: async (nom, args) => {
+      etat.appelsRpc.push([nom, args && args.p_numero]);
+      if (nom === 'numero_dossier_propose') return { data: String(etat.prochain), error: null };
+      if (nom === 'attribuer_numero_dossier') {
+        if (pris.includes(args.p_numero)) { if (args.p_numero === String(etat.prochain)) etat.prochain++; return { data: null, error: { code: 'CHF32', message: 'Ce numéro est déjà utilisé par un autre dossier.' } }; }
+        const ancien = etat.numero; etat.numero = args.p_numero;
+        return { data: { numero: args.p_numero, ancien, automatique: args.p_numero === String(etat.prochain) }, error: null };
+      }
+      throw new Error('rpc inattendue : ' + nom);
+    },
+  };
+  new Function('app', 'supabase', 'aPermission', 'validerCreationEpisode', 'enregistrerAuditServeur', 'donnerNumeroAuPremierEpisode', serveur.slice(debut, fin))(
+    app, supabase, async (_u, cle) => droits.includes(cle), () => null, async (_req, action, details) => { etat.audits.push({ action, details }); }, N.donnerNumeroAuPremierEpisode);
+  etat.appeler = async (corps = {}) => {
+    const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
+    await gestionnaire({ params: { dossierId: 'd-1' }, user: { id: 'u1', email: 'a@b.c' }, body: { voie_entree: 'consultation', type_patient: 'prive', ...corps } }, res);
+    return res;
+  };
+  return etat;
+}
+
+test("premier épisode, mode automatique : la caisse reçoit le prochain numéro libre, écrit au journal, et l'épisode est créé", async () => {
+  const x = routeEpisode();
+  const r = await x.appeler({ numero_automatique: true });
+  assert.strictEqual(r.code, 201); assert.strictEqual(r.corps.numero_dossier_donne, '5002');
+  assert.strictEqual(x.numero, '5002'); assert.strictEqual(x.episodes.length, 1);
+  assert.strictEqual(x.audits.length, 1); assert.strictEqual(x.audits[0].details.automatique, true);
+});
+
+test("premier épisode, la personne a déjà un numéro : la caisse le tape, il est pris tel quel (le compteur ne bouge pas)", async () => {
+  const x = routeEpisode();
+  const r = await x.appeler({ numero_dossier: ' 1234 ', numero_automatique: true });
+  assert.strictEqual(r.code, 201); assert.strictEqual(r.corps.numero_dossier_donne, '1234'); assert.strictEqual(x.numero, '1234');
+  assert.strictEqual(x.audits[0].details.automatique, false);
+  assert.ok(!x.appelsRpc.some(a => a[0] === 'numero_dossier_propose'), 'un numéro tapé ne demande pas de proposition');
+});
+
+test("numéro tapé déjà pris par un autre dossier : 409 et AUCUN épisode n'est créé", async () => {
+  const x = routeEpisode({ pris: ['1234'] });
+  const r = await x.appeler({ numero_dossier: '1234' });
+  assert.strictEqual(r.code, 409); assert.strictEqual(r.corps.code, 'NUMERO_DEJA_PRIS');
+  assert.strictEqual(x.episodes.length, 0); assert.strictEqual(x.numero, 'EN-ATTENTE-AAAAAAAAAA');
+  const reserve = await routeEpisode().appeler({ numero_dossier: 'AUTO-12' });
+  assert.strictEqual(reserve.code, 400);
+});
+
+test("automatique : si une autre caisse prend le même numéro en même temps, le site redemande le suivant (l'épisode n'échoue pas)", async () => {
+  const x = routeEpisode({ pris: ['5002'], prochain: 5002 });
+  const r = await x.appeler({ numero_automatique: true });
+  assert.strictEqual(r.code, 201); assert.strictEqual(r.corps.numero_dossier_donne, '5003');
+});
+
+test("dossier qui a déjà son vrai numéro : le numéro n'est pas touché (seul le PREMIER épisode donne le numéro)", async () => {
+  const x = routeEpisode({ numeroActuel: '4001' });
+  const r = await x.appeler({ numero_automatique: true });
+  assert.strictEqual(r.code, 201); assert.strictEqual(r.corps.numero_dossier_donne, undefined); assert.strictEqual(x.numero, '4001');
+  const r2 = await x.appeler({ numero_dossier: '9999' });
+  assert.strictEqual(r2.code, 201); assert.strictEqual(x.numero, '4001', 'un numéro tapé ne remplace pas un vrai numéro à la création d\'un épisode');
+});
+
+test("rôle sans droit de caisse : numéro tapé → 403 (rien créé) ; demande automatique → ignorée, l'épisode est créé et le dossier reste en attente", async () => {
+  const x = routeEpisode({ droits: ['episode_creer'] });
+  const r = await x.appeler({ numero_dossier: '1234' });
+  assert.strictEqual(r.code, 403); assert.strictEqual(r.corps.code, 'NUMERO_RESERVE_CAISSE'); assert.strictEqual(x.episodes.length, 0);
+  const r2 = await x.appeler({ numero_automatique: true });
+  assert.strictEqual(r2.code, 201); assert.strictEqual(x.numero, 'EN-ATTENTE-AAAAAAAAAA'); assert.strictEqual(x.appelsRpc.length, 0);
+});
+
+test("sans demande de numéro, la création d'un épisode ne change rien au dossier (comportement d'avant)", async () => {
+  const x = routeEpisode();
+  const r = await x.appeler();
+  assert.strictEqual(r.code, 201); assert.strictEqual(x.appelsRpc.length, 0); assert.strictEqual(r.corps.numero_dossier_donne, undefined);
+});
+
+test("script SQL pas encore collé : le mode automatique ne fait jamais échouer l'épisode ; un numéro tapé, lui, est refusé clairement (503)", async () => {
+  const sansSql = (x) => { const rpc0 = x; return rpc0; };
+  void sansSql;
+  const debut = serveur.indexOf("app.post('/api/dossiers/:dossierId/episodes'");
+  assert.ok(debut > 0);
+  const base = { from: (t) => { if (t === 'dossiers') return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { numero_dossier: 'EN-ATTENTE-X' }, error: null }) }) }) }; throw new Error(t); }, rpc: async () => ({ data: null, error: { code: '42883', message: 'function does not exist' } }) };
+  const auto = await N.donnerNumeroAuPremierEpisode({ supabase: base, dossierId: 'd-1', automatique: true });
+  assert.strictEqual(auto, null);
+  await assert.rejects(N.donnerNumeroAuPremierEpisode({ supabase: base, dossierId: 'd-1', numeroSaisi: '1234' }), (e) => e.statut === 503);
+});
