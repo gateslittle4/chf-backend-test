@@ -1,6 +1,9 @@
 -- Données synthétiques réalistes pour le test de restauration. Paramètres remplacés par le script : {{N_DOS}} dossiers, {{N_AUDIT}} lignes d'audit, {{N_SESSIONS}} sessions de caisse.
 -- Pièges volontaires : accents, guillemets, antislash, emoji, retour à la ligne dans une adresse, dossiers fusionnés/mère-enfant qui pointent vers un dossier PLUS TARD
 -- dans l'ordre de restauration, journal d'audit sur 5 ans, paiements annulés, partenaires, JSON imbriqués.
+-- Chargement en masse : les déclencheurs sont suspendus (sinon l'un d'eux, rejoué ligne par ligne sur 160 000 paiements, rend la génération interminable à l'échelle « 5 ans »).
+-- La RESTAURATION, elle, tourne avec tous les déclencheurs de la base cible : c'est elle qu'on teste.
+SET session_replication_role = replica;
 SET chf.restauration = 'on';  -- le journal d'audit garde ses dates d'origine (sinon le déclencheur les remplace par l'heure actuelle)
 
 INSERT INTO ong_partenaires (id, nom, prochain_numero)
@@ -13,7 +16,7 @@ INSERT INTO dossiers (id, numero_dossier, nom, date_naissance, telephone, adress
 SELECT gen_random_uuid(), 'D' || g,
   CASE g % 7 WHEN 0 THEN 'O''Brien "Jean" \ é 日本 😀 ' || g WHEN 1 THEN 'Éloïse Saint-Preux ' || g ELSE 'Patient ' || md5(g::text) END,
   date '1950-01-01' + (random() * 25000)::int, '3' || lpad((random() * 9999999)::int::text, 7, '0'),
-  E'Rue ' || g || E'\nPort-au-Prince, Haïti', now() - (random() * 1825 || ' days')::interval, CASE WHEN random() < .5 THEN 'M' ELSE 'F' END,
+  E'Rue ' || g || E'\nPort-au-Prince, Haïti', now() - (random() * 1825) * interval '1 day', CASE WHEN random() < .5 THEN 'M' ELSE 'F' END,
   round((random() * 80)::numeric, 1), 'Conjoint ' || g
 FROM generate_series(1, {{N_DOS}}) g;
 
@@ -27,7 +30,7 @@ FROM n s JOIN n t ON t.rn = ((s.rn + 104729) % {{N_DOS}}) + 1 WHERE d.id = s.id 
 INSERT INTO episodes (id, dossier_id, voie_entree, service, type_consultation, type_patient, ong_partenaire, statut, est_hospitalisation, date_ouverture, date_fermeture, lit, mois_lot, dossier_complet)
 SELECT gen_random_uuid(), d.id, (ARRAY['urgence','consultation','vente_comptoir'])[1 + (random() * 2)::int], 'Général', 'Général',
   CASE WHEN p.nom IS NULL THEN 'prive' ELSE 'partenaire' END, p.nom, CASE WHEN random() < .02 THEN 'ouvert' ELSE 'ferme' END, random() < .1,
-  now() - (random() * 1825 || ' days')::interval, now(), CASE WHEN random() < .1 THEN 'L' || (random() * 30)::int END, to_char(now() - (random() * 1825 || ' days')::interval, 'YYYY-MM'), true
+  now() - (random() * 1825) * interval '1 day', now(), CASE WHEN random() < .1 THEN 'L' || (random() * 30)::int END, to_char(now() - (random() * 1825) * interval '1 day', 'YYYY-MM'), true
 FROM dossiers d CROSS JOIN LATERAL generate_series(1, 1 + (random() * 1.5)::int) k
 LEFT JOIN ong_partenaires p ON random() < .2 AND p.id = 'p-' || (1 + (random() * 10)::int);
 
@@ -46,7 +49,7 @@ CROSS JOIN LATERAL (SELECT random() < .03 AS annule) a
 LEFT JOIN LATERAL (SELECT id FROM fiches WHERE fiches.episode_id = e.id ORDER BY id LIMIT 1) f ON true;
 
 INSERT INTO audit_log (id, action, details, effectue_par, effectue_par_uid, date)
-SELECT gen_random_uuid(), 'action_' || (g % 25), jsonb_build_object('k', repeat('z', 60), 'g', g), 'user' || (g % 14) || '@chf.org', 'uid' || (g % 14), now() - (random() * 1825 || ' days')::interval
+SELECT gen_random_uuid(), 'action_' || (g % 25), jsonb_build_object('k', repeat('z', 60), 'g', g), 'user' || (g % 14) || '@chf.org', 'uid' || (g % 14), now() - (random() * 1825) * interval '1 day'
 FROM generate_series(1, {{N_AUDIT}}) g;
 
 INSERT INTO catalog (type, items) VALUES
@@ -68,6 +71,9 @@ INSERT INTO decrements_stock_appliques (local_id) SELECT 'dec-' || g FROM genera
 INSERT INTO doublons_ignores (dossier_a, dossier_b, ignore_par)
 SELECT LEAST(a.id, b.id), GREATEST(a.id, b.id), 'direction' FROM (SELECT id, row_number() OVER (ORDER BY id) rn FROM dossiers) a JOIN (SELECT id, row_number() OVER (ORDER BY id) rn FROM dossiers) b ON b.rn = a.rn + 1 WHERE a.rn % 97 = 0;
 INSERT INTO migrations_appliquees (nom, somme_controle, applique_par, remarque) SELECT 'script_' || g || '.sql', md5(g::text), 'test', 'essai' FROM generate_series(1, 5) g;
+-- Ce que le déclencheur rattacher_partenaire_id fait à chaque insertion (suspendu pendant ce chargement en masse) : l'identifiant du partenaire d'après son nom.
+UPDATE episodes SET ong_partenaire_id = public.id_partenaire_par_nom(ong_partenaire) WHERE ong_partenaire IS NOT NULL;
+UPDATE paiements SET ong_partenaire_id = public.id_partenaire_par_nom(ong_partenaire) WHERE ong_partenaire IS NOT NULL;
 ANALYZE;
 
 -- Compteur des numéros de dossier : la base source est « en service » (dernier numéro donné : 1500) ; la base cible, fraîche, a seulement la ligne de départ (0) créée par les scripts.
