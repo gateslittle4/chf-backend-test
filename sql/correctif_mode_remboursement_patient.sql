@@ -1,3 +1,6 @@
+-- 16/10 (test de restauration) : la liste ci-dessous contient maintenant AUSSI 'moncash', 'virement' et 'cheque' (ajoutés plus tard par ajoute_modes_moncash_virement_cheque.sql).
+-- Avant, rejouer ce script APRÈS l'autre remettait la contrainte d'origine et refusait tous les paiements MonCash/virement/chèque. La liste ci-dessous est l'état FINAL de la
+-- production : ce script est désormais sans danger à rejouer, dans n'importe quel ordre.
 -- BUG CRITIQUE trouvé et corrigé le 27/08, en testant "rembourser et refacturer à un partenaire"
 -- avec un dossier de test créé directement en base (jamais détecté avant : les tests du repo sont
 -- des regex sur le code source, jamais une exécution réelle contre Supabase).
@@ -18,4 +21,5 @@
 
 ALTER TABLE paiements DROP CONSTRAINT paiements_mode_check;
 ALTER TABLE paiements ADD CONSTRAINT paiements_mode_check
-  CHECK (mode = ANY (ARRAY['cash'::text, 'ong'::text, 'credit'::text, 'depot'::text, 'exoneration'::text, 'remboursement_credit'::text, 'remboursement_patient'::text]));
+  CHECK (mode = ANY (ARRAY['cash'::text, 'ong'::text, 'credit'::text, 'depot'::text, 'exoneration'::text, 'remboursement_credit'::text, 'remboursement_patient'::text,
+                           'moncash'::text, 'virement'::text, 'cheque'::text]));
