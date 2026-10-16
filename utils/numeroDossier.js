@@ -10,12 +10,18 @@ const crypto = require('node:crypto');
 
 const PREFIXE_EN_ATTENTE = 'EN-ATTENTE-';
 const PREFIXE_VENTE_COMPTOIR = 'AUTO-';
+// Patients envoyés par un partenaire (ex. AVSI) pour des EXAMENS SEULEMENT : enregistrés par leur nom (ils figurent dans les lots et le rapport du partenaire) mais SANS numéro de dossier.
+const PREFIXE_EXAMENS = 'EXAMEN-';
 const LONGUEUR_MAX = 30;
 
 const estEnAttente = (numero) => typeof numero === 'string' && numero.startsWith(PREFIXE_EN_ATTENTE);
+const estExamensSeulement = (numero) => typeof numero === 'string' && numero.startsWith(PREFIXE_EXAMENS);
+// Pas de vrai numéro : en attente (la caisse le donnera) ou examens seulement (jamais de numéro tant que la caisse n'en donne pas un).
+const estSansVraiNumero = (numero) => estEnAttente(numero) || estExamensSeulement(numero);
 
 // Numéro provisoire, unique pour de bon (10 caractères au hasard) : plusieurs dossiers peuvent attendre en même temps.
 const numeroProvisoire = (alea = crypto.randomBytes(5).toString('hex').toUpperCase()) => `${PREFIXE_EN_ATTENTE}${alea}`;
+const numeroExamens = (alea = crypto.randomBytes(5).toString('hex').toUpperCase()) => `${PREFIXE_EXAMENS}${alea}`;
 
 // Numéro saisi par la caisse : non vide, 30 caractères au plus, jamais un numéro réservé (provisoire ou vente comptoir). Renvoie un message, ou null si tout va bien.
 function erreurNumeroDossier(valeur) {
@@ -24,7 +30,8 @@ function erreurNumeroDossier(valeur) {
   if (!numero) return 'Le numéro de dossier est requis.';
   if (numero.length > LONGUEUR_MAX) return `Le numéro de dossier est trop long (${LONGUEUR_MAX} caractères au plus).`;
   const majuscules = numero.toUpperCase();
-  if (majuscules.startsWith(PREFIXE_EN_ATTENTE) || majuscules.startsWith(PREFIXE_VENTE_COMPTOIR)) return `Un numéro ne peut pas commencer par « ${majuscules.startsWith(PREFIXE_EN_ATTENTE) ? PREFIXE_EN_ATTENTE : PREFIXE_VENTE_COMPTOIR} » (réservé par le site).`;
+  const reserve = [PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, PREFIXE_EXAMENS].find(p => majuscules.startsWith(p));
+  if (reserve) return `Un numéro ne peut pas commencer par « ${reserve} » (réservé par le site).`;
   return null;
 }
 
@@ -48,7 +55,7 @@ async function donnerNumeroAuPremierEpisode({ supabase, dossierId, numeroSaisi, 
   const saisi = numeroSaisi === undefined || numeroSaisi === null ? '' : String(numeroSaisi).trim();
   if (!saisi && automatique !== true) return null;
   const { data: dossier, error: erreurLecture } = await supabase.from('dossiers').select('numero_dossier').eq('id', dossierId).maybeSingle();
-  if (erreurLecture || !dossier || !estEnAttente(dossier.numero_dossier)) return null;
+  if (erreurLecture || !dossier || !estSansVraiNumero(dossier.numero_dossier)) return null;
   const echec = (statut, message, code) => Object.assign(new Error(message), { statut, code });
 
   if (saisi) {
@@ -75,4 +82,17 @@ async function donnerNumeroAuPremierEpisode({ supabase, dossierId, numeroSaisi, 
   return null;
 }
 
-module.exports = { PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, LONGUEUR_MAX, estEnAttente, numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode };
+// Épisode « examens seulement » d'un patient d'un partenaire : le dossier (encore sans vrai numéro) est marqué « sans numéro » — il ne recevra pas de numéro automatique aux
+// visites suivantes, mais la caisse peut toujours lui en donner un. Renvoie le numéro de marquage, ou null si le dossier a déjà un vrai numéro (rien n'est touché).
+async function marquerExamensSeulement({ supabase, dossierId }) {
+  const { data: dossier, error } = await supabase.from('dossiers').select('numero_dossier').eq('id', dossierId).maybeSingle();
+  if (error || !dossier) return null;
+  if (estExamensSeulement(dossier.numero_dossier)) return { numero: dossier.numero_dossier, ancien: dossier.numero_dossier, inchange: true };
+  if (!estEnAttente(dossier.numero_dossier)) return null;
+  const numero = numeroExamens();
+  const { error: erreurMaj } = await supabase.from('dossiers').update({ numero_dossier: numero }).eq('id', dossierId).eq('numero_dossier', dossier.numero_dossier);
+  if (erreurMaj) return null;
+  return { numero, ancien: dossier.numero_dossier };
+}
+
+module.exports = { PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, PREFIXE_EXAMENS, LONGUEUR_MAX, estEnAttente, estExamensSeulement, estSansVraiNumero, numeroProvisoire, numeroExamens, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement };

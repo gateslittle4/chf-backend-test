@@ -39,7 +39,7 @@ const { validerCreationEpisode } = require('./utils/validationEpisode');
 const { motsDuNom } = require('./utils/portailPatient');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('./utils/paiementPartiel');
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('./utils/dossiers');
-const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode } = require('./utils/numeroDossier');
+const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement } = require('./utils/numeroDossier');
 const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
@@ -1920,9 +1920,25 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
   // 16/10 (Esdras) : le numéro de dossier se donne AUTOMATIQUEMENT dès la création du premier épisode (numero_automatique) — ou, si la personne a déjà un numéro, la caisse le tape
   // (numero_dossier). Seule la caisse : un autre rôle qui enverrait un numéro est refusé, et une demande automatique d'un autre rôle est simplement ignorée (le dossier reste « en attente »).
   // Fait AVANT l'insertion : un numéro tapé déjà pris renvoie 409 et aucun épisode n'est créé.
-  let numeroDonne = null;
+  let numeroDonne = null, marqueExamens = null;
   const numeroTape = req.body.numero_dossier !== undefined && req.body.numero_dossier !== null && String(req.body.numero_dossier).trim() !== '';
-  if (numeroTape || req.body.numero_automatique === true) {
+  // « Examens seulement » : un patient envoyé par un partenaire (ex. AVSI) pour des examens ne reçoit PAS de numéro de dossier, mais figure dans les lots du partenaire.
+  // Réservé à la caisse et aux épisodes PARTENAIRE ; incompatible avec un numéro (tapé ou automatique).
+  if (req.body.examens_seulement === true) {
+    if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+      return res.status(403).json({ error: "Seule la caisse peut enregistrer un patient « examens seulement » (sans numéro de dossier).", code: 'NUMERO_RESERVE_CAISSE' });
+    }
+    if (type_patient !== 'partenaire' && type_patient !== 'ONG') {
+      return res.status(400).json({ error: "« Examens seulement » (sans numéro de dossier) ne concerne que les patients envoyés par un partenaire.", code: 'EXAMENS_PARTENAIRE_SEULEMENT' });
+    }
+    if (numeroTape || req.body.numero_automatique === true) {
+      return res.status(400).json({ error: "« Examens seulement » et numéro de dossier s'excluent : choisis l'un ou l'autre.", code: 'EXAMENS_ET_NUMERO' });
+    }
+    marqueExamens = await marquerExamensSeulement({ supabase, dossierId: dossier_id });
+    if (marqueExamens && !marqueExamens.inchange) {
+      await enregistrerAuditServeur(req, 'dossier_sans_numero_examens', { dossier_id, ancien_numero: marqueExamens.ancien, nouveau_numero: marqueExamens.numero });
+    }
+  } else if (numeroTape || req.body.numero_automatique === true) {
     const caisse = await aPermission(req.user.id, 'caisse_travailler');
     if (!caisse && numeroTape) {
       return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier.", code: 'NUMERO_RESERVE_CAISSE' });
@@ -1950,7 +1966,7 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     }
     return res.status(500).json({ error: error.message });
   }
-  res.status(201).json(numeroDonne ? { ...data, numero_dossier_donne: numeroDonne.numero } : data);
+  res.status(201).json({ ...data, ...(numeroDonne ? { numero_dossier_donne: numeroDonne.numero } : {}), ...(marqueExamens ? { numero_dossier_examens: marqueExamens.numero } : {}) });
 });
 
 // Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).

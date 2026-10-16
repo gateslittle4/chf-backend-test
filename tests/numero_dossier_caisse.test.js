@@ -269,7 +269,10 @@ function routeEpisode({ droits = ['episode_creer', 'caisse_travailler'], numeroA
   const etat = { numero: numeroActuel, episodes: [], audits: [], appelsRpc: [], prochain };
   const supabase = {
     from(table) {
-      if (table === 'dossiers') return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { numero_dossier: etat.numero }, error: null }) }) }) };
+      if (table === 'dossiers') return {
+        select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { numero_dossier: etat.numero }, error: null }) }) }),
+        update: (maj) => ({ eq: () => ({ eq: async (_c, ancien) => { if (etat.numero === ancien) etat.numero = maj.numero_dossier; return { error: null }; } }) }),
+      };
       if (table === 'episodes') {
         const q = { select: () => q, eq: () => q, is: () => q, maybeSingle: async () => ({ data: null, error: null }), then: (ok) => ok({ data: [], error: null }),
           insert: (ligne) => ({ select: () => ({ single: async () => { const e = { id: 'e-1', ...ligne }; etat.episodes.push(e); return { data: e, error: null }; } }) }) };
@@ -288,8 +291,8 @@ function routeEpisode({ droits = ['episode_creer', 'caisse_travailler'], numeroA
       throw new Error('rpc inattendue : ' + nom);
     },
   };
-  new Function('app', 'supabase', 'aPermission', 'validerCreationEpisode', 'enregistrerAuditServeur', 'donnerNumeroAuPremierEpisode', serveur.slice(debut, fin))(
-    app, supabase, async (_u, cle) => droits.includes(cle), () => null, async (_req, action, details) => { etat.audits.push({ action, details }); }, N.donnerNumeroAuPremierEpisode);
+  new Function('app', 'supabase', 'aPermission', 'validerCreationEpisode', 'enregistrerAuditServeur', 'donnerNumeroAuPremierEpisode', 'marquerExamensSeulement', serveur.slice(debut, fin))(
+    app, supabase, async (_u, cle) => droits.includes(cle), () => null, async (_req, action, details) => { etat.audits.push({ action, details }); }, N.donnerNumeroAuPremierEpisode, N.marquerExamensSeulement);
   etat.appeler = async (corps = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaire({ params: { dossierId: 'd-1' }, user: { id: 'u1', email: 'a@b.c' }, body: { voie_entree: 'consultation', type_patient: 'prive', ...corps } }, res);
@@ -360,4 +363,52 @@ test("script SQL pas encore collé : le mode automatique ne fait jamais échouer
   const auto = await N.donnerNumeroAuPremierEpisode({ supabase: base, dossierId: 'd-1', automatique: true });
   assert.strictEqual(auto, null);
   await assert.rejects(N.donnerNumeroAuPremierEpisode({ supabase: base, dossierId: 'd-1', numeroSaisi: '1234' }), (e) => e.statut === 503);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// « Examens seulement » : patient d'un partenaire (ex. AVSI) enregistré par son nom, SANS numéro de dossier, présent dans les lots
+// ---------------------------------------------------------------------------------------------------------------------------------
+test("examens seulement (partenaire) : le dossier est marqué « sans numéro », aucun numéro n'est donné, l'épisode partenaire est créé (donc présent dans les lots)", async () => {
+  const x = routeEpisode();
+  const r = await x.appeler({ examens_seulement: true, type_patient: 'partenaire', ong_partenaire: 'AVSI' });
+  assert.strictEqual(r.code, 201);
+  assert.ok(N.estExamensSeulement(x.numero), 'le dossier porte la marque « examens seulement »');
+  assert.strictEqual(r.corps.numero_dossier_examens, x.numero); assert.strictEqual(r.corps.numero_dossier_donne, undefined);
+  assert.strictEqual(x.episodes.length, 1); assert.strictEqual(x.episodes[0].ong_partenaire, 'AVSI'); assert.strictEqual(x.episodes[0].type_patient, 'partenaire');
+  assert.ok(!x.appelsRpc.some(a => a[0] === 'numero_dossier_propose'), 'aucun numéro consommé');
+  assert.strictEqual(x.audits[0].action, 'dossier_sans_numero_examens');
+});
+
+test("examens seulement : refusé hors caisse (403), pour un patient privé (400) et avec un numéro (400) — rien n'est créé", async () => {
+  const horsCaisse = routeEpisode({ droits: ['episode_creer'] });
+  const r1 = await horsCaisse.appeler({ examens_seulement: true, type_patient: 'partenaire' });
+  assert.strictEqual(r1.code, 403); assert.strictEqual(horsCaisse.episodes.length, 0);
+  const prive = routeEpisode();
+  const r2 = await prive.appeler({ examens_seulement: true, type_patient: 'prive' });
+  assert.strictEqual(r2.code, 400); assert.strictEqual(r2.corps.code, 'EXAMENS_PARTENAIRE_SEULEMENT'); assert.strictEqual(prive.episodes.length, 0); assert.ok(N.estEnAttente(prive.numero));
+  const avecNumero = routeEpisode();
+  assert.strictEqual((await avecNumero.appeler({ examens_seulement: true, type_patient: 'partenaire', numero_dossier: '1234' })).code, 400);
+  assert.strictEqual((await avecNumero.appeler({ examens_seulement: true, type_patient: 'partenaire', numero_automatique: true })).code, 400);
+  assert.strictEqual(avecNumero.episodes.length, 0);
+});
+
+test("examens seulement : un dossier qui a déjà son vrai numéro n'est pas touché ; une 2e visite « examens » ne change rien", async () => {
+  const numerote = routeEpisode({ numeroActuel: '4001' });
+  const r = await numerote.appeler({ examens_seulement: true, type_patient: 'partenaire' });
+  assert.strictEqual(r.code, 201); assert.strictEqual(numerote.numero, '4001'); assert.strictEqual(r.corps.numero_dossier_examens, undefined);
+  const x = routeEpisode();
+  await x.appeler({ examens_seulement: true, type_patient: 'partenaire' });
+  const premier = x.numero;
+  await x.appeler({ examens_seulement: true, type_patient: 'partenaire' });
+  assert.strictEqual(x.numero, premier, 'la marque ne change pas à la 2e visite'); assert.strictEqual(x.audits.length, 1);
+});
+
+test("plus tard, une consultation ordinaire du même patient lui donne un VRAI numéro (automatique, ou tapé) ; « EXAMEN- » est un préfixe réservé", async () => {
+  const auto = routeEpisode({ numeroActuel: N.numeroExamens('ABCDE12345') });
+  const r = await auto.appeler({ numero_automatique: true });
+  assert.strictEqual(r.code, 201); assert.strictEqual(r.corps.numero_dossier_donne, '5002'); assert.strictEqual(auto.numero, '5002');
+  const tape = routeEpisode({ numeroActuel: N.numeroExamens('ABCDE12345') });
+  assert.strictEqual((await tape.appeler({ numero_dossier: '1234' })).corps.numero_dossier_donne, '1234');
+  assert.ok(N.erreurNumeroDossier('EXAMEN-1')); assert.ok(N.erreurNumeroDossier('examen-1'));
+  assert.ok(N.estExamensSeulement(N.numeroExamens())); assert.ok(N.estSansVraiNumero(N.numeroExamens())); assert.ok(N.estSansVraiNumero(N.numeroProvisoire())); assert.ok(!N.estSansVraiNumero('4001'));
 });
