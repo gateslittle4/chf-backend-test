@@ -1,6 +1,6 @@
 // utils/qualiteDonnees.js — « Qualité des données » (14/10) : ce qui manque ou semble faux dans les dossiers et les épisodes, avec de quoi corriger.
 // Fonctions pures : reçoivent des lignes déjà lues (dossiers, épisodes) et renvoient des contrôles { cle, titre, gravite, nombre, exemples[] }.
-// Rien n'est modifié ici : c'est un tableau de bord de corrections à faire, pas un nettoyeur automatique.
+// Rien n'est modifié ici : ce sont des contrôles. Les corrections de FORME (espaces, majuscules) sont faites par utils/surveillanceQualite.js, les autres par une personne.
 const JOUR_MS = 86400000;
 const MAX_EXEMPLES = 25;
 
@@ -50,6 +50,13 @@ function controlerQualite({ dossiers, episodes, maintenantMs, seuils = {} }) {
   ajouter('partenaire_sans_nom', 'Épisodes « partenaire » sans nom de partenaire', 'haute',
     eps.filter(e => e.type_patient === 'partenaire' && vide(e.ong_partenaire)).map(e => exemplesEpisode(e, parId.get(e.dossier_id))),
     "Impossible de facturer l'ONG à la fin du mois : choisis le partenaire (Changer Privé/Partenaire).");
+
+  // 18/10 : un dossier qui a déjà un épisode mais pas encore de vrai numéro (« en attente de numéro ») — la caisse doit le lui donner. Les dossiers « examens seulement » (EXAMEN-…) n'en
+  // ont volontairement pas : ils ne sont pas signalés.
+  const avecEpisode = new Set(eps.map(e => e.dossier_id));
+  ajouter('sans_numero', 'Dossiers avec épisode mais sans numéro de dossier', 'haute',
+    actifs.filter(d => String(d.numero_dossier || '').startsWith('EN-ATTENTE-') && avecEpisode.has(d.id)).map(d => exemplesDossier(d)),
+    "La caisse doit leur donner un numéro (bouton « Donner le numéro » dans Fiche Patient ou Dossier/Épisode), sauf les patients venus pour des examens seulement.");
 
   const gravites = { haute: 0, moyenne: 1, faible: 2 };
   controles.sort((a, b) => (b.nombre > 0) - (a.nombre > 0) || gravites[a.gravite] - gravites[b.gravite]);
