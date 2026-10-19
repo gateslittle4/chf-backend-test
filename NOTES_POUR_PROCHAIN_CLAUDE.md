@@ -445,3 +445,15 @@ Seule la caisse (`caisse_travailler`) donne ou change un numéro ; infirmier/arc
 **Caisse : modifier un dossier (16/10)** : `PUT /api/dossiers/:id` accepte `caisse_travailler` en plus de `fiche_patient_modifier` (le caissier modifie un dossier depuis Facturation). Les autres règles du PUT ne changent pas. Test : fin de `tests/numero_dossier_caisse.test.js`.
 
 **Comptable sans lots partenaires (16/10)** : `facturation_exporter` retiré du rôle `comptable` dans `PERMISSIONS_PAR_DEFAUT` (miroir de l'app) — la route `POST /api/lots/prochain-numero` lui répond donc 403. Pour rendre la vue : le remettre dans cette liste et dans `utils/permissions.js` côté app.
+
+## 18/10 — SURVEILLANCE de la qualité des données (Esdras : « comme un gestionnaire de données »)
+`utils/surveillanceQualite.js` (`creerSurveillance`) : chaque jour à 11h UTC (7h Haïti) + une fois au réveil du serveur s'il n'y a pas eu de passage aujourd'hui (`surveillanceDuJourFaite`, lu dans le journal) :
+1. **corrections de forme** automatiques et tracées (`correction_auto_forme`, avant → après) : espaces en trop (nom, téléphone, adresse), nom tout en minuscules ou tout en MAJUSCULES ; jamais un nom aux majuscules mêlées ; 500 au plus par nuit ; seulement si la valeur n'a pas changé entre-temps ;
+2. tous les contrôles de `controlerQualite` (+ nouveau : `sans_numero` = dossier avec épisode mais encore « en attente de numéro », hors EXAMEN-) + nombre de doublons possibles (niveau « probable », paires « pas les mêmes » exclues) ;
+3. un **instantané** dans `audit_log` (`surveillance_qualite`, détails : total, doublons, corrections, par_controle) = historique de l'onglet et compteur du menu ;
+4. **alerte WhatsApp avec les NOMS** (rien d'autre : ni date de naissance ni téléphone), 800 caractères au plus par message, 3 messages au plus, seulement s'il y a quelque chose à faire.
+Routes (droit `direction_voir` ou `fiche_patient_modifier`) : `GET /api/qualite-donnees` (contrôles), `GET /api/qualite-donnees/resume` (dernier instantané, léger), `GET /api/qualite-donnees/surveillance` (30 derniers passages + 100 corrections), `POST /api/qualite-donnees/surveillance/lancer` (passage immédiat, sans alerte). Un seul passage à la fois (`surveillanceEnCours`). Réunir / écarter les doublons : routes existantes (`utils/routesDoublons.js`). Tests : `tests/surveillance_qualite.test.js`. ⚠️ Les noms partent vers WhatsApp (CallMeBot, service tiers) : décision d'Esdras ; pour les retirer, enlever `x.nom` dans `composerAlerte`.
+
+## 19/10 — Contrôles de qualité : paiements et fermeture
+- `controlerQualite` reçoit aussi `paiements` : `paiement_sans_fiche` (hors dépôt/remboursement_credit/annulés), `paiement_zero` (hors dépôt, crédit, exonération), `ferme_sans_date`. Pas de contrôle « fiche sans paiement » (voulu par Esdras : non anormal).
+- `POST /api/episodes` écrit `date_fermeture` si l'épisode est créé `archived` (Achat Express).

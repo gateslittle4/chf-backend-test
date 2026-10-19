@@ -50,6 +50,7 @@ const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
 const { anciensNomsApresRenommage, verifierMere } = require('./utils/naissance');
 const { controlerQualite } = require('./utils/qualiteDonnees');
+const { creerSurveillance } = require('./utils/surveillanceQualite');
 // Heure RÉELLE des paiements (13/10) : celle du serveur, jamais celle de l'ordinateur de la caisse — voir utils/heureServeur.js.
 const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('./utils/heureServeur');
 // Limite du nombre de requêtes (13/10) : par compte connecté, par adresse pour les pages publiques et les mauvais jetons — voir utils/limiteur.js.
@@ -1061,6 +1062,8 @@ app.post('/api/episodes', async (req, res) => {
       voie_entree: d.voie_entree || 'consultation', service: d.service_choisi || 'Général',
       type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null,
       statut: flatVersStatut(d.status), est_hospitalisation: !!d.est_hospitalisation,
+      // 19/10 : un épisode créé déjà clôturé (Achat Express) porte sa date de fermeture dès le départ.
+      ...(d.status === 'archived' ? { date_fermeture: new Date().toISOString() } : {}),
       // Sans cette colonne renseignée, la vérification d'idempotence ci-dessus ne trouve jamais
       // rien et l'index unique episodes_local_id_unique ne protège rien : les deux ne servent
       // qu'ensemble.
@@ -1418,20 +1421,48 @@ creerRoutesEtatSysteme({ supabase }).monter(app);
 // 14/10 : renommer un type de consultation / un service d'hospitalisation sans couper l'historique (voir utils/routesListesServices.js).
 creerRoutesListesServices({ supabase, aPermission }).monter(app);
 
-// 14/10 : « Qualité des données » — ce qui manque ou semble faux, avec de quoi corriger (voir utils/qualiteDonnees.js). Lecture seule.
+// 14/10 : « Qualité des données » — ce qui manque ou semble faux, avec de quoi corriger (voir utils/qualiteDonnees.js).
+// 18/10 : + SURVEILLANCE automatique (voir utils/surveillanceQualite.js) : contrôle chaque matin, corrections de forme tracées, alerte WhatsApp avec les noms, historique.
+const surveillanceQualite = creerSurveillance({ supabase, lireToutesLesPages, envoyerAlerte: (message) => envoyerCallMeBot(message), fuseau: FUSEAU_HAITI, journal: console });
+let surveillanceEnCours = null; // un seul passage à la fois (minuteur, rattrapage au réveil et bouton « Lancer maintenant »)
+function lancerSurveillanceQualite(options) {
+  if (surveillanceEnCours) return surveillanceEnCours;
+  surveillanceEnCours = surveillanceQualite.executer(options).finally(() => { surveillanceEnCours = null; });
+  return surveillanceEnCours;
+}
+const peutSurveillerQualite = async (userId) => (await aPermission(userId, 'direction_voir')) || (await aPermission(userId, 'fiche_patient_modifier'));
+
 app.get('/api/qualite-donnees', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'direction_voir')) && !(await aPermission(req.user.id, 'fiche_patient_modifier'))) {
+  if (!(await peutSurveillerQualite(req.user.id))) {
     return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
   }
   try {
-    const colonnes = 'id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe';
-    let dossiers;
-    try { dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(`${colonnes}, mere_dossier_id, fusionne_dans`).order('id')); }
-    catch (e) { if (e && e.code === '42703') dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(colonnes).order('id')); else throw e; }
-    const episodes = await lireToutesLesPages(() => supabase.from('episodes')
-      .select('id, dossier_id, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, service, supprime_le').order('id'));
-    res.json({ ...controlerQualite({ dossiers, episodes, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
+    const { dossiers, episodes, paiements } = await surveillanceQualite.lireDonnees();
+    res.json({ ...controlerQualite({ dossiers, episodes, paiements, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Résumé léger (le dernier instantané de la surveillance, pas de recalcul) : alimente le compteur du menu.
+app.get('/api/qualite-donnees/resume', async (req, res) => {
+  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  try { res.json({ dernier: await surveillanceQualite.dernierInstantane() }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Historique de la surveillance (30 derniers passages) et corrections de forme faites automatiquement (100 dernières, avant → après).
+app.get('/api/qualite-donnees/surveillance', async (req, res) => {
+  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  try {
+    const [historique, corrections] = await Promise.all([surveillanceQualite.historique(30), surveillanceQualite.correctionsRecentes(100)]);
+    res.json({ historique, corrections, en_cours: !!surveillanceEnCours });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// « Lancer maintenant » : un passage complet tout de suite (sans alerte WhatsApp : la personne regarde l'écran).
+app.post('/api/qualite-donnees/surveillance/lancer', async (req, res) => {
+  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  const resultat = await lancerSurveillanceQualite({ origine: 'manuel', alerter: false });
+  if (!resultat.ok) return res.status(500).json({ error: resultat.erreur });
+  res.json(resultat);
 });
 
 app.post('/api/dossiers', async (req, res) => {
@@ -3793,6 +3824,16 @@ async function rattraperSauvegardeAuDemarrage() {
 // attend devant son écran), la sauvegarde complète des 17 tables vient ensuite. unref() pour que
 // ce minuteur n'empêche jamais le processus de s'arrêter proprement.
 setTimeout(rattraperSauvegardeAuDemarrage, DELAI_RATTRAPAGE_DEMARRAGE_MS).unref();
+
+// ============================================================
+// SURVEILLANCE DE LA QUALITÉ DES DONNÉES (18/10) — chaque jour à 11h UTC (7h en Haïti, avant l'ouverture), et UNE FOIS au réveil du serveur s'il n'y en a pas eu aujourd'hui
+// (le plan gratuit de Render éteint le serveur sans visite : même principe que le rattrapage de la sauvegarde). Voir utils/surveillanceQualite.js.
+// ============================================================
+cron.schedule('0 11 * * *', () => { lancerSurveillanceQualite({ origine: 'minuteur' }); });
+setTimeout(async () => {
+  try { if (!(await surveillanceQualite.surveillanceDuJourFaite())) await lancerSurveillanceQualite({ origine: 'rattrapage au réveil' }); }
+  catch (e) { console.warn('Rattrapage de la surveillance de la qualité impossible :', e.message); }
+}, 90000).unref();
 
 // ============================================================
 // FERMETURE AUTOMATIQUE DES POSTES DE CAISSE (15/10, Esdras) — voir utils/fermetureAutoPostes.js.
