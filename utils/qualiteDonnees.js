@@ -67,7 +67,8 @@ function controlerQualite({ dossiers, episodes, paiements = [], maintenantMs, se
   // 19/10 : paiements. Pas de faux positifs : un dépôt, un remboursement de crédit, un paiement annulé ou supprimé n'est jamais lié à une fiche ; un paiement à zéro est normal
   // quand un dépôt, un crédit ou une exonération a tout couvert.
   const pays = (paiements || []).filter(p => !p.supprime_le && !p.annule);
-  const nomPaiement = (p) => ({ type: 'paiement', id: p.id, episode_id: p.episode_id, nom: p.patient_nom || null, montant: p.montant, mode: p.mode, date: p.date_paiement || null });
+  const epParId = new Map(eps.map(e => [e.id, e]));
+  const nomPaiement = (p) => { const e = epParId.get(p.episode_id); const dos = e ? parId.get(e.dossier_id) : null; return { type: 'paiement', id: p.id, episode_id: p.episode_id, dossier_id: dos ? dos.id : null, numero_dossier: dos ? dos.numero_dossier : null, nom: (dos && dos.nom) || p.patient_nom || null, montant: p.montant, mode: p.mode, date: p.date_paiement || null }; };
   const MODES_SANS_FICHE = ['depot', 'remboursement_credit'];
   ajouter('paiement_sans_fiche', 'Paiements liés à aucune fiche', 'moyenne',
     pays.filter(p => vide(p.fiche_id) && !MODES_SANS_FICHE.includes(p.mode)).map(nomPaiement),
