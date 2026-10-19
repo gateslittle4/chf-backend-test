@@ -14,7 +14,7 @@ const exemplesEpisode = (e, d, plus = {}) => ({ type: 'episode', id: e.id, dossi
 // paiements (facultatif) : { id, episode_id, fiche_id, mode, montant, annule, details, exoneration, patient_nom, date_paiement, supprime_le }
 // seuils : { joursConsultationOuverte, joursHospitalisationOuverte }
 function controlerQualite({ dossiers, episodes, paiements = [], maintenantMs, seuils = {} }) {
-  const jc = seuils.joursConsultationOuverte ?? 2;
+  const jc = seuils.joursConsultationOuverte ?? 30; // 19/10 : une consultation reste ouverte jusqu'à 1 mois (fermeture automatique à 30 jours)
   const jh = seuils.joursHospitalisationOuverte ?? 30;
   const actifs = (dossiers || []).filter(d => !d.fusionne_dans);
   const parId = new Map(actifs.map(d => [d.id, d]));
@@ -77,6 +77,14 @@ function controlerQualite({ dossiers, episodes, paiements = [], maintenantMs, se
   ajouter('paiement_zero', 'Paiements à zéro sans dépôt, crédit ni exonération', 'moyenne',
     pays.filter(p => Number(p.montant) === 0 && !MODES_SANS_FICHE.includes(p.mode) && !couvert(p)).map(nomPaiement),
     "Un encaissement de 0 sans raison (ni dépôt utilisé, ni crédit, ni exonération) est probablement une erreur de saisie.");
+
+
+  // 19/10 : UN SEUL épisode ouvert à la fois par patient (règle d'Esdras). Les cas déjà existants (avant la règle) sont listés ici pour être réglés à la main.
+  const ouvertsParDossier = new Map();
+  eps.filter(e => e.statut === 'ouvert' && e.voie_entree !== 'vente_comptoir').forEach(e => { if (!ouvertsParDossier.has(e.dossier_id)) ouvertsParDossier.set(e.dossier_id, []); ouvertsParDossier.get(e.dossier_id).push(e); });
+  ajouter('episodes_ouverts_multiples', 'Patients avec plusieurs épisodes ouverts en même temps', 'haute',
+    [...ouvertsParDossier.entries()].filter(([, l]) => l.length > 1).map(([id, l]) => exemplesDossier(parId.get(id), { nombre: l.length })),
+    "Un seul épisode ouvert à la fois : fermez ou regroupez les autres (une consultation devenue hospitalisation passe par « Hospitaliser »).");
 
   const gravites = { haute: 0, moyenne: 1, faible: 2 };
   controles.sort((a, b) => (b.nombre > 0) - (a.nombre > 0) || gravites[a.gravite] - gravites[b.gravite]);

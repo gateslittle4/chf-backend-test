@@ -35,7 +35,7 @@ test('Épisodes : consultation ouverte trop longtemps, hospitalisation très lon
     e('e6', '3', { statut: 'ferme', est_hospitalisation: true, motif_fermeture: null }), e('e7', '4', { statut: 'ferme', est_hospitalisation: true, motif_fermeture: 'deces' }),
     e('e8', '4', { type_patient: 'partenaire', ong_partenaire: '  ' }), e('e9', '4', { type_patient: 'partenaire', ong_partenaire: 'Alpha' }), e('e10', '4', { date_ouverture: il_y_a(8), supprime_le: il_y_a(1) }),
   ];
-  const r = controlerQualite({ maintenantMs: NOW, dossiers, episodes });
+  const r = controlerQualite({ maintenantMs: NOW, dossiers, episodes, seuils: { joursConsultationOuverte: 2 } });
   assert.deepStrictEqual(ctrl(r, 'consultation_ouverte').exemples.map(x => [x.id, x.jours]), [['e1', 5]]);
   assert.deepStrictEqual(ctrl(r, 'hospitalisation_longue').exemples.map(x => [x.id, x.jours, x.service]), [['e4', 45, 'Maternité']]);
   assert.deepStrictEqual(ctrl(r, 'sortie_sans_motif').exemples.map(x => x.id), ['e6']);
@@ -83,4 +83,15 @@ test('contrôles paiements et fermeture : pas de faux positifs (dépôt, rembour
 test('POST /api/episodes écrit date_fermeture pour un épisode créé déjà clôturé (Achat Express)', () => {
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /\.\.\.\(d\.status === 'archived' \? \{ date_fermeture: new Date\(\)\.toISOString\(\) \} : \{\}\)/);
+});
+
+test('consultation ouverte : seuil par défaut 30 jours (fermeture automatique à 1 mois) ; plusieurs épisodes ouverts pour un patient : signalé (hors vente comptoir, hors fermés/supprimés)', () => {
+  const dossiers = [d('1', 'Marie Joseph'), d('2', 'Paul Louis')];
+  const episodes = [
+    e('a', '1', { date_ouverture: il_y_a(5) }), e('b', '1', { est_hospitalisation: true, date_ouverture: il_y_a(2) }),
+    e('c', '2', { date_ouverture: il_y_a(40) }), e('d', '2', { voie_entree: 'vente_comptoir' }), e('f', '2', { statut: 'ferme' }),
+  ];
+  const r = controlerQualite({ maintenantMs: NOW, dossiers, episodes });
+  assert.deepStrictEqual(ctrl(r, 'consultation_ouverte').exemples.map(x => x.id), ['c'], 'seuil 30 jours par défaut');
+  assert.deepStrictEqual(ctrl(r, 'episodes_ouverts_multiples').exemples.map(x => [x.id, x.nombre]), [['1', 2]]);
 });

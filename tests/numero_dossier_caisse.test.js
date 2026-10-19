@@ -291,8 +291,8 @@ function routeEpisode({ droits = ['episode_creer', 'caisse_travailler'], numeroA
       throw new Error('rpc inattendue : ' + nom);
     },
   };
-  new Function('app', 'supabase', 'aPermission', 'validerCreationEpisode', 'enregistrerAuditServeur', 'donnerNumeroAuPremierEpisode', 'marquerExamensSeulement', serveur.slice(debut, fin))(
-    app, supabase, async (_u, cle) => droits.includes(cle), () => null, async (_req, action, details) => { etat.audits.push({ action, details }); }, N.donnerNumeroAuPremierEpisode, N.marquerExamensSeulement);
+  new Function('app', 'supabase', 'aPermission', 'validerCreationEpisode', 'enregistrerAuditServeur', 'donnerNumeroAuPremierEpisode', 'marquerExamensSeulement', 'motifDerogationValide', serveur.slice(debut, fin))(
+    app, supabase, async (_u, cle) => droits.includes(cle), () => null, async (_req, action, details) => { etat.audits.push({ action, details }); }, N.donnerNumeroAuPremierEpisode, N.marquerExamensSeulement, require('../utils/actesNaissance').motifDerogationValide);
   etat.appeler = async (corps = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaire({ params: { dossierId: 'd-1' }, user: { id: 'u1', email: 'a@b.c' }, body: { voie_entree: 'consultation', type_patient: 'prive', ...corps } }, res);

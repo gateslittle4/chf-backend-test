@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const { compterActesNaissance, conflitActeNaissance, motifDerogationValide } = require('./utils/actesNaissance');
+const { hospitaliserEpisode } = require('./utils/hospitalisation');
+const { fermerConsultationsAnciennes } = require('./utils/fermetureConsultations');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -94,7 +96,7 @@ const {
 // piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
@@ -912,7 +914,9 @@ const synchroListes = creerSynchroListes({ supabase, lireToutesLesPages, lirePar
 // solde réellement disponible est le total des dépôts moins la somme de ce qui a déjà été
 // consommé, jamais juste le total brut déposé.
 function calculerSoldeDepot(paiements) {
-  const totalDepots = (paiements || []).filter(p => p.mode === 'depot').reduce((s, p) => s + (Number(p.montant) || 0), 0);
+  // 19/10 : le dépôt restant d'une consultation devenue hospitalisation arrive dans le nouvel épisode par une ligne « transfert_hospitalisation » de 0 Gdes (details.depot_transfere) — aucun argent encaissé.
+  const totalDepots = (paiements || []).filter(p => p.mode === 'depot').reduce((s, p) => s + (Number(p.montant) || 0), 0)
+    + (paiements || []).reduce((s, p) => s + (Number(p.details?.depot_transfere) || 0), 0);
   const totalDepotUtilise = (paiements || []).reduce((s, p) => s + (Number(p.details?.montant_depot_utilise) || 0), 0);
   return { totalDepots, totalDepotUtilise, soldeDepot: Math.max(0, totalDepots - totalDepotUtilise) };
 }
@@ -1923,6 +1927,7 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     .from('episodes').select('*').eq('dossier_id', dossier_id).eq('statut', 'ouvert').is('supprime_le', null);
   if (erreurRecherche) return res.status(500).json({ error: erreurRecherche.message });
 
+  let derogationEpisodeAAuditer = null;
   const episodeHospitalisationOuvert = (episodesOuverts || []).find(e => e.est_hospitalisation === true);
 
   // Règle stricte : un patient hospitalisé ne peut JAMAIS avoir une 2e hospitalisation ouverte en
@@ -1939,14 +1944,20 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     });
   }
 
-  // Règle souple : tout épisode ouvert (hospitalisation ou consultation) → avertissement
-  // contournable, sauf le cas bloqué ci-dessus (2 hospitalisations).
-  if (episodesOuverts.length > 0 && !forcerMalgreAvertissement) {
-    return res.status(409).json({
-      error: 'AVERTISSEMENT_EPISODE_OUVERT',
-      message: 'Un épisode ouvert existe déjà pour ce dossier.',
-      episodesExistants: episodesOuverts,
-    });
+  // 19/10 (Esdras) : UN SEUL épisode ouvert à la fois. Si le patient voit un autre docteur, on ajoute une fiche dans l'épisode déjà ouvert ; s'il est retenu, on utilise « Hospitaliser »
+  // (la consultation se ferme, l'hospitalisation s'ouvre, dettes et dépôts suivent). Exception : droit « episode_ouvert_derogation » (direction) + motif écrit, tracée au journal.
+  // L'ancien « confirmer malgré l'avertissement » ne suffit plus.
+  if (episodesOuverts.length > 0) {
+    const derogation = req.body.derogation_episode;
+    const autorise = motifDerogationValide(derogation) && await aPermission(req.user.id, 'episode_ouvert_derogation');
+    if (!autorise) {
+      return res.status(409).json({
+        error: 'EPISODE_DEJA_OUVERT',
+        message: "Ce patient a déjà un épisode ouvert : continuez cet épisode (ajoutez une fiche), ou utilisez « Hospitaliser » s'il est retenu. Un seul épisode ouvert à la fois ; seule la direction peut autoriser une exception, avec un motif.",
+        episodesExistants: episodesOuverts,
+      });
+    }
+    derogationEpisodeAAuditer = { dossier_id, motif: derogation.motif.trim(), episodes_ouverts: episodesOuverts.map(e => e.id) };
   }
 
   // 16/10 (Esdras) : le numéro de dossier se donne AUTOMATIQUEMENT dès la création du premier épisode (numero_automatique) — ou, si la personne a déjà un numéro, la caisse le tape
@@ -1998,24 +2009,29 @@ app.post('/api/dossiers/:dossierId/episodes', async (req, res) => {
     }
     return res.status(500).json({ error: error.message });
   }
+  if (derogationEpisodeAAuditer) enregistrerAuditServeur(req, 'derogation_episode_ouvert', { ...derogationEpisodeAAuditer, nouvel_episode: data.id });
   res.status(201).json({ ...data, ...(numeroDonne ? { numero_dossier_donne: numeroDonne.numero } : {}), ...(marqueExamens ? { numero_dossier_examens: marqueExamens.numero } : {}) });
 });
 
-// Bascule est_hospitalisation : Non → Oui uniquement (sens unique confirmé, jamais de retour arrière).
-app.patch('/api/episodes/:id/hospitaliser', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
-    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+// Ancienne bascule « est_hospitalisation » sur place (même épisode) : remplacée le 19/10 par POST /api/episodes/:id/hospitaliser-nouvel-episode (nouvel épisode lié, transfert des soldes).
+// Aucun écran ne l'utilisait ; elle est refusée pour qu'on ne fabrique jamais une hospitalisation qui mélange la consultation payée et le séjour.
+app.patch('/api/episodes/:id/hospitaliser', (req, res) => {
+  res.status(410).json({ error: "Cette route n'existe plus : utilisez « Hospitaliser » (nouvel épisode lié) — POST /api/episodes/:id/hospitaliser-nouvel-episode." });
+});
+
+// 19/10 (Esdras) : « Hospitaliser » — la consultation ouverte est fermée et une hospitalisation s'ouvre dans un nouvel épisode lié ; dépôt et crédit (dette) restants passent au nouvel épisode.
+// Voir utils/hospitalisation.js. Même droit que créer un épisode (le bouton est sur la liste des épisodes ouverts de Dossier/Épisode).
+app.post('/api/episodes/:id/hospitaliser-nouvel-episode', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'episode_creer'))) {
+    return res.status(403).json({ error: "Permission 'episode_creer' requise pour hospitaliser un patient." });
   }
-  const { data: episode, error: erreurLecture } = await supabase
-    .from('episodes').select('est_hospitalisation').eq('id', req.params.id).single();
-  if (erreurLecture) return res.status(404).json({ error: 'Épisode introuvable' });
-  if (episode.est_hospitalisation) {
-    return res.status(400).json({ error: 'Déjà en hospitalisation — pas de retour en arrière possible.' });
+  try {
+    const r = await hospitaliserEpisode({ supabase, episodeId: req.params.id, service: req.body && req.body.service, typeLit: req.body && req.body.type_lit, utilisateur: req.user, calculerSoldeDepot });
+    enregistrerAuditServeur(req, 'consultation_vers_hospitalisation', { consultation: req.params.id, hospitalisation: r.nouvelEpisode.id, dossier_id: r.nouvelEpisode.dossier_id, service: r.nouvelEpisode.service, type_lit: r.nouvelEpisode.type_lit, depot_transfere: r.transfere.depot, dette_transferee: r.transfere.dette });
+    res.status(201).json({ nouvelEpisode: await episodeVersFlat(r.nouvelEpisode), nouvelEpisodeBrut: r.nouvelEpisode, consultationFermee: r.consultationFermee, transfere: r.transfere });
+  } catch (e) {
+    res.status(e.statut || 500).json({ error: e.message, code: e.code });
   }
-  const { data, error } = await supabase
-    .from('episodes').update({ est_hospitalisation: true }).eq('id', req.params.id).select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
 });
 
 // Fermeture d'un épisode (exeat normal ou sans autorisation — même mécanisme, motif différent)
@@ -3869,6 +3885,12 @@ setTimeout(async () => {
   try { if (!(await surveillanceQualite.surveillanceDuJourFaite())) await lancerSurveillanceQualite({ origine: 'rattrapage au réveil' }); }
   catch (e) { console.warn('Rattrapage de la surveillance de la qualité impossible :', e.message); }
 }, 90000).unref();
+
+// ============================================================
+// FERMETURE AUTOMATIQUE DES CONSULTATIONS (19/10, Esdras : « consultation fermée après 1 mois ») — chaque jour à 10h20 UTC (6h20 en Haïti) et au réveil du serveur (idempotent). Voir utils/fermetureConsultations.js.
+// ============================================================
+cron.schedule('20 10 * * *', () => { fermerConsultationsAnciennes({ supabase }).catch(e => console.warn('Fermeture automatique des consultations :', e.message)); });
+setTimeout(() => { fermerConsultationsAnciennes({ supabase }).catch(e => console.warn('Fermeture automatique des consultations :', e.message)); }, 120000).unref();
 
 // ============================================================
 // FERMETURE AUTOMATIQUE DES POSTES DE CAISSE (15/10, Esdras) — voir utils/fermetureAutoPostes.js.
