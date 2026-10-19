@@ -332,8 +332,9 @@ test("PUT /api/dossiers/:id accepte poids/conjoint, et numero_dossier seulement 
   assert.match(bloc, /if \(error\.code === '23505'\) \{\s*\n\s*return res\.status\(409\)\.json\(\{ error: `Le numéro de dossier "\$\{numero_dossier\}" est déjà utilisé par un autre patient\.` \}\);/, "même message de conflit que POST /api/dossiers");
 });
 
-test("hospitaliser / fermer / attente-resultats exigent caisse_travailler", () => {
-  assert.match(blocRoutePermission("app.patch('/api/episodes/:id/hospitaliser'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
+test("fermer / attente-resultats exigent caisse_travailler ; hospitaliser (nouvel épisode lié) exige episode_creer ; l'ancienne bascule sur place est refusée (410)", () => {
+  assert.match(blocRoutePermission("app.post('/api/episodes/:id/hospitaliser-nouvel-episode'"), /aPermission\(req\.user\.id, 'episode_creer'\)/);
+  assert.match(blocRoutePermission("app.patch('/api/episodes/:id/hospitaliser'"), /res\.status\(410\)/);
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/fermer'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
   assert.match(blocRoutePermission("app.patch('/api/episodes/:id/attente-resultats'"), /aPermission\(req\.user\.id, 'caisse_travailler'\)/);
 });
