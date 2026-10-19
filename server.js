@@ -1062,6 +1062,8 @@ app.post('/api/episodes', async (req, res) => {
       voie_entree: d.voie_entree || 'consultation', service: d.service_choisi || 'Général',
       type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null,
       statut: flatVersStatut(d.status), est_hospitalisation: !!d.est_hospitalisation,
+      // 19/10 : un épisode créé déjà clôturé (Achat Express) porte sa date de fermeture dès le départ.
+      ...(d.status === 'archived' ? { date_fermeture: new Date().toISOString() } : {}),
       // Sans cette colonne renseignée, la vérification d'idempotence ci-dessus ne trouve jamais
       // rien et l'index unique episodes_local_id_unique ne protège rien : les deux ne servent
       // qu'ensemble.
@@ -1435,8 +1437,8 @@ app.get('/api/qualite-donnees', async (req, res) => {
     return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
   }
   try {
-    const { dossiers, episodes } = await surveillanceQualite.lireDonnees();
-    res.json({ ...controlerQualite({ dossiers, episodes, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
+    const { dossiers, episodes, paiements } = await surveillanceQualite.lireDonnees();
+    res.json({ ...controlerQualite({ dossiers, episodes, paiements, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

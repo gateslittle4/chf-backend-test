@@ -88,8 +88,10 @@ function creerSurveillance({ supabase, lireToutesLesPages, envoyerAlerte = async
     try { dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(`${COLONNES}, mere_dossier_id, fusionne_dans, anciens_noms`).order('id')); }
     catch (e) { if (e && e.code === '42703') dossiers = await lireToutesLesPages(() => supabase.from('dossiers').select(COLONNES).order('id')); else throw e; }
     const episodes = await lireToutesLesPages(() => supabase.from('episodes')
-      .select('id, dossier_id, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, service, supprime_le').order('id'));
-    return { dossiers, episodes };
+      .select('id, dossier_id, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, date_fermeture, service, supprime_le').order('id'));
+    const paiements = await lireToutesLesPages(() => supabase.from('paiements')
+      .select('id, episode_id, fiche_id, mode, montant, annule, details, exoneration, patient_nom, date_paiement, supprime_le').order('id'));
+    return { dossiers, episodes, paiements };
   }
 
   async function lireIgnores() {
@@ -127,10 +129,10 @@ function creerSurveillance({ supabase, lireToutesLesPages, envoyerAlerte = async
   // Un passage complet. Ne lève jamais vers l'appelant : renvoie { ok, ... } (une panne de la surveillance ne doit jamais gêner le serveur).
   async function executer({ origine = 'nuit', alerter = true } = {}) {
     try {
-      let { dossiers, episodes } = await lireDonnees();
+      let { dossiers, episodes, paiements } = await lireDonnees();
       const faites = await appliquerCorrections(corrections(dossiers));
-      if (faites.length > 0) ({ dossiers, episodes } = await lireDonnees());
-      const qualite = controlerQualite({ dossiers, episodes, maintenantMs: maintenant().getTime() });
+      if (faites.length > 0) ({ dossiers, episodes, paiements } = await lireDonnees());
+      const qualite = controlerQualite({ dossiers, episodes, paiements, maintenantMs: maintenant().getTime() });
       const doublons = await doublonsPossibles(dossiers);
       const date = dateJour(maintenant, fuseau);
       const details = {

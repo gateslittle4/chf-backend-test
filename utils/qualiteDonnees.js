@@ -10,9 +10,10 @@ const exemplesDossier = (d, plus = {}) => ({ type: 'dossier', id: d.id, numero_d
 const exemplesEpisode = (e, d, plus = {}) => ({ type: 'episode', id: e.id, dossier_id: e.dossier_id, numero_dossier: d ? d.numero_dossier : null, nom: d ? d.nom : null, ...plus });
 
 // dossiers : { id, numero_dossier, nom, nom_origine, date_naissance, telephone, sexe, mere_dossier_id, fusionne_dans }
-// episodes : { id, dossier_id, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, service, supprime_le }
+// episodes : { id, dossier_id, date_fermeture, statut, est_hospitalisation, voie_entree, date_ouverture, type_patient, ong_partenaire, motif_fermeture, service, supprime_le }
+// paiements (facultatif) : { id, episode_id, fiche_id, mode, montant, annule, details, exoneration, patient_nom, date_paiement, supprime_le }
 // seuils : { joursConsultationOuverte, joursHospitalisationOuverte }
-function controlerQualite({ dossiers, episodes, maintenantMs, seuils = {} }) {
+function controlerQualite({ dossiers, episodes, paiements = [], maintenantMs, seuils = {} }) {
   const jc = seuils.joursConsultationOuverte ?? 2;
   const jh = seuils.joursHospitalisationOuverte ?? 30;
   const actifs = (dossiers || []).filter(d => !d.fusionne_dans);
@@ -57,6 +58,24 @@ function controlerQualite({ dossiers, episodes, maintenantMs, seuils = {} }) {
   ajouter('sans_numero', 'Dossiers avec épisode mais sans numéro de dossier', 'haute',
     actifs.filter(d => String(d.numero_dossier || '').startsWith('EN-ATTENTE-') && avecEpisode.has(d.id)).map(d => exemplesDossier(d)),
     "La caisse doit leur donner un numéro (bouton « Donner le numéro » dans Fiche Patient ou Dossier/Épisode), sauf les patients venus pour des examens seulement.");
+
+  // 19/10 : épisodes clôturés sans date de fermeture (la durée de séjour et les statistiques par jour en dépendent).
+  ajouter('ferme_sans_date', 'Épisodes clôturés sans date de fermeture', 'moyenne',
+    eps.filter(e => e.statut === 'ferme' && vide(e.date_fermeture)).map(e => exemplesEpisode(e, parId.get(e.dossier_id), { service: e.service || null })),
+    "L'épisode est fermé mais la date de fermeture manque : la sortie ne peut pas être datée. Rouvre-le puis archive-le à nouveau, ou signale-le à l'administrateur.");
+
+  // 19/10 : paiements. Pas de faux positifs : un dépôt, un remboursement de crédit, un paiement annulé ou supprimé n'est jamais lié à une fiche ; un paiement à zéro est normal
+  // quand un dépôt, un crédit ou une exonération a tout couvert.
+  const pays = (paiements || []).filter(p => !p.supprime_le && !p.annule);
+  const nomPaiement = (p) => ({ type: 'paiement', id: p.id, episode_id: p.episode_id, nom: p.patient_nom || null, montant: p.montant, mode: p.mode, date: p.date_paiement || null });
+  const MODES_SANS_FICHE = ['depot', 'remboursement_credit'];
+  ajouter('paiement_sans_fiche', 'Paiements liés à aucune fiche', 'moyenne',
+    pays.filter(p => vide(p.fiche_id) && !MODES_SANS_FICHE.includes(p.mode)).map(nomPaiement),
+    "Un encaissement qui ne correspond à aucune fiche n'est pas rattaché à ce qui a été facturé : à vérifier avec la caisse.");
+  const couvert = (p) => { const d = p.details || {}; return Number(d.montant_depot_utilise) > 0 || Number(d.montant_credit_utilise) > 0 || Number(d.credit_utilise) > 0 || !!p.exoneration; };
+  ajouter('paiement_zero', 'Paiements à zéro sans dépôt, crédit ni exonération', 'moyenne',
+    pays.filter(p => Number(p.montant) === 0 && !MODES_SANS_FICHE.includes(p.mode) && !couvert(p)).map(nomPaiement),
+    "Un encaissement de 0 sans raison (ni dépôt utilisé, ni crédit, ni exonération) est probablement une erreur de saisie.");
 
   const gravites = { haute: 0, moyenne: 1, faible: 2 };
   controles.sort((a, b) => (b.nombre > 0) - (a.nombre > 0) || gravites[a.gravite] - gravites[b.gravite]);
