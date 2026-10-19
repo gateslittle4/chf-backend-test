@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
+const { compterActesNaissance, conflitActeNaissance, motifDerogationValide } = require('./utils/actesNaissance');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -93,7 +94,7 @@ const {
 // piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
@@ -2136,6 +2137,41 @@ app.patch('/api/episodes/:id/lit', async (req, res) => {
   res.json(data);
 });
 
+// 19/10 (Esdras) : UN SEUL acte de naissance par épisode (accouchement, césarienne, délivrance : voir utils/actesNaissance.js). Contrôle placé AVANT la route de création (la route elle-même reste inchangée).
+// Comptés : les fiches déjà enregistrées de l'épisode (ni supprimées, ni au paiement annulé) + la nouvelle fiche. Exception : droit « acte_naissance_derogation » + motif écrit, tracée au journal
+// (action « derogation_acte_naissance », écrite par la route après la création de la fiche). Un rejeu de la file hors ligne (local_id déjà enregistré) n'est jamais refusé.
+app.use('/api/fiches', async (req, res, next) => {
+  if (req.method !== 'POST' || (req.path !== '/' && req.path !== '')) return next();
+  try {
+    const { episode_id, raw_state, local_id } = req.body || {};
+    if (!episode_id || !raw_state || compterActesNaissance(raw_state.lignesCalcul) === 0) return next();
+    if (local_id) {
+      const { data: existante } = await supabase.from('fiches').select('id').eq('local_id', local_id).maybeSingle();
+      if (existante) return next();
+    }
+    const { data: fichesDeLEpisode, error: erreurFiches } = await supabase.from('fiches').select('id, raw_state').eq('episode_id', episode_id).is('supprime_le', null);
+    if (erreurFiches) return res.status(500).json({ error: erreurFiches.message });
+    const { data: annules } = await supabase.from('paiements').select('fiche_id').eq('episode_id', episode_id).eq('annule', true).not('fiche_id', 'is', null);
+    const idsAnnules = new Set((annules || []).map(p => p.fiche_id));
+    const verdict = conflitActeNaissance({ fichesExistantes: (fichesDeLEpisode || []).filter(f => !idsAnnules.has(f.id)), lignesNouvelles: raw_state.lignesCalcul });
+    if (!verdict.conflit) return next();
+    const derogation = req.body.derogation_naissance;
+    if (!(motifDerogationValide(derogation) && await aPermission(req.user.id, 'acte_naissance_derogation'))) {
+      return res.status(409).json({ error: verdict.message, code: 'ACTE_NAISSANCE_MULTIPLE' });
+    }
+    req.derogationNaissanceAAuditer = { episode_id, motif: derogation.motif.trim(), deja: verdict.deja, nouveau: verdict.nouveau };
+    return next();
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
+// Même règle pour les fiches créées avec l'épisode (Achat Express, POST /api/episodes) — sans dérogation possible ici.
+app.use('/api/episodes', (req, res, next) => {
+  if (req.method !== 'POST' || (req.path !== '/' && req.path !== '') || !req.body || !Array.isArray(req.body.fiches) || req.body.import_sauvegarde === true) return next();
+  const verdict = conflitActeNaissance({ lignesNouvelles: req.body.fiches.flatMap(f => (f && f.rawState && f.rawState.lignesCalcul) || (f && f.raw_state && f.raw_state.lignesCalcul) || []) });
+  if (verdict.conflit) return res.status(409).json({ error: verdict.message, code: 'ACTE_NAISSANCE_MULTIPLE' });
+  return next();
+});
+
 // Fiches — rattachées à un épisode. Appelée depuis le Calculateur (caisse_travailler) ET
 // depuis l'approbation d'une exonération (demandes_repondre) — voir Demandes.js.
 // Retour d'Esdras (29/09) : un dossier suspendu redevient ACTIF dès qu'une nouvelle fiche y est
@@ -2224,6 +2260,7 @@ app.post('/api/fiches', async (req, res) => {
       }).select().single();
     if (!error) {
       await reactiverEpisodeSuspendu(episode_id);
+      if (req.derogationNaissanceAAuditer) enregistrerAuditServeur(req, 'derogation_acte_naissance', { ...req.derogationNaissanceAAuditer, fiche_id: data.id, numero_fiche });
       if (inserer_apres && decalees > 0) {
         enregistrerAuditServeur(req, 'fiche_inseree', { episode_id, fiche_id: data.id, numero_fiche, inserer_apres, fiches_decalees: decalees });
         const { data: apres } = await supabase.from('fiches').select('id, numero_fiche').eq('episode_id', episode_id).is('supprime_le', null).order('numero_fiche');
