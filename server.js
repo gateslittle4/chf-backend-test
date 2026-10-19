@@ -584,6 +584,9 @@ async function verifyToken(req, res, next) {
 app.use('/api', verifyToken);
 // Limites par compte connecté : APRÈS verifyToken (req.user connu), AVANT l'idempotence et les routes.
 app.use('/api', limiteUtilisateur);
+// Dernière activité des comptes (écran « Qui est connecté »), au plus une écriture par minute et par compte.
+const presence = require('./utils/presence');
+app.use('/api', presence.creerSuiviActivite(supabase));
 // Écritures idempotentes par clé (en-tête Idempotency-Key, audit hors ligne du 28/09) : une requête
 // abandonnée par l'app après 15 s puis rejouée ne s'applique jamais deux fois. Voir utils/idempotence.js
 // et sql/requetes_idempotentes.sql. APRÈS verifyToken : la clé est rangée par personne (req.user.id).
@@ -1360,6 +1363,31 @@ async function exigerAdministrateur(req, res) {
   if (!profil || profil.role !== 'administrateur') { res.status(403).json({ error: "Réservé à l'administrateur." }); return false; }
   return true;
 }
+// « Qui est connecté » : réservé à l'administrateur et à la direction.
+async function exigerAdminOuDirection(req, res) {
+  const { data: profil, error } = await supabase.from('users').select('role').eq('id', req.user.id).maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return false; }
+  if (!profil || !['administrateur', 'direction'].includes(profil.role)) { res.status(403).json({ error: "Réservé à l'administrateur et à la direction." }); return false; }
+  return true;
+}
+app.get('/api/admin/connectes', async (req, res) => {
+  if (!(await exigerAdminOuDirection(req, res))) return;
+  const { data, error } = await supabase.from('users').select('id, display_name, email, role, active, derniere_activite');
+  if (error) return res.status(['42703', 'PGRST204'].includes(String(error.code)) ? 503 : 500).json({ error: error.message });
+  res.json({ maintenant: new Date().toISOString(), utilisateurs: presence.classerConnectes(data) });
+});
+// « Qui était à la caisse tel jour » : paiements encaissés ce jour (heure d'Haïti) regroupés par caissier + clôture.
+app.get('/api/admin/caisse-jour', async (req, res) => {
+  if (!(await exigerAdminOuDirection(req, res))) return;
+  const bornes = presence.bornesJourHaiti(req.query.date);
+  if (!bornes) return res.status(400).json({ error: 'Date invalide (AAAA-MM-JJ).' });
+  const { data: paiements, error } = await supabase.from('paiements')
+    .select('encaisse_par, montant, mode, date_paiement, annule, supprime_le')
+    .gte('date_paiement', bornes.debut).lt('date_paiement', bornes.fin).limit(5000);
+  if (error) return res.status(500).json({ error: error.message });
+  const { data: clotures } = await supabase.from('cloture_caisse').select('cloturee_par, cloturee_par_uid, statut, date_cloture').eq('date', req.query.date);
+  res.json({ date: req.query.date, ...presence.resumerCaisseDuJour(paiements, clotures) });
+});
 app.get('/api/admin/numero-dossier-depart', async (req, res) => {
   if (!(await exigerAdministrateur(req, res))) return;
   const { data, error } = await supabase.rpc('numero_dossier_depart');
