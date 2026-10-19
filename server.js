@@ -1430,12 +1430,10 @@ function lancerSurveillanceQualite(options) {
   surveillanceEnCours = surveillanceQualite.executer(options).finally(() => { surveillanceEnCours = null; });
   return surveillanceEnCours;
 }
-const peutSurveillerQualite = async (userId) => (await aPermission(userId, 'direction_voir')) || (await aPermission(userId, 'fiche_patient_modifier'));
+// 19/10 (Esdras) : la Qualité des données est réservée au rôle « administrateur » (c'est lui le gestionnaire de données) — contrôle de rôle, comme les anomalies de caisse ; ni la direction ni le PDG.
 
 app.get('/api/qualite-donnees', async (req, res) => {
-  if (!(await peutSurveillerQualite(req.user.id))) {
-    return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
-  }
+  if (!(await exigerAdministrateur(req, res))) return;
   try {
     const { dossiers, episodes, paiements } = await surveillanceQualite.lireDonnees();
     res.json({ ...controlerQualite({ dossiers, episodes, paiements, maintenantMs: Date.now() }), genere_le: new Date().toISOString() });
@@ -1444,13 +1442,13 @@ app.get('/api/qualite-donnees', async (req, res) => {
 
 // Résumé léger (le dernier instantané de la surveillance, pas de recalcul) : alimente le compteur du menu.
 app.get('/api/qualite-donnees/resume', async (req, res) => {
-  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  if (!(await exigerAdministrateur(req, res))) return;
   try { res.json({ dernier: await surveillanceQualite.dernierInstantane() }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Historique de la surveillance (30 derniers passages) et corrections de forme faites automatiquement (100 dernières, avant → après).
 app.get('/api/qualite-donnees/surveillance', async (req, res) => {
-  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  if (!(await exigerAdministrateur(req, res))) return;
   try {
     const [historique, corrections] = await Promise.all([surveillanceQualite.historique(30), surveillanceQualite.correctionsRecentes(100)]);
     res.json({ historique, corrections, en_cours: !!surveillanceEnCours });
@@ -1459,7 +1457,7 @@ app.get('/api/qualite-donnees/surveillance', async (req, res) => {
 
 // « Lancer maintenant » : un passage complet tout de suite (sans alerte WhatsApp : la personne regarde l'écran).
 app.post('/api/qualite-donnees/surveillance/lancer', async (req, res) => {
-  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  if (!(await exigerAdministrateur(req, res))) return;
   const resultat = await lancerSurveillanceQualite({ origine: 'manuel', alerter: false });
   if (!resultat.ok) return res.status(500).json({ error: resultat.erreur });
   res.json(resultat);
