@@ -1459,7 +1459,8 @@ app.get('/api/qualite-donnees/surveillance', async (req, res) => {
 
 // « Lancer maintenant » : un passage complet tout de suite (sans alerte WhatsApp : la personne regarde l'écran).
 app.post('/api/qualite-donnees/surveillance/lancer', async (req, res) => {
-  if (!(await peutSurveillerQualite(req.user.id))) return res.status(403).json({ error: "Permission 'direction_voir' ou 'fiche_patient_modifier' requise." });
+  // 19/10 : ce passage ÉCRIT (corrections de forme, instantané au journal) — réservé à qui peut modifier les dossiers ; un rôle en lecture seule (PDG) voit les résultats sans pouvoir le lancer.
+  if (!(await aPermission(req.user.id, 'fiche_patient_modifier'))) return res.status(403).json({ error: "Permission 'fiche_patient_modifier' requise." });
   const resultat = await lancerSurveillanceQualite({ origine: 'manuel', alerter: false });
   if (!resultat.ok) return res.status(500).json({ error: resultat.erreur });
   res.json(resultat);

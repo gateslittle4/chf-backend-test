@@ -135,9 +135,17 @@ test("câblage : minuteur à 7h d'Haïti, rattrapage au réveil, un seul passage
   assert.match(serveur, /cron\.schedule\('0 11 \* \* \*', \(\) => \{ lancerSurveillanceQualite\(\{ origine: 'minuteur' \}\); \}\);/);
   assert.match(serveur, /surveillanceDuJourFaite\(\)\)\) await lancerSurveillanceQualite\(\{ origine: 'rattrapage au réveil' \}\)/);
   assert.match(serveur, /if \(surveillanceEnCours\) return surveillanceEnCours;/);
-  for (const route of ["app.get('/api/qualite-donnees'", "app.get('/api/qualite-donnees/resume'", "app.get('/api/qualite-donnees/surveillance'", "app.post('/api/qualite-donnees/surveillance/lancer'"]) {
+  for (const route of ["app.get('/api/qualite-donnees'", "app.get('/api/qualite-donnees/resume'", "app.get('/api/qualite-donnees/surveillance'"]) {
     const i = serveur.indexOf(route); assert.ok(i !== -1, route);
     assert.match(serveur.slice(i, i + 260), /peutSurveillerQualite\(req\.user\.id\)/, route);
   }
   assert.match(serveur.slice(serveur.indexOf("app.post('/api/qualite-donnees/surveillance/lancer'")), /origine: 'manuel', alerter: false/);
+});
+
+test("Lancer un contrôle maintenant (écrit dans la base) exige fiche_patient_modifier, pas seulement direction_voir (rôle PDG en lecture seule)", () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf("app.post('/api/qualite-donnees/surveillance/lancer'");
+  const bloc = src.slice(i, i + 700);
+  assert.match(bloc, /aPermission\(req\.user\.id, 'fiche_patient_modifier'\)/);
+  assert.doesNotMatch(bloc, /peutSurveillerQualite/);
 });
