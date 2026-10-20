@@ -2831,6 +2831,65 @@ app.patch('/api/depenses-caisse/:id/repondre', async (req, res) => {
   res.json(data[0]);
 });
 
+// Autres revenus (20/10, Esdras) : de l'argent encaissé à la caisse qui ne concerne AUCUN patient (certificat, location, don...). Table à part (sql/autres_revenus.sql) : jamais mélangé aux revenus des soins.
+// Même contrôle que les paiements : il faut caisse_travailler pour en enregistrer, paiement_annuler pour en annuler (et jamais soi-même).
+const MESSAGE_AUTRE_REVENU_MOTIF = 'Le motif est requis (3 à 300 caractères).';
+app.get('/api/autres-revenus', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'caisse_voir')) && !(await aPermission(req.user.id, 'fiche_patient_voir_finances'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler', 'caisse_voir' ou 'fiche_patient_voir_finances' requise." });
+  }
+  try {
+    res.json(await lireToutesLesPages(() => supabase.from('autres_revenus').select('*').order('date_revenu', { ascending: false }).order('id')));
+  } catch (e) {
+    // Table pas encore créée (script SQL pas collé) : liste vide plutôt que d'empêcher l'app de se charger.
+    if (/autres_revenus/.test(String(e.message)) && /does not exist|schema cache|relation/.test(String(e.message))) return res.json([]);
+    console.error('GET /api/autres-revenus: lecture paginée échouée :', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+app.post('/api/autres-revenus', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  const motif = typeof req.body.motif === 'string' ? req.body.motif.trim().replace(/\s+/g, ' ') : '';
+  if (motif.length < 3 || motif.length > 300) return res.status(400).json({ error: MESSAGE_AUTRE_REVENU_MOTIF });
+  const montant = Math.round((Number(req.body.montant) + Number.EPSILON) * 100) / 100;
+  if (!(montant > 0) || montant > 100000000) return res.status(400).json({ error: 'Le montant doit être supérieur à 0.' });
+  const payeur = typeof req.body.payeur === 'string' && req.body.payeur.trim() ? req.body.payeur.trim().replace(/\s+/g, ' ').slice(0, 100) : null;
+  const local_id = req.body.local_id || req.body.localId || null;
+  if (local_id) {
+    const { data: existant } = await supabase.from('autres_revenus').select('*').eq('local_id', local_id).maybeSingle();
+    if (existant) return res.status(200).json(existant);
+  }
+  const { data, error } = await supabase.from('autres_revenus').insert({
+    montant, motif, payeur, caissier: req.user.email || req.user.id, caissier_uid: req.user.id, local_id,
+  }).select().single();
+  if (error) {
+    if (error.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('autres_revenus').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  await enregistrerAuditServeur(req, 'autre_revenu_enregistre', { id: data.id, montant, motif, payeur });
+  res.status(201).json(data);
+});
+app.patch('/api/autres-revenus/:id/annuler', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'paiement_annuler'))) return res.status(403).json({ error: "Permission 'paiement_annuler' requise pour annuler un autre revenu." });
+  const motif = typeof req.body.motif === 'string' ? req.body.motif.trim() : '';
+  if (motif.length < 5) return res.status(400).json({ error: "Un motif d'annulation (5 caractères au moins) est requis." });
+  const { data: revenu, error: erreurLecture } = await supabase.from('autres_revenus').select('*').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!revenu) return res.status(404).json({ error: 'Autre revenu introuvable.' });
+  if (revenu.annule) return res.status(400).json({ error: 'Cet autre revenu est déjà annulé.' });
+  if (revenu.caissier_uid === req.user.id) return res.status(403).json({ error: "Tu ne peux pas annuler un revenu que tu as toi-même enregistré : demande à la direction." });
+  const { data, error } = await supabase.from('autres_revenus')
+    .update({ annule: true, annule_par: req.user.email || req.user.id, annule_par_uid: req.user.id, annule_le: new Date().toISOString(), motif_annulation: motif })
+    .eq('id', req.params.id).eq('annule', false).select();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data || data.length === 0) return res.status(409).json({ error: 'Cet autre revenu vient d\'être annulé par quelqu\'un d\'autre.' });
+  await enregistrerAuditServeur(req, 'autre_revenu_annule', { id: revenu.id, montant: revenu.montant, motif: revenu.motif, motifAnnulation: motif });
+  res.json(data[0]);
+});
+
 // Annulation d'un paiement — réservée à direction/administrateur (jamais celui qui a
 // encaissé lui-même, pour éviter qu'une caissière encaisse en cash puis annule pour
 // empocher). Le paiement n'est jamais supprimé, juste marqué — la trace reste complète.
@@ -3660,7 +3719,7 @@ const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
 const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-  'transferts_service', 'salaires_service', 'depenses_caisse', 'decrements_stock_appliques',
+  'transferts_service', 'salaires_service', 'depenses_caisse', 'autres_revenus', 'decrements_stock_appliques',
   'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees',
 ];
 // Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
@@ -3811,7 +3870,7 @@ const ORDRE_RESTAURATION = [
   ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
   ['catalog', 'type'], ['cloture_caisse', 'id'], ['users', 'id'],
   ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
-  ['depenses_caisse', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
+  ['depenses_caisse', 'id'], ['autres_revenus', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
   ['doublons_ignores', 'dossier_a,dossier_b'], ['migrations_appliquees', 'nom'],
 ];
 
