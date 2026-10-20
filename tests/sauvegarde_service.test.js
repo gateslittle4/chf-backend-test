@@ -256,8 +256,8 @@ test("copie B2 : protocole natif (autorisation → bucket par nom → URL d'envo
   assert.match(serverSrc, /révocable seule/i, 'la clé B2 limitée à un bucket reste documentée');
 });
 
-test("câblage : les 20 tables sauvegardées incluent compteurs, doublons_ignores et migrations_appliquees", () => {
+test("câblage : les 21 tables sauvegardées incluent compteurs, doublons_ignores, migrations_appliquees et autres_revenus", () => {
   const sauvegardees = [...blocRoute('const TABLES_A_SAUVEGARDER = [', '];').matchAll(/'(\w+)'/g)].map(m => m[1]);
-  assert.strictEqual(sauvegardees.length, 20);
-  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees']) assert.ok(sauvegardees.includes(t), t);
+  assert.strictEqual(sauvegardees.length, 21);
+  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees', 'autres_revenus']) assert.ok(sauvegardees.includes(t), t);
 });
