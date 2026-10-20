@@ -2511,8 +2511,8 @@ test("Rôle 'pharmacien_chef' : droits du pharmacien + stock_gerer + catalogue_g
   const pharmacien = table.find(r => r.role === 'pharmacien');
   const chef = table.find(r => r.role === 'pharmacien_chef');
   assert.ok(pharmacien && chef, 'les deux rôles doivent exister dans le miroir serveur');
-  assert.deepStrictEqual([...chef.permissions].sort(), [...pharmacien.permissions, 'stock_gerer', 'catalogue_gerer'].sort(),
-    "pharmacien_chef = EXACTEMENT les droits du pharmacien + stock_gerer + catalogue_gerer (si le pharmacien gagne un droit, le chef le gagne aussi)");
+  assert.deepStrictEqual([...chef.permissions].sort(), [...pharmacien.permissions, 'stock_gerer', 'catalogue_gerer', 'stock_reception', 'requisition_modifier'].sort(),
+    "pharmacien_chef = EXACTEMENT les droits du pharmacien + stock_gerer + catalogue_gerer + stock_reception + requisition_modifier (20/10) (si le pharmacien gagne un droit, le chef le gagne aussi)");
   assert.ok(!pharmacien.permissions.includes('stock_gerer'), "le pharmacien simple ne gère pas le stock par défaut");
   assert.ok(!pharmacien.permissions.includes('catalogue_gerer'), "ni le catalogue : seul le pharmacien en chef (Esdras, 14/10)");
   assert.ok(!chef.permissions.some(p => /^facturation_|rapport_chf_voir|_annuler$|_supprimer$|utilisateurs_gerer|permissions_gerer|dossier_creer/.test(p)),

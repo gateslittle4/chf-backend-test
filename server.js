@@ -96,7 +96,7 @@ const {
 // piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation','stock_reception','requisition_modifier'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
@@ -117,7 +117,7 @@ const PERMISSIONS_PAR_DEFAUT = [
   // cliquable dans Rôles & permissions" — exactement les droits du pharmacien + stock_gerer (ajouter/définir le
   // stock, dons, réquisitions). stock_gerer reste une case de la matrice : la décocher le retire sans toucher au code.
   // 14/10 (Esdras) : + catalogue_gerer (médicaments, prix). Miroir de utils/permissions.js (chf-app2).
-  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer','catalogue_gerer'] },
+  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer','catalogue_gerer','stock_reception','requisition_modifier'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
@@ -3340,6 +3340,137 @@ app.get('/api/requisitions', async (req, res) => {
   }
 });
 
+// ============================================================
+// Réception de médicaments, annulation et modification des réquisitions (20/10, Esdras)
+//  - La réception (achat ou don) a son propre onglet : on n'ajoute plus de stock « au clic » depuis la liste du stock. Chaque réception laisse une trace (qui, quand, quoi, source).
+//    Un médicament reçu en DON peut être marqué « exonération jusqu'à 50 % ».
+//  - Une réquisition déjà faite s'annule (le stock revient) ou se modifie (le stock suit la différence) ; jamais supprimée : la trace reste.
+// ============================================================
+const SOURCES_RECEPTION = ['achat', 'don'];
+app.get('/api/receptions-medicaments', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_reception')) && !(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'stock_voir'))) {
+    return res.status(403).json({ error: "Permission 'stock_reception', 'stock_gerer' ou 'stock_voir' requise." });
+  }
+  try {
+    res.json(await lireToutesLesPages(() => supabase.from('receptions_medicaments').select('*').order('date_reception', { ascending: false }).order('id')));
+  } catch (e) {
+    if (/receptions_medicaments/.test(String(e.message)) && /does not exist|schema cache|relation/.test(String(e.message))) return res.json([]);
+    res.status(500).json({ error: e.message });
+  }
+});
+app.post('/api/stock/reception', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_reception'))) return res.status(403).json({ error: "Permission 'stock_reception' requise." });
+  const { lignes } = req.body;
+  if (!Array.isArray(lignes) || lignes.length === 0 || lignes.length > 100) return res.status(400).json({ error: 'lignes (1 à 100) requises.' });
+  for (const l of lignes) {
+    if (!l || !l.id || !(Number(l.quantite) > 0) || Number(l.quantite) > 10000000) return res.status(400).json({ error: 'Chaque ligne a besoin d\'un médicament et d\'une quantité supérieure à 0.' });
+    if (!SOURCES_RECEPTION.includes(l.source)) return res.status(400).json({ error: "Chaque ligne a besoin d'une source : achat ou don." });
+    if (l.source === 'don' && typeof l.exoneration_50 !== 'boolean') return res.status(400).json({ error: "Pour un don, indique « exonération jusqu'à 50 % » : oui ou non." });
+  }
+  const local_id = req.body.local_id || req.body.localId || null;
+  const note = typeof req.body.note === 'string' && req.body.note.trim() ? req.body.note.trim().slice(0, 300) : null;
+  const recuPar = req.user.email || req.user.id;
+  let items = null;
+  for (let i = 0; i < lignes.length; i++) {
+    const l = lignes[i];
+    const idLigne = local_id ? `${local_id}-l${i}` : null;
+    if (idLigne) {
+      const { data: deja } = await supabase.from('receptions_medicaments').select('id').eq('local_id', idLigne).maybeSingle();
+      if (deja) continue; // rejeu : cette ligne est déjà entrée
+    }
+    const quantite = Number(l.quantite);
+    const { data: item, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: l.id, p_quantite_ajoutee: quantite, p_local_id: idLigne ? `${idLigne}-stock` : null });
+    if (error) return res.status(500).json({ error: `Ligne ${i + 1} (${l.id}) : ${error.message}`, lignes_deja_recues: i });
+    const nom = (item && (item.item ? item.item.nom : item.nom)) || l.nom || l.id;
+    if (l.source === 'don') {
+      const { error: erreurFlag } = await supabase.rpc('marquer_exoneration_50_medicament', { p_id: l.id, p_valeur: l.exoneration_50 });
+      if (erreurFlag) console.warn('Réception : marque « exonération 50 % » non enregistrée :', erreurFlag.message);
+    }
+    const { error: erreurTrace } = await supabase.from('receptions_medicaments').insert({
+      medicament_id: l.id, nom, quantite, source: l.source, exoneration_50: l.source === 'don' ? l.exoneration_50 : null,
+      note, recu_par: recuPar, recu_par_uid: req.user.id, local_id: idLigne,
+    });
+    if (erreurTrace && erreurTrace.code !== '23505') console.warn('Réception : trace non enregistrée :', erreurTrace.message);
+  }
+  const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle();
+  items = (catalogue && catalogue.items) || [];
+  await enregistrerAuditServeur(req, 'reception_medicaments', { lignes: lignes.map(l => ({ id: l.id, quantite: Number(l.quantite), source: l.source, exoneration_50: l.source === 'don' ? l.exoneration_50 : null })), note });
+  res.status(201).json({ success: true, items });
+});
+
+// Compare l'ancienne et la nouvelle liste d'une réquisition : { id -> variation } (positif = il faut sortir plus de stock).
+function variationsRequisition(anciennes, nouvelles) {
+  const delta = new Map();
+  for (const l of anciennes || []) delta.set(l.id, (delta.get(l.id) || 0) - (Number(l.quantite) || 0));
+  for (const l of nouvelles || []) delta.set(l.id, (delta.get(l.id) || 0) + (Number(l.qte) || 0));
+  return [...delta.entries()].filter(([, v]) => v !== 0).map(([id, variation]) => ({ id, variation }));
+}
+app.patch('/api/requisitions/:id/annuler', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'requisition_modifier'))) return res.status(403).json({ error: "Permission 'requisition_modifier' requise." });
+  const motif = typeof req.body.motif === 'string' ? req.body.motif.trim() : '';
+  if (motif.length < 5) return res.status(400).json({ error: "Un motif d'annulation (5 caractères au moins) est requis." });
+  const { data: requisition, error: erreurLecture } = await supabase.from('requisitions').select('*').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!requisition) return res.status(404).json({ error: 'Réquisition introuvable.' });
+  if (requisition.annulee) return res.status(400).json({ error: 'Cette réquisition est déjà annulée.' });
+  // Réservation : un double clic ou deux postes ne peuvent pas rendre le stock deux fois.
+  const { data: reservee, error: erreurReservation } = await supabase.from('requisitions')
+    .update({ annulee: true, annulee_par: req.user.email || req.user.id, annulee_par_uid: req.user.id, annulee_le: new Date().toISOString(), motif_annulation: motif })
+    .eq('id', req.params.id).eq('annulee', false).select();
+  if (erreurReservation) return res.status(500).json({ error: erreurReservation.message });
+  if (!reservee || reservee.length === 0) return res.status(409).json({ error: 'Cette réquisition vient d\'être annulée par quelqu\'un d\'autre.' });
+  let items = null;
+  for (const l of requisition.lignes || []) {
+    const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: l.id, p_quantite_ajoutee: Number(l.quantite) || 0, p_local_id: `${requisition.id}-annulation-${l.id}` });
+    if (error) {
+      // Le stock n'a pas pu être remis : on rouvre la réquisition (les lignes déjà remises le sont une seule fois grâce à leur identifiant).
+      await supabase.from('requisitions').update({ annulee: false, annulee_par: null, annulee_par_uid: null, annulee_le: null, motif_annulation: null }).eq('id', req.params.id).select();
+      return res.status(500).json({ error: `Stock non remis (${l.nom || l.id}) : ${error.message}` });
+    }
+  }
+  const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle();
+  items = (catalogue && catalogue.items) || [];
+  await enregistrerAuditServeur(req, 'requisition_annulee', { id: requisition.id, service: requisition.service_demandeur, lignes: requisition.lignes, motif });
+  res.json({ ...reservee[0], items });
+});
+app.put('/api/requisitions/:id', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'requisition_modifier'))) return res.status(403).json({ error: "Permission 'requisition_modifier' requise." });
+  const { service_demandeur, lignes } = req.body;
+  if (!service_demandeur || !String(service_demandeur).trim()) return res.status(400).json({ error: 'service_demandeur est requis.' });
+  if (!Array.isArray(lignes) || lignes.length === 0 || lignes.some(l => !l || !l.id || !(Number(l.qte) > 0))) return res.status(400).json({ error: 'lignes (non vides, quantités supérieures à 0) requises.' });
+  const { data: requisition, error: erreurLecture } = await supabase.from('requisitions').select('*').eq('id', req.params.id).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!requisition) return res.status(404).json({ error: 'Réquisition introuvable.' });
+  if (requisition.annulee) return res.status(400).json({ error: 'Une réquisition annulée ne peut plus être modifiée.' });
+  const variations = variationsRequisition(requisition.lignes, lignes);
+  const jeton = req.body.local_id || req.body.localId || `${Date.now()}`;
+  const aSortir = variations.filter(v => v.variation > 0);
+  const aRemettre = variations.filter(v => v.variation < 0);
+  let items = null;
+  if (aSortir.length > 0) {
+    const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: aSortir.map(v => ({ id: v.id, qte: v.variation })), p_local_id: `${requisition.id}-modif-${jeton}` });
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data.succes) {
+      const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} disponible)`).join(', ');
+      return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+    }
+    items = data.items;
+  }
+  for (const v of aRemettre) {
+    const { error } = await supabase.rpc('ajouter_stock_medicament', { p_id: v.id, p_quantite_ajoutee: -v.variation, p_local_id: `${requisition.id}-modif-${jeton}-${v.id}` });
+    if (error) return res.status(500).json({ error: `Stock non remis (${v.id}) : ${error.message}` });
+  }
+  const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle();
+  items = (catalogue && catalogue.items) || items || [];
+  const lignesAvecNoms = lignes.map(l => ({ id: l.id, nom: (items.find(i => i.id === l.id) || {}).nom || l.nom || l.id, quantite: Number(l.qte) }));
+  const { data: misAJour, error: erreurMaj } = await supabase.from('requisitions')
+    .update({ service_demandeur: String(service_demandeur).trim(), lignes: lignesAvecNoms, modifiee_par: req.user.email || req.user.id, modifiee_par_uid: req.user.id, modifiee_le: new Date().toISOString() })
+    .eq('id', req.params.id).eq('annulee', false).select();
+  if (erreurMaj || !misAJour || misAJour.length === 0) return res.status(500).json({ error: erreurMaj ? erreurMaj.message : "La réquisition n'a pas pu être mise à jour (elle vient peut-être d'être annulée) : vérifie le stock." });
+  await enregistrerAuditServeur(req, 'requisition_modifiee', { id: requisition.id, avant: { service: requisition.service_demandeur, lignes: requisition.lignes }, apres: { service: String(service_demandeur).trim(), lignes: lignesAvecNoms } });
+  res.json({ ...misAJour[0], items });
+});
+
 // Ajoute du stock à UN médicament de façon atomique (voir fonction_maj_stock_medicament.sql) —
 // remplace le read-modify-write complet du catalogue fait depuis GestionStock.js (lecture d'un
 // instantané frais du catalogue puis réécriture du tableau entier), qui pouvait perdre la
@@ -3719,7 +3850,7 @@ const BUCKET_SAUVEGARDES = 'sauvegardes-automatiques';
 const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
-  'transferts_service', 'salaires_service', 'depenses_caisse', 'autres_revenus', 'decrements_stock_appliques',
+  'transferts_service', 'salaires_service', 'depenses_caisse', 'autres_revenus', 'receptions_medicaments', 'decrements_stock_appliques',
   'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees',
 ];
 // Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
@@ -3870,7 +4001,7 @@ const ORDRE_RESTAURATION = [
   ['pieces_jointes', 'id'], ['transferts_service', 'id'], ['demandes_exoneration', 'id'],
   ['catalog', 'type'], ['cloture_caisse', 'id'], ['users', 'id'],
   ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
-  ['depenses_caisse', 'id'], ['autres_revenus', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
+  ['depenses_caisse', 'id'], ['autres_revenus', 'id'], ['receptions_medicaments', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
   ['doublons_ignores', 'dossier_a,dossier_b'], ['migrations_appliquees', 'nom'],
 ];
 
