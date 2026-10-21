@@ -67,6 +67,7 @@ setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoy
 const { validerMontantPaiement, normaliserMontant } = require('./utils/validationMontant');
 // Solde ATOMIQUE (13/10) : le paiement et son solde s'écrivent en une seule opération de la base, avec un verrou par épisode — voir sql/solde_atomique.sql.
 const { estFonctionAbsente, estRefusRemboursement } = require('./utils/soldeAtomique');
+const { verifierTotalFiche } = require('./utils/verificationPrixFiche');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -1027,6 +1028,37 @@ app.post('/api/episodes', async (req, res) => {
   if (d.local_id) {
     const { data: dejaCree } = await supabase.from('episodes').select('*').eq('local_id', d.local_id).maybeSingle();
     if (dejaCree) return res.status(200).json(await episodeVersFlat(dejaCree));
+  }
+
+  // Faille d'audit du 21/10 : cette route (compatibilité, utilisée par ⚡ Achat Express) insère aussi des FICHES (d.fiches) avec leur total_global/breakdown
+  // venus tels quels du téléphone — le même trou que POST /api/fiches, jamais couvert par ce premier correctif puisque c'est une route différente. Même
+  // vérification ici, AVANT tout insert (dossier/épisode non encore créés à ce stade) : rien n'est créé si une seule fiche a un montant refusé. Jamais
+  // appliqué à la restauration d'une sauvegarde (import_sauvegarde) : d'anciennes données, déjà telles quelles, peuvent légitimement ne plus correspondre
+  // au catalogue ou aux tarifs d'AUJOURD'HUI.
+  if (Array.isArray(d.fiches) && d.fiches.length > 0 && d.import_sauvegarde !== true) {
+    const episodePourPrix = { type_patient: flatVersTypePatient(d.type_patient), ong_partenaire: d.ong_partenaire || null };
+    const [{ data: catalogueMed }, { data: catalogueActes }, { data: parametresData }] = await Promise.all([
+      supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle(),
+      supabase.from('catalog').select('items').eq('type', 'actes').maybeSingle(),
+      supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle(),
+    ]);
+    let ongDocExpress = null;
+    if (episodePourPrix.ong_partenaire) {
+      const { data } = await supabase.from('ong_partenaires').select('date_fin_contrat').eq('nom', episodePourPrix.ong_partenaire).maybeSingle();
+      if (data) ongDocExpress = { dateFinContrat: data.date_fin_contrat };
+    }
+    const catalogue = { med: (catalogueMed && catalogueMed.items) || [], actes: (catalogueActes && catalogueActes.items) || [] };
+    const parametresPourVerif = (parametresData && parametresData.items) || {};
+    for (const f of d.fiches) {
+      const verification = verifierTotalFiche({
+        raw_state: f.rawState !== undefined ? f.rawState : f.raw_state, total_global: f.totalGlobal, breakdown: f.breakdown,
+        episode: episodePourPrix, catalogue, parametres: parametresPourVerif, ongDoc: ongDocExpress,
+      });
+      if (!verification.ok) {
+        enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes' });
+        return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+      }
+    }
   }
   // 15/10 : cette route crée aussi le DOSSIER. Même règle que POST /api/dossiers (numéro, sexe, date de naissance obligatoires), sauf deux cas
   // qui n'enregistrent pas un vrai patient : la vente comptoir (⚡ Express : client de passage, numéro « AUTO-… ») et l'import d'une sauvegarde
@@ -2276,6 +2308,37 @@ app.post('/api/fiches', async (req, res) => {
     const { data: existante } = await supabase.from('fiches').select('*').eq('local_id', local_id).maybeSingle();
     if (existante) return res.status(200).json(existante);
   }
+
+  // Faille d'audit du 21/10, la plus sérieuse trouvée : le montant d'une fiche (total_global/breakdown) venait ENTIÈREMENT du téléphone, jamais revérifié —
+  // une caissière malhonnête pouvait soigner normalement puis envoyer une fiche à un prix fabriqué plus bas, encaisser le vrai montant en espèces et garder
+  // la différence, sans que rien ne le signale. Revérifié ici avec la MÊME formule que l'app (utils/verificationPrixFiche.js) : chaque prix de ligne doit être
+  // un prix RECONNU de l'article (ancien OU nouveau prix — la caissière garde son vrai choix — ou le tarif du contrat ONG), l'hébergement est recalculé des
+  // dates et du tarif réglé par la direction, la ventilation par service doit concorder. Seule la chirurgie hors-catalogue (texte libre + montant libre) reste
+  // invérifiable par nature, juste bornée. `raw_state` absent (appelant inconnu) n'est jamais bloqué, par prudence.
+  // raw_state absent (jamais le cas des appelants connus) : rien à relire, on ne fait aucune requête de plus — voir verifierTotalFiche.
+  if (raw_state !== undefined && raw_state !== null) {
+    const { data: episodePourPrix } = await supabase.from('episodes').select('type_patient, ong_partenaire').eq('id', episode_id).maybeSingle();
+    const [{ data: catalogueMed }, { data: catalogueActes }, { data: parametresData }] = await Promise.all([
+      supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle(),
+      supabase.from('catalog').select('items').eq('type', 'actes').maybeSingle(),
+      supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle(),
+    ]);
+    let ongDoc = null;
+    if (episodePourPrix && episodePourPrix.ong_partenaire) {
+      const { data } = await supabase.from('ong_partenaires').select('date_fin_contrat').eq('nom', episodePourPrix.ong_partenaire).maybeSingle();
+      if (data) ongDoc = { dateFinContrat: data.date_fin_contrat };
+    }
+    const verification = verifierTotalFiche({
+      raw_state, total_global, breakdown, episode: episodePourPrix || null,
+      catalogue: { med: (catalogueMed && catalogueMed.items) || [], actes: (catalogueActes && catalogueActes.items) || [] },
+      parametres: (parametresData && parametresData.items) || {}, ongDoc,
+    });
+    if (!verification.ok) {
+      enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id, total_global, breakdown, erreur: verification.erreur });
+      return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+    }
+  }
+
 
   // Bug financier découvert le 28/08 : numero_fiche venait du CLIENT (CalculateurPanel.js,
   // Math.max(fichesDossier) + 1) — un état local qui peut rester en retard, notamment quand le
