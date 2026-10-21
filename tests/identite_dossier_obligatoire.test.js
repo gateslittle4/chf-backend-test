@@ -35,7 +35,8 @@ test("le numéro de dossier n'est PLUS exigé à la création (16/10) : c'est la
 
 test("POST /api/episodes (qui crée aussi le dossier) applique la même règle, sauf vente comptoir (Express) et import de sauvegarde", () => {
   const i = serveur.indexOf("app.post('/api/episodes'");
-  const bloc = serveur.slice(i, i + 5200);
+  // 21/10 : fenêtre élargie (vérification du montant des fiches ajoutée avant la création du dossier, voir utils/verificationPrixFiche.js).
+  const bloc = serveur.slice(i, i + 7200);
   assert.match(bloc, /const exempteIdentite = d\.voie_entree === 'vente_comptoir' \|\| d\.import_sauvegarde === true;/);
   assert.match(bloc, /erreurIdentiteDossier\(\{ sexe: d\.sexe, date_naissance: d\.date_naissance \}\)/);
   assert.ok(bloc.indexOf('erreurIdentiteDossier') < bloc.indexOf(".from('dossiers')"), 'le contrôle précède la création du dossier');
