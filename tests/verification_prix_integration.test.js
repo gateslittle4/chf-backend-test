@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const { verifierTotalFiche } = require('../utils/verificationPrixFiche');
+const { estRejeu: ESTREJEU } = require('../utils/heureServeur');
 
 function baseSimulee({ episode, medicaments = [], actes = [], parametres = {}, ongPartenaires = [] } = {}) {
   const fiches = [];
@@ -41,11 +42,11 @@ function monter(supabase) {
   let gestionnaire;
   const app = { post: (_c, fn) => { gestionnaire = fn; } };
   const audits = [];
-  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'reactiverEpisodeSuspendu', 'verifierTotalFiche', 'console', serverSrc.slice(debut, fin))(
-    app, supabase, async () => true, () => true, async (_req, action, details) => audits.push({ action, details }), async () => {}, verifierTotalFiche, { ...console, warn() {} });
-  const appeler = async (corps) => {
+  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'reactiverEpisodeSuspendu', 'verifierTotalFiche', 'estRejeu', 'console', serverSrc.slice(debut, fin))(
+    app, supabase, async () => true, () => true, async (_req, action, details) => audits.push({ action, details }), async () => {}, verifierTotalFiche, ESTREJEU, { ...console, warn() {} });
+  const appeler = async (corps, headers = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
-    await gestionnaire({ body: corps, user: { id: 'u1', email: 'caisse@chf.test' } }, res);
+    await gestionnaire({ body: corps, headers, user: { id: 'u1', email: 'caisse@chf.test' } }, res);
     return res;
   };
   return { appeler, audits };
@@ -112,15 +113,15 @@ function monterEpisodes(supabase) {
   let gestionnaire;
   const app = { post: (_c, fn) => { gestionnaire = fn; } };
   const audits = [];
-  new Function('app', 'supabase', 'aPermission', 'formaterNomPropre', 'erreurIdentiteDossier', 'numeroProvisoire', 'erreurNumeroDossier', 'ficheVersColonnes', 'episodeVersFlat', 'flatVersStatut', 'flatVersTypePatient', 'dateOuNull', 'enregistrerAuditServeur', 'verifierTotalFiche', 'console', serverSrc.slice(debut, fin))(
+  new Function('app', 'supabase', 'aPermission', 'formaterNomPropre', 'erreurIdentiteDossier', 'numeroProvisoire', 'erreurNumeroDossier', 'ficheVersColonnes', 'episodeVersFlat', 'flatVersStatut', 'flatVersTypePatient', 'dateOuNull', 'enregistrerAuditServeur', 'verifierTotalFiche', 'estRejeu', 'console', serverSrc.slice(debut, fin))(
     app, supabase, async () => true,
     (n) => n, () => null, () => 'EN-ATTENTE-x', () => null,
     (f) => ({ numero_fiche: f.numeroFiche, cree_par: f.creePar, probleme: !!f.probleme, note_probleme: f.noteProbleme, total_global: f.totalGlobal || 0, breakdown: f.breakdown || {}, mode_paiement: f.modePaiement, raw_state: f.rawState || {} }),
     async (e) => e, (s) => s === 'archived' ? 'ferme' : 'ouvert', (t) => t === 'ONG' ? 'partenaire' : 'prive', (v) => v || null,
-    async (_req, action, details) => audits.push({ action, details }), verifierTotalFiche, { ...console, warn() {} });
-  const appeler = async (corps) => {
+    async (_req, action, details) => audits.push({ action, details }), verifierTotalFiche, ESTREJEU, { ...console, warn() {} });
+  const appeler = async (corps, headers = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
-    await gestionnaire({ body: corps, user: { id: 'u1', email: 'caisse@chf.test' } }, res);
+    await gestionnaire({ body: corps, headers, user: { id: 'u1', email: 'caisse@chf.test' } }, res);
     return res;
   };
   return { appeler, audits };
@@ -153,4 +154,29 @@ test("⚡ Achat Express : l'import d'une sauvegarde n'est JAMAIS bloqué par cet
   const r = await m.appeler({ nom_patient: 'Ancien Patient', import_sauvegarde: true, type_patient: 'PRIVE',
     fiches: [{ totalGlobal: 999999, breakdown: {}, rawState: { lignesCalcul: [{ itemId: 'm1', type: 'med', nom: 'Amoxicilline', qte: 1, prix: 999999 }] } }] });
   assert.strictEqual(r.code, 201);
+});
+
+// ---- HORS LIGNE : un rejeu de la file d'attente n'est JAMAIS refusé (la vente a déjà eu lieu), seulement signalé ----
+test("HORS LIGNE : une fiche rejouée depuis la file d'attente (X-CHF-Rejeu) dont le prix a changé entre-temps est ENREGISTRÉE et signalée, pas refusée", async () => {
+  const supabase = baseSimulee({ episode: EPISODE, medicaments: [{ ...MED, prix: 120 }] }); // le prix est passé de 100 à 120 pendant la coupure
+  const m = monter(supabase);
+  const corps = { episode_id: 'ep1', total_global: 200, raw_state: { lignesCalcul: [{ itemId: 'm1', type: 'med', nom: 'Amoxicilline', qte: 2, prix: 100 }] } };
+  const enLigne = await m.appeler(corps);
+  assert.strictEqual(enLigne.code, 400, 'en ligne : refusé tout de suite');
+  assert.strictEqual(supabase.fiches.length, 0);
+  const rejeu = await m.appeler({ ...corps, local_id: 'queue-1' }, { 'x-chf-rejeu': '1' });
+  assert.strictEqual(rejeu.code, 201, 'hors ligne rejoué : enregistré, la transaction n\'est pas perdue');
+  assert.strictEqual(supabase.fiches.length, 1);
+  assert.ok(m.audits.some(a => a.action === 'fiche_montant_suspect' && a.details.hors_ligne === true), 'signalé à la direction');
+});
+
+test("HORS LIGNE : Achat Express rejoué depuis la file d'attente, prix changé entre-temps : enregistré et signalé", async () => {
+  const supabase = baseSimuleeEpisodes({ medicaments: [{ ...MED, prix: 120 }] });
+  const m = monterEpisodes(supabase);
+  const corps = { nom_patient: 'Client Comptoir', voie_entree: 'vente_comptoir', status: 'archived', type_patient: 'PRIVE',
+    fiches: [{ totalGlobal: 200, breakdown: { med: 200 }, rawState: { lignesCalcul: [{ itemId: 'm1', type: 'med', nom: 'Amoxicilline', qte: 2, prix: 100 }] } }] };
+  assert.strictEqual((await m.appeler(corps)).code, 400);
+  const rejeu = await m.appeler({ ...corps, local_id: 'queue-2' }, { 'x-chf-rejeu': '1' });
+  assert.strictEqual(rejeu.code, 201);
+  assert.ok(m.audits.some(a => a.action === 'fiche_montant_suspect'));
 });

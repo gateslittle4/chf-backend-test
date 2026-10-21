@@ -1055,8 +1055,13 @@ app.post('/api/episodes', async (req, res) => {
         episode: episodePourPrix, catalogue, parametres: parametresPourVerif, ongDoc: ongDocExpress,
       });
       if (!verification.ok) {
-        enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes' });
-        return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+        // Même règle qu'à POST /api/fiches : un rejeu hors ligne n'est jamais refusé (vente déjà faite), seulement signalé.
+        if (estRejeu(req)) {
+          enregistrerAuditServeur(req, 'fiche_montant_suspect', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes', hors_ligne: true });
+        } else {
+          enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes' });
+          return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+        }
       }
     }
   }
@@ -2334,8 +2339,15 @@ app.post('/api/fiches', async (req, res) => {
       parametres: (parametresData && parametresData.items) || {}, ongDoc,
     });
     if (!verification.ok) {
-      enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id, total_global, breakdown, erreur: verification.erreur });
-      return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+      // HORS LIGNE (rejeu de la file d'attente, en-tête X-CHF-Rejeu) : jamais refusé. La vente a déjà eu lieu (argent pris, reçu remis) alors que le téléphone ne pouvait pas
+      // joindre le serveur : un prix qui a changé entre-temps (nouveaux tarifs appliqués, contrat terminé) ne doit pas faire PERDRE la transaction. On l'enregistre et on la SIGNALE
+      // à la direction (journal d'audit, action sensible) — détectée, jamais perdue. En ligne, le refus reste immédiat.
+      if (estRejeu(req)) {
+        enregistrerAuditServeur(req, 'fiche_montant_suspect', { episode_id, total_global, breakdown, erreur: verification.erreur, hors_ligne: true });
+      } else {
+        enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id, total_global, breakdown, erreur: verification.erreur });
+        return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+      }
     }
   }
 
@@ -2746,21 +2758,26 @@ app.use('/api/paiements', async (req, res, next) => {
         if (fichesExpress && fichesExpress.length === 1) fiche = fichesExpress[0];
       }
     }
-    if (fiche && fiche.supprime_le) return res.status(400).json({ error: 'Cette fiche est supprimée : le paiement ne peut pas lui être rattaché.', code: 'PAIEMENT_FICHE_INCOHERENT' });
-    if (fiche && corps.episode_id && fiche.episode_id !== corps.episode_id) {
-      enregistrerAuditServeur(req, 'paiement_refuse', { episode_id: corps.episode_id, fiche_id: fiche.id, montant: corps.montant, mode: corps.mode, erreur: 'fiche_autre_episode' });
-      return res.status(400).json({ error: "Ce paiement est rattaché à la fiche d'un autre dossier.", code: 'PAIEMENT_FICHE_INCOHERENT' });
-    }
+    // HORS LIGNE (rejeu de la file d'attente) : jamais refusé — l'argent est déjà pris et le reçu remis ; un refus ferait PERDRE la transaction (échec définitif dans la file du
+    // téléphone). On enregistre et on SIGNALE à la direction (journal d'audit, action sensible). En ligne, le refus reste immédiat.
+    const rejeu = estRejeu(req);
+    const refuserOuSignaler = (erreur, details) => {
+      if (rejeu) {
+        enregistrerAuditServeur(req, 'paiement_suspect', { episode_id: corps.episode_id || null, fiche_id: fiche ? fiche.id : null, montant: corps.montant, mode: corps.mode, erreur, hors_ligne: true, ...details });
+        return next();
+      }
+      enregistrerAuditServeur(req, 'paiement_refuse', { episode_id: corps.episode_id || null, fiche_id: fiche ? fiche.id : null, montant: corps.montant, mode: corps.mode, erreur, ...details });
+      return res.status(400).json({ error: erreur, code: 'PAIEMENT_FICHE_INCOHERENT' });
+    };
+    if (fiche && fiche.supprime_le) return refuserOuSignaler('Cette fiche est supprimée : le paiement ne peut pas lui être rattaché.');
+    if (fiche && corps.episode_id && fiche.episode_id !== corps.episode_id) return refuserOuSignaler("Ce paiement est rattaché à la fiche d'un autre dossier.");
     let soldeDepotDisponible = 0;
     if (corps.details && Number(corps.details.montant_depot_utilise) > 0 && corps.episode_id) {
       const { data: paiementsEpisode } = await supabase.from('paiements').select('*').eq('episode_id', corps.episode_id).or('annule.eq.false,annule.is.null').is('supprime_le', null);
       soldeDepotDisponible = calculerSoldeDepot(paiementsEpisode || []).soldeDepot;
     }
     const verdict = verifierPaiementContreFiche({ corps, fiche, soldeDepotDisponible });
-    if (!verdict.ok) {
-      enregistrerAuditServeur(req, 'paiement_refuse', { episode_id: corps.episode_id || null, fiche_id: fiche ? fiche.id : null, montant: corps.montant, mode: corps.mode, erreur: verdict.erreur });
-      return res.status(400).json({ error: verdict.erreur, code: 'PAIEMENT_FICHE_INCOHERENT' });
-    }
+    if (!verdict.ok) return refuserOuSignaler(verdict.erreur);
     return next();
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });

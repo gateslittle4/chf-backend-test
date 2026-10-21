@@ -75,14 +75,14 @@ function monter({ fiches = [], paiements = [], episodes = [] } = {}) {
   let mw; const app = { use: (_c, fn) => { mw = fn; } };
   const audits = [];
   const { verifierPaiementContreFiche: v, MODES_VENTE } = require('../utils/verificationPrixFiche');
-  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'calculerSoldeDepot', 'verifierPaiementContreFiche', 'MODES_VENTE', serverSrc.slice(debut, fin))(
+  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'calculerSoldeDepot', 'verifierPaiementContreFiche', 'MODES_VENTE', 'estRejeu', serverSrc.slice(debut, fin))(
     app, { from }, async () => true, (x) => typeof x === 'string' && /^[0-9a-f-]{36}$/i.test(x),
     async (_r, action, details) => audits.push({ action, details }),
-    (liste) => ({ soldeDepot: liste.filter(p => p.mode === 'depot').reduce((s, p) => s + p.montant, 0) }), v, MODES_VENTE);
-  const appeler = async (body) => {
+    (liste) => ({ soldeDepot: liste.filter(p => p.mode === 'depot').reduce((s, p) => s + p.montant, 0) }), v, MODES_VENTE, require('../utils/heureServeur').estRejeu);
+  const appeler = async (body, headers = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     let suite = false;
-    await mw({ method: 'POST', path: '/', body, user: { id: 'u1' } }, res, () => { suite = true; });
+    await mw({ method: 'POST', path: '/', body, headers, user: { id: 'u1' } }, res, () => { suite = true; });
     return { res, suite };
   };
   return { appeler, audits };
@@ -120,4 +120,16 @@ test("middleware : fiche d'un autre dossier refusée ; dépôts et remboursement
   assert.strictEqual((await m.appeler({ mode: 'depot', montant: 100, episode_id: 'ep1' })).suite, true);
   assert.strictEqual((await m.appeler({ mode: 'remboursement_credit', montant: 100, episode_id: 'ep1' })).suite, true);
   assert.strictEqual((await m.appeler({ mode: 'cash', montant: 1, episode_id: 'ep1', local_id: 'DEJA' })).suite, true, 'rejeu déjà enregistré');
+});
+
+test("HORS LIGNE : un paiement rejoué depuis la file d'attente (X-CHF-Rejeu) n'est JAMAIS refusé — enregistré et signalé à la direction (la transaction n'est pas perdue)", async () => {
+  const m = monter({ fiches: [{ id: UUID, episode_id: 'ep1', total_global: 5000, supprime_le: null, local_id: 'L1' }] });
+  const trop_bas = { mode: 'cash', montant: 500, episode_id: 'ep1', fiche_id: UUID, local_id: 'L9' };
+  assert.strictEqual((await m.appeler(trop_bas)).suite, false, 'en ligne : refusé');
+  const rejeu = await m.appeler(trop_bas, { 'x-chf-rejeu': '1' });
+  assert.strictEqual(rejeu.suite, true, 'hors ligne rejoué : passe');
+  assert.ok(m.audits.some(a => a.action === 'paiement_suspect' && a.details.hors_ligne === true));
+  // sans fiche retrouvable (ex. la fiche n'a pas encore été rejouée) : pareil, jamais perdu
+  const sansFiche = await m.appeler({ mode: 'cash', montant: 100, episode_id: 'ep1', local_id: 'L10' }, { 'x-chf-rejeu': '1' });
+  assert.strictEqual(sansFiche.suite, true);
 });
