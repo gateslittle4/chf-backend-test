@@ -976,6 +976,8 @@ app.get('/api/episodes/:id/solde-depot', async (req, res) => {
 });
 
 app.get('/api/episodes', async (req, res) => {
+  // 21/10 : même correctif — la liste complète des épisodes (dossiers, totaux, statuts) n'avait aucune vérification de permission.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   // Lecture groupée (voir episodesVersFlatEnLot) : un nombre constant de requêtes par lot au lieu
   // de 3 par épisode. Résultat strictement identique — les deux chemins partagent le même
   // assemblage (assemblerEpisodeFlat).
@@ -1284,6 +1286,9 @@ app.get('/api/episodes/corbeille', async (req, res) => {
 // au lieu de retrouver le patient existant. Repli sur %nom% si la fonction/l'extension n'existe
 // pas encore (comme les autres fonctions atomiques du projet, code d'erreur 42883).
 app.get('/api/dossiers/recherche', async (req, res) => {
+  // 21/10 : faille d'audit — cette route (et les suivantes du même bloc) n'avait aucune vérification de permission, juste un jeton valide. Tous les rôles
+  // par défaut ont déjà fiche_patient_voir (aucun changement de comportement aujourd'hui) : ferme le trou pour un futur rôle créé sans ce droit.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   const nom = (req.query.nom || '').trim();
   const numero = (req.query.numero || '').trim();
   if (!nom && !numero) return res.json([]);
@@ -1505,6 +1510,11 @@ app.post('/api/dossiers', async (req, res) => {
   }
   const { numero_dossier: numeroSaisi, nom: nomSaisi, date_naissance, telephone, adresse, local_id, sexe, mere_dossier_id } = req.body;
   if (!nomSaisi) return res.status(400).json({ error: 'Le nom est requis' });
+  // Faille d'audit du 21/10 : nom/adresse/téléphone n'avaient aucune limite de longueur côté serveur (seul le corps entier était borné à 10 Mo) — un compte
+  // avec dossier_creer ou caisse_travailler (presque tous les rôles) pouvait gonfler une colonne TEXT avec plusieurs Mo de texte. Bornes larges, jamais atteintes par un vrai dossier.
+  if (typeof nomSaisi === 'string' && nomSaisi.length > 200) return res.status(400).json({ error: 'Le nom est trop long (200 caractères au plus).' });
+  if (typeof adresse === 'string' && adresse.length > 300) return res.status(400).json({ error: "L'adresse est trop longue (300 caractères au plus)." });
+  if (typeof telephone === 'string' && telephone.length > 40) return res.status(400).json({ error: 'Le téléphone est trop long (40 caractères au plus).' });
   const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
   if (!nom) return res.status(400).json({ error: 'Le nom est requis' });
   // Idempotence : mêmes principes que /api/fiches et /api/paiements — nécessaire maintenant que
@@ -1609,6 +1619,8 @@ app.post('/api/dossiers', async (req, res) => {
 
 // Fiche patient — infos de base (nom, tél, adresse, date de naissance), pour affichage/préremplissage.
 app.get('/api/dossiers/:id', async (req, res) => {
+  // 21/10 : même correctif (voir /api/dossiers/recherche juste au-dessus).
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   const { data, error } = await supabase.from('dossiers').select('*').eq('id', req.params.id).single();
   if (error) return res.status(404).json({ error: 'Dossier introuvable' });
   // 14/10 : la mère d'un nouveau-né, ses enfants, et — si ce dossier a été fusionné — le dossier final. Tout est facultatif : une base pas encore
@@ -1648,6 +1660,11 @@ app.put('/api/dossiers/:id', async (req, res) => {
   }
   const { nom: nomSaisi, date_naissance, telephone, adresse, poids, conjoint: conjointSaisi, sexe, numero_dossier, mere_dossier_id } = req.body;
   if (!nomSaisi || !String(nomSaisi).trim()) return res.status(400).json({ error: 'Le nom est requis' });
+  // Même correctif que POST /api/dossiers ci-dessus (faille d'audit du 21/10).
+  if (typeof nomSaisi === 'string' && nomSaisi.length > 200) return res.status(400).json({ error: 'Le nom est trop long (200 caractères au plus).' });
+  if (typeof adresse === 'string' && adresse.length > 300) return res.status(400).json({ error: "L'adresse est trop longue (300 caractères au plus)." });
+  if (typeof telephone === 'string' && telephone.length > 40) return res.status(400).json({ error: 'Le téléphone est trop long (40 caractères au plus).' });
+  if (typeof conjointSaisi === 'string' && conjointSaisi.length > 200) return res.status(400).json({ error: 'Le nom du conjoint est trop long (200 caractères au plus).' });
   const nom = formaterNomPropre(nomSaisi); // majuscule au début de chaque mot (14/10)
   const conjoint = typeof conjointSaisi === 'string' ? formaterNomPropre(conjointSaisi) : conjointSaisi;
   if (sexe !== undefined && sexe !== null && sexe !== 'M' && sexe !== 'F') {
@@ -1804,6 +1821,9 @@ app.post('/api/dossiers/:id/pieces-jointes', async (req, res) => {
 // Lien signé temporaire (1h) plutôt que de faire transiter les octets du fichier par ce serveur —
 // le navigateur télécharge directement depuis Supabase Storage.
 app.get('/api/dossiers/:id/pieces-jointes/:fichierId/lien', async (req, res) => {
+  // Faille d'audit du 21/10 : contrairement à la LISTE des pièces jointes (volontairement ouverte, comme GET /api/dossiers/:id — voir le test juste au-dessus),
+  // CE lien donne un accès réel au FICHIER (souvent une pièce d'identité) : un compte authentifié quelconque pouvait en obtenir un (lien signé, 1h) pour n'importe quel dossier.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   const { data: piece, error: erreurPiece } = await supabase
     .from('pieces_jointes').select('storage_path, nom_original').eq('id', req.params.fichierId).eq('dossier_id', req.params.id).maybeSingle();
   if (erreurPiece) return res.status(500).json({ error: erreurPiece.message });
@@ -1850,6 +1870,8 @@ app.post('/api/dossiers/:id/pieces-jointes/:fichierId/restaurer', async (req, re
 
 // Épisodes ouverts d'un dossier — la question centrale du flux anti-doublon
 app.get('/api/dossiers/:id/episodes-ouverts', async (req, res) => {
+  // 21/10 : même correctif.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   const { data, error } = await supabase
     .from('episodes').select('*').eq('dossier_id', req.params.id).eq('statut', 'ouvert').is('supprime_le', null);
   if (error) return res.status(500).json({ error: error.message });
@@ -2240,6 +2262,12 @@ app.post('/api/fiches', async (req, res) => {
   }
   const { episode_id, cree_par, cree_par_uid, raw_state, local_id, total_global, breakdown, mode_paiement, inserer_apres } = req.body;
   if (!episode_id) return res.status(400).json({ error: 'episode_id est requis' });
+  // Faille d'audit du 21/10 : une exonération ne peut être APPLIQUÉE (fiche créée avec ce mode) que par quelqu'un qui peut l'ACCORDER (demandes_repondre) —
+  // sans ce contrôle, n'importe quel compte ayant seulement caisse_travailler (ex. comptable, pharmacien) pouvait appeler cette route directement (hors écran)
+  // avec mode_paiement: 'exoneration' et s'auto-accorder une remise, sans jamais passer par la direction (voir Demandes.js, le seul appelant légitime).
+  if (mode_paiement === 'exoneration' && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Une exonération doit être accordée par la direction (permission 'demandes_repondre')." });
+  }
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
   // lors d'une coupure réseau, puis renvoyée par la file d'attente), on renvoie
@@ -2329,6 +2357,8 @@ app.post('/api/fiches', async (req, res) => {
 });
 
 app.get('/api/fiches/episode/:episodeId', async (req, res) => {
+  // 21/10 : même correctif.
+  if (!(await aPermission(req.user.id, 'fiche_patient_voir'))) return res.status(403).json({ error: "Permission 'fiche_patient_voir' requise." });
   // .is('supprime_le', null) manquait ici (trouvé le 13/09 en testant la corbeille dossiers avec un
   // compte réel) — cette route sert à ROUVRIR un dossier dans le Calculateur pour continuer à le
   // facturer (voir AppHospitaliere.js, GestionOng.js) : une fiche mise à la corbeille par erreur, une
@@ -2632,6 +2662,10 @@ app.get('/api/paiements', async (req, res) => {
 app.post('/api/paiements', async (req, res) => {
   if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
+  }
+  // Même correctif que POST /api/fiches ci-dessus (faille d'audit du 21/10) : seule la direction (demandes_repondre) peut enregistrer un paiement d'exonération.
+  if (req.body.mode === 'exoneration' && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Une exonération doit être accordée par la direction (permission 'demandes_repondre')." });
   }
   const local_id = req.body.local_id || req.body.localId;
   if (local_id) {
