@@ -56,7 +56,8 @@ test('une vente sans fiche retrouvable est refusée ; dépôts et remboursements
 
 // ---- le branchement dans server.js (middleware placé avant la route) ----
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-function monter({ fiches = [], paiements = [], episodes = [] } = {}) {
+const VRAI_SOLDE = (() => { const d = serverSrc.indexOf('function calculerSoldeDepot'); return new Function(`${serverSrc.slice(d, serverSrc.indexOf('\n}\n', d) + 3)}; return calculerSoldeDepot;`)(); })();
+function monter({ fiches = [], paiements = [], episodes = [], vraiSolde = false } = {}) {
   const tables = { fiches, paiements, episodes };
   const from = (nom) => {
     const filtres = [];
@@ -78,7 +79,7 @@ function monter({ fiches = [], paiements = [], episodes = [] } = {}) {
   new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'calculerSoldeDepot', 'verifierPaiementContreFiche', 'MODES_VENTE', 'estRejeu', serverSrc.slice(debut, fin))(
     app, { from }, async () => true, (x) => typeof x === 'string' && /^[0-9a-f-]{36}$/i.test(x),
     async (_r, action, details) => audits.push({ action, details }),
-    (liste) => ({ soldeDepot: liste.filter(p => p.mode === 'depot').reduce((s, p) => s + p.montant, 0) }), v, MODES_VENTE, require('../utils/heureServeur').estRejeu);
+    vraiSolde ? VRAI_SOLDE : (liste) => ({ soldeDepot: liste.filter(p => p.mode === 'depot').reduce((s, p) => s + p.montant, 0) }), v, MODES_VENTE, require('../utils/heureServeur').estRejeu);
   const appeler = async (body, headers = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     let suite = false;
@@ -132,4 +133,59 @@ test("HORS LIGNE : un paiement rejoué depuis la file d'attente (X-CHF-Rejeu) n'
   // sans fiche retrouvable (ex. la fiche n'a pas encore été rejouée) : pareil, jamais perdu
   const sansFiche = await m.appeler({ mode: 'cash', montant: 100, episode_id: 'ep1', local_id: 'L10' }, { 'x-chf-rejeu': '1' });
   assert.strictEqual(sansFiche.suite, true);
+});
+
+// ---- Trouvé en testant hors ligne sur le vrai site : le même dépôt déduit deux fois par deux ventes hors ligne de suite ----
+const REJEU = { 'x-chf-rejeu': '1' };
+function episodeAvecDepotEpuise() { // 1 000 déposés, 1 000 déjà utilisés par des fiches précédentes
+  return monter({ vraiSolde: true, fiches: [{ id: UUID, episode_id: 'ep1', total_global: 300, supprime_le: null, local_id: 'L1' }],
+    paiements: [{ id: 'd1', episode_id: 'ep1', mode: 'depot', montant: 1000, annule: false, supprime_le: null }, { id: 'u1', episode_id: 'ep1', mode: 'cash', montant: 0, annule: false, supprime_le: null, details: { montant_depot_utilise: 1000 } }] });
+}
+
+test("HORS LIGNE : un paiement partiel rejoué qui redéduit un dépôt déjà épuisé — le dépôt est ramené à 0 et l'excédent passe en dette (rien n'est perdu)", async () => {
+  const m = episodeAvecDepotEpuise();
+  const corps = { mode: 'cash', montant: 100, solde_restant: 100, episode_id: 'ep1', fiche_id: UUID, local_id: 'B1', details: { paiement_partiel: true, reste: 100, total_fiche: 300, montant_paye: 100, montant_depot_utilise: 100 } };
+  const r = await m.appeler(corps, REJEU);
+  assert.strictEqual(r.suite, true, 'enregistré');
+  assert.strictEqual(corps.details.montant_depot_utilise, undefined, 'plus de dépôt déduit');
+  assert.strictEqual(corps.solde_restant, 200, 'le patient doit 200 (100 + les 100 de dépôt qui n\'existaient plus)');
+  assert.strictEqual(corps.details.reste, 200);
+  assert.strictEqual(corps.montant + corps.solde_restant, 300, 'total de la fiche exact');
+  assert.ok(m.audits.some(a => a.action === 'paiement_depot_corrige' && a.details.mis_en_dette === 100));
+});
+
+test("HORS LIGNE : un paiement complet rejoué qui redéduit un dépôt épuisé devient un paiement partiel (payé + reste dû = total)", async () => {
+  const m = episodeAvecDepotEpuise();
+  const corps = { mode: 'cash', montant: 200, episode_id: 'ep1', fiche_id: UUID, local_id: 'B2', details: { montant_depot_utilise: 100 } };
+  assert.strictEqual((await m.appeler(corps, REJEU)).suite, true);
+  assert.strictEqual(corps.details.paiement_partiel, true);
+  assert.strictEqual(corps.solde_restant, 100);
+  assert.strictEqual(corps.montant + corps.solde_restant, 300);
+});
+
+test("HORS LIGNE : une fiche payée ENTIÈREMENT par un dépôt qui n'existe plus devient un crédit du même montant", async () => {
+  const m = episodeAvecDepotEpuise();
+  const corps = { mode: 'cash', montant: 0, episode_id: 'ep1', fiche_id: UUID, local_id: 'B3', details: { montant_depot_utilise: 300 } };
+  assert.strictEqual((await m.appeler(corps, REJEU)).suite, true);
+  assert.strictEqual(corps.mode, 'credit');
+  assert.strictEqual(corps.solde_restant, 300);
+});
+
+test("HORS LIGNE : dépôt seulement en partie disponible (40 sur 100 demandés) — 40 gardés, 60 en dette", async () => {
+  const m = monter({ vraiSolde: true, fiches: [{ id: UUID, episode_id: 'ep1', total_global: 300, supprime_le: null, local_id: 'L1' }],
+    paiements: [{ id: 'd1', episode_id: 'ep1', mode: 'depot', montant: 40, annule: false, supprime_le: null }] });
+  const corps = { mode: 'cash', montant: 200, episode_id: 'ep1', fiche_id: UUID, local_id: 'B4', details: { montant_depot_utilise: 100 } };
+  assert.strictEqual((await m.appeler(corps, REJEU)).suite, true);
+  assert.strictEqual(corps.details.montant_depot_utilise, 40);
+  assert.strictEqual(corps.solde_restant, 60);
+  assert.strictEqual(corps.montant + 40 + corps.solde_restant, 300);
+});
+
+test("EN LIGNE : le même dépôt dépassé reste REFUSÉ (la caissière corrige tout de suite), jamais corrigé en silence", async () => {
+  const m = episodeAvecDepotEpuise();
+  const corps = { mode: 'cash', montant: 200, episode_id: 'ep1', fiche_id: UUID, local_id: 'B5', details: { montant_depot_utilise: 100 } };
+  const r = await m.appeler(corps);
+  assert.strictEqual(r.suite, false);
+  assert.strictEqual(r.res.code, 400);
+  assert.strictEqual(corps.details.montant_depot_utilise, 100, 'rien modifié');
 });

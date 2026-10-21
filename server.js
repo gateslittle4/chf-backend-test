@@ -2776,6 +2776,28 @@ app.use('/api/paiements', async (req, res, next) => {
       const { data: paiementsEpisode } = await supabase.from('paiements').select('*').eq('episode_id', corps.episode_id).or('annule.eq.false,annule.is.null').is('supprime_le', null);
       soldeDepotDisponible = calculerSoldeDepot(paiementsEpisode || []).soldeDepot;
     }
+    // Trouvé en TESTANT hors ligne sur le vrai site (21/10) : deux ventes de suite hors ligne déduisaient chacune le MÊME dépôt (l'app ne sait pas encore, pendant la coupure, que la
+    // 1re vient de le consommer) — 1 100 Gdes de dépôt « utilisés » pour 1 000 déposés, 100 Gdes que le patient ne devait plus au registre. Au REJEU (vente déjà faite, argent déjà
+    // pris), le serveur ramène le dépôt à ce qui existe vraiment et met l'EXCÉDENT en dette (reste à payer) : le total de la fiche reste exact, rien n'est refusé, la direction est prévenue.
+    const depotDemande = Number(corps.details && corps.details.montant_depot_utilise) || 0;
+    if (rejeu && fiche && depotDemande > soldeDepotDisponible + 0.02) {
+      const arrondi = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+      const depotReel = Math.max(0, arrondi(soldeDepotDisponible));
+      const excedent = arrondi(depotDemande - depotReel);
+      corps.details = { ...corps.details, depot_excedentaire_en_dette: excedent };
+      if (depotReel > 0) corps.details.montant_depot_utilise = depotReel; else delete corps.details.montant_depot_utilise;
+      const montantPaye = Number(corps.montant) || 0;
+      if (corps.mode === 'credit') {
+        corps.solde_restant = arrondi((Number(corps.solde_restant) || 0) + excedent);
+      } else if (corps.details.paiement_partiel === true) {
+        corps.solde_restant = arrondi((Number(corps.solde_restant) || 0) + excedent);
+        corps.details.reste = arrondi((Number(corps.details.reste) || 0) + excedent);
+      } else if (['cash', 'moncash', 'virement', 'cheque'].includes(corps.mode)) {
+        if (montantPaye > 0) Object.assign(corps.details, { paiement_partiel: true, total_fiche: Number(fiche.total_global) || 0, montant_paye: montantPaye, reste: excedent }), corps.solde_restant = excedent;
+        else { corps.mode = 'credit'; corps.solde_restant = excedent; }
+      }
+      enregistrerAuditServeur(req, 'paiement_depot_corrige', { episode_id: corps.episode_id || null, fiche_id: fiche.id, depot_demande: depotDemande, depot_disponible: depotReel, mis_en_dette: excedent, mode: corps.mode });
+    }
     const verdict = verifierPaiementContreFiche({ corps, fiche, soldeDepotDisponible });
     if (!verdict.ok) return refuserOuSignaler(verdict.erreur);
     return next();
