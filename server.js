@@ -67,7 +67,7 @@ setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoy
 const { validerMontantPaiement, normaliserMontant } = require('./utils/validationMontant');
 // Solde ATOMIQUE (13/10) : le paiement et son solde s'écrivent en une seule opération de la base, avec un verrou par épisode — voir sql/solde_atomique.sql.
 const { estFonctionAbsente, estRefusRemboursement } = require('./utils/soldeAtomique');
-const { verifierTotalFiche } = require('./utils/verificationPrixFiche');
+const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('./utils/verificationPrixFiche');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
   appliquerMiseAJourPermissions, lireTablePermissions, verifierRoleInvitation, verifierRoleDuLienOuvert, libelleRolePersonnalise,
@@ -1055,8 +1055,13 @@ app.post('/api/episodes', async (req, res) => {
         episode: episodePourPrix, catalogue, parametres: parametresPourVerif, ongDoc: ongDocExpress,
       });
       if (!verification.ok) {
-        enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes' });
-        return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+        // Même règle qu'à POST /api/fiches : un rejeu hors ligne n'est jamais refusé (vente déjà faite), seulement signalé.
+        if (estRejeu(req)) {
+          enregistrerAuditServeur(req, 'fiche_montant_suspect', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes', hors_ligne: true });
+        } else {
+          enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id: null, total_global: f.totalGlobal, breakdown: f.breakdown, erreur: verification.erreur, route: '/api/episodes' });
+          return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+        }
       }
     }
   }
@@ -2334,8 +2339,15 @@ app.post('/api/fiches', async (req, res) => {
       parametres: (parametresData && parametresData.items) || {}, ongDoc,
     });
     if (!verification.ok) {
-      enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id, total_global, breakdown, erreur: verification.erreur });
-      return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+      // HORS LIGNE (rejeu de la file d'attente, en-tête X-CHF-Rejeu) : jamais refusé. La vente a déjà eu lieu (argent pris, reçu remis) alors que le téléphone ne pouvait pas
+      // joindre le serveur : un prix qui a changé entre-temps (nouveaux tarifs appliqués, contrat terminé) ne doit pas faire PERDRE la transaction. On l'enregistre et on la SIGNALE
+      // à la direction (journal d'audit, action sensible) — détectée, jamais perdue. En ligne, le refus reste immédiat.
+      if (estRejeu(req)) {
+        enregistrerAuditServeur(req, 'fiche_montant_suspect', { episode_id, total_global, breakdown, erreur: verification.erreur, hors_ligne: true });
+      } else {
+        enregistrerAuditServeur(req, 'fiche_montant_refuse', { episode_id, total_global, breakdown, erreur: verification.erreur });
+        return res.status(400).json({ error: verification.erreur, code: 'MONTANT_FICHE_REFUSE' });
+      }
     }
   }
 
@@ -2716,6 +2728,58 @@ app.get('/api/paiements', async (req, res) => {
     console.error('GET /api/paiements: lecture paginée échouée :', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Audit du 21/10 (rappel d'Esdras : exonération et paiement partiel) : le montant d'une LIGNE DE PAIEMENT n'était jamais comparé à sa fiche — une caissière pouvait
+// enregistrer 500 Gdes pour une fiche de 5000 en espèces et garder la différence. Total de la fiche = montant versé + dépôt déduit + exonération (accordée par la direction)
+// + reste dû plus tard (crédit ou paiement partiel) : voir utils/verificationPrixFiche.js::verifierPaiementContreFiche. Placé AVANT la route (et non dedans) : même patron
+// que les autres contrôles, et la route elle-même garde exactement la même forme. Les modes qui ne sont pas une vente (dépôt, remboursements) ne passent pas par ici.
+app.use('/api/paiements', async (req, res, next) => {
+  if (req.method !== 'POST' || (req.path !== '/' && req.path !== '') || !req.body || !MODES_VENTE.includes(req.body.mode)) return next();
+  try {
+    if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) return next(); // la route répondra 403
+    const corps = req.body;
+    const localId = corps.local_id || corps.localId || null;
+    if (localId) {
+      const { data: dejaLa } = await supabase.from('paiements').select('id').eq('local_id', localId).maybeSingle();
+      if (dejaLa) return next(); // rejeu : déjà enregistré (et déjà vérifié à ce moment-là)
+    }
+    let fiche = null;
+    if (estUnVraiUuid(corps.fiche_id)) {
+      ({ data: fiche } = await supabase.from('fiches').select('id, episode_id, total_global, supprime_le').eq('id', corps.fiche_id).maybeSingle());
+    }
+    if (!fiche && localId) {
+      ({ data: fiche } = await supabase.from('fiches').select('id, episode_id, total_global, supprime_le').eq('local_id', localId).maybeSingle());
+    }
+    if (!fiche && localId && localId.endsWith('-paiement')) { // ⚡ Achat Express : la fiche est créée avec l'épisode, qui porte le même identifiant sans le suffixe
+      const { data: episodeExpress } = await supabase.from('episodes').select('id').eq('local_id', localId.slice(0, -'-paiement'.length)).maybeSingle();
+      if (episodeExpress) {
+        const { data: fichesExpress } = await supabase.from('fiches').select('id, episode_id, total_global, supprime_le').eq('episode_id', episodeExpress.id).is('supprime_le', null);
+        if (fichesExpress && fichesExpress.length === 1) fiche = fichesExpress[0];
+      }
+    }
+    // HORS LIGNE (rejeu de la file d'attente) : jamais refusé — l'argent est déjà pris et le reçu remis ; un refus ferait PERDRE la transaction (échec définitif dans la file du
+    // téléphone). On enregistre et on SIGNALE à la direction (journal d'audit, action sensible). En ligne, le refus reste immédiat.
+    const rejeu = estRejeu(req);
+    const refuserOuSignaler = (erreur, details) => {
+      if (rejeu) {
+        enregistrerAuditServeur(req, 'paiement_suspect', { episode_id: corps.episode_id || null, fiche_id: fiche ? fiche.id : null, montant: corps.montant, mode: corps.mode, erreur, hors_ligne: true, ...details });
+        return next();
+      }
+      enregistrerAuditServeur(req, 'paiement_refuse', { episode_id: corps.episode_id || null, fiche_id: fiche ? fiche.id : null, montant: corps.montant, mode: corps.mode, erreur, ...details });
+      return res.status(400).json({ error: erreur, code: 'PAIEMENT_FICHE_INCOHERENT' });
+    };
+    if (fiche && fiche.supprime_le) return refuserOuSignaler('Cette fiche est supprimée : le paiement ne peut pas lui être rattaché.');
+    if (fiche && corps.episode_id && fiche.episode_id !== corps.episode_id) return refuserOuSignaler("Ce paiement est rattaché à la fiche d'un autre dossier.");
+    let soldeDepotDisponible = 0;
+    if (corps.details && Number(corps.details.montant_depot_utilise) > 0 && corps.episode_id) {
+      const { data: paiementsEpisode } = await supabase.from('paiements').select('*').eq('episode_id', corps.episode_id).or('annule.eq.false,annule.is.null').is('supprime_le', null);
+      soldeDepotDisponible = calculerSoldeDepot(paiementsEpisode || []).soldeDepot;
+    }
+    const verdict = verifierPaiementContreFiche({ corps, fiche, soldeDepotDisponible });
+    if (!verdict.ok) return refuserOuSignaler(verdict.erreur);
+    return next();
+  } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
 // Route : création d'un paiement — idempotente via local_id, même principe que /api/fiches.

@@ -143,4 +143,46 @@ function verifierTotalFiche({ raw_state, total_global, breakdown, episode, catal
   return { ok: true };
 }
 
-module.exports = { configLits, ongSousContrat, parametresPourPatient, prixAutorises, calculerJours, verifierTotalFiche };
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Le PAIEMENT contre sa FICHE (audit du 21/10, rappel d'Esdras : « pour le prix plus bas, il ne faut pas oublier l'exonération et le paiement partiel »).
+// La fiche porte toujours le total BRUT ; c'est la ligne de paiement qui peut légitimement être plus basse, et seulement de 4 façons :
+//   - un dépôt déjà versé qu'on déduit (details.montant_depot_utilise, jamais plus que le dépôt réellement disponible),
+//   - une exonération accordée par la direction (exoneration.montantExonere, cohérente avec son pourcentage),
+//   - un reste à payer plus tard : crédit (solde_restant) ou paiement partiel (details.paiement_partiel + solde_restant),
+//   - ce qui est réellement versé (montant).
+// Total de la fiche = montant + dépôt déduit + exonéré + reste dû. Rien d'autre ne peut faire baisser ce que le tiroir reçoit sans laisser de trace.
+const MODES_VENTE = ['cash', 'moncash', 'virement', 'cheque', 'ong', 'credit', 'exoneration'];
+const TOLERANCE_PAIEMENT = 0.02;
+
+function verifierPaiementContreFiche({ corps, fiche, soldeDepotDisponible }) {
+  if (!corps || !MODES_VENTE.includes(corps.mode)) return { ok: true, ignore: true };
+  if (!fiche) return { ok: false, erreur: "Ce paiement doit être rattaché à sa fiche (fiche introuvable) : il n'est pas enregistré." };
+  const nombre = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+  const montant = nombre(corps.montant);
+  const total = nombre(fiche.total_global);
+  const depot = nombre(corps.details && corps.details.montant_depot_utilise);
+  if (depot < 0) return { ok: false, erreur: 'Dépôt déduit invalide.' };
+  if (depot > nombre(soldeDepotDisponible) + TOLERANCE_PAIEMENT) {
+    return { ok: false, erreur: `Le dépôt déduit (${depot} Gdes) dépasse le dépôt réellement disponible (${nombre(soldeDepotDisponible)} Gdes).` };
+  }
+  let exonere = 0;
+  if (corps.mode === 'exoneration') {
+    const ex = corps.exoneration || {};
+    exonere = nombre(ex.montantExonere);
+    const pct = nombre(ex.pourcentage);
+    if (pct < 0 || pct > 100 || exonere < 0) return { ok: false, erreur: "Exonération invalide (pourcentage entre 0 et 100)." };
+    if (Math.abs(exonere - (total * pct) / 100) > TOLERANCE_PAIEMENT) {
+      return { ok: false, erreur: `Le montant exonéré (${exonere} Gdes) ne correspond pas à ${pct} % de la fiche (${total} Gdes).` };
+    }
+  }
+  const estPartiel = !!(corps.details && corps.details.paiement_partiel === true);
+  const reste = (corps.mode === 'credit' || estPartiel) ? nombre(corps.solde_restant) : 0;
+  const somme = montant + depot + exonere + reste;
+  if (Math.abs(somme - total) > TOLERANCE_PAIEMENT) {
+    return { ok: false, erreur: `Le paiement ne correspond pas à la fiche : ${montant} payé + ${depot} de dépôt + ${exonere} exonéré + ${reste} à payer plus tard = ${somme} Gdes, mais la fiche est de ${total} Gdes.` };
+  }
+  return { ok: true };
+}
+
+module.exports = { MODES_VENTE, verifierPaiementContreFiche, configLits, ongSousContrat, parametresPourPatient, prixAutorises, calculerJours, verifierTotalFiche };
