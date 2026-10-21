@@ -48,6 +48,7 @@ const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
 const { verifierSante } = require('./utils/sante');
+const { evaluerRetraitCaisse, MOTIF_MIN } = require('./utils/retraitFicheCaisse');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -2492,6 +2493,72 @@ app.delete('/api/fiches/:id', async (req, res) => {
       enregistrerAuditServeur(req, 'fiches_renumerotees', { episode_id: fiche.episode_id, fiche_supprimee: fiche.id, ancien_numero: fiche.numero_fiche, numeros_apres: renumerotation.map(n => ({ id: n.id, numero_fiche: n.numero_fiche })) });
     }
   }
+  res.json({ success: true, renumerotation });
+});
+
+// 21/10 (Esdras) : un client prend un service puis n'en veut plus, ou le médecin déplace l'acte — la caisse doit pouvoir retirer
+// la fiche déjà encaissée, sans passer par la direction, pour les petits montants. Mêmes effets que DELETE /api/fiches/:id
+// (fiche + paiements à la corbeille, renumérotation) ; les limites (montant < paramètre « montantRetraitFicheCaisse », jour même,
+// pas de crédit / partenaire / exonération, dossier non facturé) sont dans utils/retraitFicheCaisse.js. « dossier_annuler »
+// (direction) garde son droit sans ces limites. Rejeu hors ligne : jamais refusé pour le délai, seulement signalé dans l'audit.
+app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
+  const peutTout = await aPermission(req.user.id, 'dossier_annuler');
+  if (!peutTout && !(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise pour retirer une fiche encaissée." });
+  }
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches')
+    .select('id, episode_id, numero_fiche, total_global, date_creation, cree_par').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
+  if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
+  if (!fiche) return res.status(200).json({ success: true }); // déjà retirée (idempotent — rejeu de la file hors ligne)
+
+  const { data: episode } = fiche.episode_id
+    ? await supabase.from('episodes').select('id, local_id, verrouille_facture, numero_lot').eq('id', fiche.episode_id).maybeSingle()
+    : { data: null };
+  let { data: paiements, error: erreurPaiements } = await supabase.from('paiements')
+    .select('id, mode, montant, solde_restant, details, date_paiement').eq('fiche_id', fiche.id).is('supprime_le', null).neq('annule', true);
+  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+  // ⚡ Achat Express : le paiement peut n'être relié à sa fiche que par local_id (« <épisode>-paiement »), jamais laissé orphelin.
+  if ((!paiements || paiements.length === 0) && episode && episode.local_id) {
+    const { data: parLocalId } = await supabase.from('paiements')
+      .select('id, mode, montant, solde_restant, details, date_paiement').eq('local_id', `${episode.local_id}-paiement`).is('supprime_le', null).neq('annule', true);
+    paiements = parLocalId || [];
+  }
+  const { data: parametresDoc } = await supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle();
+  const rejeu = estRejeu(req);
+  const motif = req.body && req.body.motif;
+  let horsDelai = false;
+  if (!peutTout) {
+    const verdict = evaluerRetraitCaisse({ fiche, paiements, episode, parametres: parametresDoc && parametresDoc.items, motif, rejeu });
+    if (!verdict.ok) {
+      enregistrerAuditServeur(req, 'fiche_retrait_caisse_refuse', { fiche_id: fiche.id, numero_fiche: fiche.numero_fiche, total: fiche.total_global, code: verdict.code, rejeu });
+      return res.status(403).json({ error: verdict.message, code: verdict.code });
+    }
+    horsDelai = verdict.horsDelai;
+  } else if (String(motif || '').trim().length < MOTIF_MIN) {
+    return res.status(400).json({ error: `Un motif d'au moins ${MOTIF_MIN} caractères est obligatoire.`, code: 'MOTIF_REQUIS' });
+  }
+
+  const maintenant = new Date().toISOString();
+  const idsPaiements = (paiements || []).map(p => p.id);
+  if (idsPaiements.length > 0) {
+    const { error } = await supabase.from('paiements').update({ supprime_le: maintenant }).in('id', idsPaiements).is('supprime_le', null);
+    if (error) return res.status(500).json({ error: error.message });
+  }
+  const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', fiche.id).select();
+  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+
+  let renumerotation = null;
+  if (fiche.episode_id) {
+    const { data: numeros, error: erreurRenumerotation } = await supabase.rpc('renumeroter_fiches', { p_episode: fiche.episode_id });
+    if (erreurRenumerotation) console.warn('Renumérotation des fiches non faite (script SQL pas collé ?) :', erreurRenumerotation.message);
+    else renumerotation = numeros || [];
+  }
+  enregistrerAuditServeur(req, 'fiche_retiree_caisse', {
+    fiche_id: fiche.id, episode_id: fiche.episode_id, numero_fiche: fiche.numero_fiche, total: fiche.total_global,
+    montant_rembourse: (paiements || []).reduce((s, p) => s + (Number(p.montant) || 0), 0),
+    modes: [...new Set((paiements || []).map(p => p.mode))], motif: String(motif).trim(),
+    fiche_creee_par: fiche.cree_par || null, avec_droit_direction: peutTout, hors_delai: horsDelai, rejeu,
+  });
   res.json({ success: true, renumerotation });
 });
 
