@@ -3488,7 +3488,12 @@ app.post('/api/stock/decrementer', async (req, res) => {
   const { data: avantData } = await supabase.from('catalog').select('items').eq('type', 'medicaments').single();
   const avantParId = new Map((avantData?.items || []).map(m => [m.id, m]));
 
-  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements, p_local_id: local_id });
+  // 22/10 (Esdras) : un épisode d'un SERVICE puise d'abord dans le stock de ce service (celui de ses réquisitions), puis dans la pharmacie — voir sql/stock_par_service.sql.
+  // Sans service (consultation, Achat Express...) : le stock de la pharmacie, comme avant.
+  const serviceVente = typeof req.body.service === 'string' ? req.body.service.trim() : '';
+  const { data, error } = serviceVente
+    ? await supabase.rpc('decrementer_stock_service', { p_service: serviceVente, p_decrements: decrements, p_local_id: local_id })
+    : await supabase.rpc('decrementer_stock_medicaments', { p_decrements: decrements, p_local_id: local_id });
   if (error) {
     if (error.code === '42883') {
       return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql puis idempotence_decrement_stock.sql dans le SQL Editor." });
@@ -3519,7 +3524,31 @@ app.post('/api/stock/decrementer', async (req, res) => {
     envoyerCallMeBot(`📦 CHF : stock bas — ${detail}`); // best-effort, ne bloque jamais la réponse à la caisse
   }
 
-  res.json({ success: true, items: data.items });
+  res.json({ success: true, items: data.items, ...(data.repartition ? { repartition: data.repartition } : {}) });
+});
+
+// Restitution d'une vente annulée (fiche supprimée, encaissement échoué) : chaque article revient là où il avait été pris — stock du service ou pharmacie
+// (voir restituer_stock_ventes, sql/stock_par_service.sql). entrees : [{ fiche | origine, lignes: [{ id, qte }] }]. Idempotent par local_id.
+app.post('/api/stock/restituer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise." });
+  }
+  const { entrees } = req.body;
+  if (!Array.isArray(entrees) || entrees.length === 0 || entrees.length > 100) {
+    return res.status(400).json({ error: 'entrees (1 à 100) requises.' });
+  }
+  for (const e of entrees) {
+    const bonneRef = (typeof e?.fiche === 'string' && e.fiche) || (typeof e?.origine === 'string' && e.origine);
+    const bonnesLignes = Array.isArray(e?.lignes) && e.lignes.length > 0 && e.lignes.every(l => l && typeof l.id === 'string' && Number(l.qte) > 0);
+    if (!bonneRef || !bonnesLignes) return res.status(400).json({ error: 'Chaque entrée a besoin d\'une fiche (ou origine) et de lignes { id, qte > 0 }.' });
+  }
+  const local_id = req.body.local_id || req.body.localId || null;
+  const { data, error } = await supabase.rpc('restituer_stock_ventes', { p_entrees: entrees, p_local_id: local_id });
+  if (error) {
+    if (error.code === '42883') return res.status(500).json({ error: "La fonction SQL restituer_stock_ventes n'existe pas encore dans Supabase — colle stock_par_service.sql dans le SQL Editor." });
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, ...(data.deja_applique ? { deja_applique: true } : {}), items: data.items });
 });
 
 // ============================================================
@@ -3557,18 +3586,24 @@ app.post('/api/requisitions', async (req, res) => {
     const { data: existante } = await supabase.from('requisitions').select('*').eq('local_id', local_id).maybeSingle();
     if (existante) return res.status(200).json({ ...existante, deja_applique: true });
   }
-  const { data, error } = await supabase.rpc('decrementer_stock_medicaments', {
-    p_decrements: lignes.map(l => ({ id: l.id, qte: l.qte })),
+  // 22/10 (Esdras) : une réquisition DONNE le stock au service (la pharmacie diminue, le stock du service augmente) ; les épisodes de ce service puisent ensuite dedans.
+  // Atomique (une seule fonction SQL, voir sql/stock_par_service.sql), tout-ou-rien, idempotente par local_id.
+  if (lignes.some(l => !l || !l.id || !(Number(l.qte) > 0))) {
+    return res.status(400).json({ error: 'Chaque ligne a besoin d\'un médicament et d\'une quantité supérieure à 0.' });
+  }
+  const { data, error } = await supabase.rpc('transferer_stock_service', {
+    p_service: String(service_demandeur).trim(),
+    p_lignes: lignes.map(l => ({ id: l.id, qte: Number(l.qte) })),
     p_local_id: local_id,
   });
   if (error) {
     if (error.code === '42883') {
-      return res.status(500).json({ error: "La fonction SQL decrementer_stock_medicaments n'existe pas encore dans Supabase — colle fonction_decrementer_stock_et_numerotation_lots.sql dans le SQL Editor." });
+      return res.status(500).json({ error: "La fonction SQL transferer_stock_service n'existe pas encore dans Supabase — colle stock_par_service.sql dans le SQL Editor." });
     }
     return res.status(500).json({ error: error.message });
   }
   if (!data.succes) {
-    const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant)`).join(', ');
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} restant à la pharmacie)`).join(', ');
     return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
   }
   // Les noms viennent du catalogue à jour renvoyé par le décrément (pas de req.body) — la
@@ -3580,6 +3615,7 @@ app.post('/api/requisitions', async (req, res) => {
   const { data: requisition, error: erreurInsert } = await supabase.from('requisitions').insert({
     service_demandeur: service_demandeur.trim(), lignes: lignesAvecNoms,
     demande_par: demande_par || null, demande_par_uid: req.user.id, local_id: local_id || null,
+    stock_par_service: true, // les réquisitions d'avant (stock simplement sorti de la pharmacie) gardent l'ancien comportement à l'annulation / modification
   }).select().single();
   if (erreurInsert) {
     // 23505 = ce local_id est déjà en base : un rejeu a doublé l'insert entre la lecture ci-dessus
@@ -3692,12 +3728,28 @@ app.patch('/api/requisitions/:id/annuler', async (req, res) => {
   if (erreurReservation) return res.status(500).json({ error: erreurReservation.message });
   if (!reservee || reservee.length === 0) return res.status(409).json({ error: 'Cette réquisition vient d\'être annulée par quelqu\'un d\'autre.' });
   let items = null;
-  for (const l of requisition.lignes || []) {
-    const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: l.id, p_quantite_ajoutee: Number(l.quantite) || 0, p_local_id: `${requisition.id}-annulation-${l.id}` });
-    if (error) {
-      // Le stock n'a pas pu être remis : on rouvre la réquisition (les lignes déjà remises le sont une seule fois grâce à leur identifiant).
-      await supabase.from('requisitions').update({ annulee: false, annulee_par: null, annulee_par_uid: null, annulee_le: null, motif_annulation: null }).eq('id', req.params.id).select();
-      return res.status(500).json({ error: `Stock non remis (${l.nom || l.id}) : ${error.message}` });
+  const rouvrir = () => supabase.from('requisitions').update({ annulee: false, annulee_par: null, annulee_par_uid: null, annulee_le: null, motif_annulation: null }).eq('id', req.params.id).select();
+  if (requisition.stock_par_service) {
+    // 22/10 : le stock de cette réquisition est dans le service — il retourne à la pharmacie, mais seulement ce que le service n'a pas déjà utilisé.
+    const { data, error } = await supabase.rpc('transferer_stock_service', {
+      p_service: requisition.service_demandeur,
+      p_lignes: (requisition.lignes || []).map(l => ({ id: l.id, qte: -(Number(l.quantite) || 0) })),
+      p_local_id: `${requisition.id}-annulation`,
+    });
+    if (error || !data || !data.succes) {
+      await rouvrir();
+      if (error) return res.status(500).json({ error: `Stock non remis : ${error.message}` });
+      const detail = (data.manquants || []).map(m => `${m.nom || m.id} (il en reste ${m.disponible} dans le service)`).join(', ');
+      return res.status(409).json({ error: `Annulation impossible : le service a déjà utilisé une partie de ce stock — ${detail}. Utilise « Retourner à la pharmacie » pour ce qui reste.`, manquants: data.manquants });
+    }
+  } else {
+    for (const l of requisition.lignes || []) {
+      const { data, error } = await supabase.rpc('ajouter_stock_medicament', { p_id: l.id, p_quantite_ajoutee: Number(l.quantite) || 0, p_local_id: `${requisition.id}-annulation-${l.id}` });
+      if (error) {
+        // Le stock n'a pas pu être remis : on rouvre la réquisition (les lignes déjà remises le sont une seule fois grâce à leur identifiant).
+        await rouvrir();
+        return res.status(500).json({ error: `Stock non remis (${l.nom || l.id}) : ${error.message}` });
+      }
     }
   }
   const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle();
@@ -3719,18 +3771,38 @@ app.put('/api/requisitions/:id', async (req, res) => {
   const aSortir = variations.filter(v => v.variation > 0);
   const aRemettre = variations.filter(v => v.variation < 0);
   let items = null;
-  if (aSortir.length > 0) {
-    const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: aSortir.map(v => ({ id: v.id, qte: v.variation })), p_local_id: `${requisition.id}-modif-${jeton}` });
-    if (error) return res.status(500).json({ error: error.message });
-    if (!data.succes) {
-      const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} disponible)`).join(', ');
-      return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+  if (requisition.stock_par_service) {
+    // 22/10 : le stock est dans le service. Changer de service = annuler puis refaire (le stock d'un service ne se déplace pas en douce vers un autre).
+    if (String(service_demandeur).trim() !== String(requisition.service_demandeur).trim()) {
+      return res.status(400).json({ error: "Pour changer de service, annule cette réquisition puis refais-en une pour le bon service." });
     }
-    items = data.items;
-  }
-  for (const v of aRemettre) {
-    const { error } = await supabase.rpc('ajouter_stock_medicament', { p_id: v.id, p_quantite_ajoutee: -v.variation, p_local_id: `${requisition.id}-modif-${jeton}-${v.id}` });
-    if (error) return res.status(500).json({ error: `Stock non remis (${v.id}) : ${error.message}` });
+    if (variations.length > 0) {
+      const { data, error } = await supabase.rpc('transferer_stock_service', {
+        p_service: requisition.service_demandeur,
+        p_lignes: variations.map(v => ({ id: v.id, qte: v.variation })),
+        p_local_id: `${requisition.id}-modif-${jeton}`,
+      });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data.succes) {
+        const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} disponible ${m.lieu === 'service' ? 'dans le service' : 'à la pharmacie'})`).join(', ');
+        return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+      }
+      items = data.items;
+    }
+  } else {
+    if (aSortir.length > 0) {
+      const { data, error } = await supabase.rpc('decrementer_stock_medicaments', { p_decrements: aSortir.map(v => ({ id: v.id, qte: v.variation })), p_local_id: `${requisition.id}-modif-${jeton}` });
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data.succes) {
+        const detail = (data.manquants || []).map(m => `${m.nom || m.id} (${m.disponible} disponible)`).join(', ');
+        return res.status(409).json({ error: `Stock insuffisant : ${detail}`, manquants: data.manquants });
+      }
+      items = data.items;
+    }
+    for (const v of aRemettre) {
+      const { error } = await supabase.rpc('ajouter_stock_medicament', { p_id: v.id, p_quantite_ajoutee: -v.variation, p_local_id: `${requisition.id}-modif-${jeton}-${v.id}` });
+      if (error) return res.status(500).json({ error: `Stock non remis (${v.id}) : ${error.message}` });
+    }
   }
   const { data: catalogue } = await supabase.from('catalog').select('items').eq('type', 'medicaments').maybeSingle();
   items = (catalogue && catalogue.items) || items || [];
@@ -3741,6 +3813,31 @@ app.put('/api/requisitions/:id', async (req, res) => {
   if (erreurMaj || !misAJour || misAJour.length === 0) return res.status(500).json({ error: erreurMaj ? erreurMaj.message : "La réquisition n'a pas pu être mise à jour (elle vient peut-être d'être annulée) : vérifie le stock." });
   await enregistrerAuditServeur(req, 'requisition_modifiee', { id: requisition.id, avant: { service: requisition.service_demandeur, lignes: requisition.lignes }, apres: { service: String(service_demandeur).trim(), lignes: lignesAvecNoms } });
   res.json({ ...misAJour[0], items });
+});
+
+// 22/10 (Esdras) : un service n'a pas utilisé tout ce qu'il avait réquisitionné — la pharmacie en chef (requisition_modifier) le RETOURNE à la pharmacie.
+// Le stock du service diminue, celui de la pharmacie remonte ; refusé si le service n'en a pas autant. Tracé dans le journal d'audit.
+app.post('/api/requisitions/retour', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'requisition_modifier'))) return res.status(403).json({ error: "Permission 'requisition_modifier' requise." });
+  const { service, lignes } = req.body;
+  if (!service || !String(service).trim()) return res.status(400).json({ error: 'service est requis.' });
+  if (!Array.isArray(lignes) || lignes.length === 0 || lignes.some(l => !l || !l.id || !(Number(l.qte) > 0))) return res.status(400).json({ error: 'lignes (non vides, quantités supérieures à 0) requises.' });
+  const motif = typeof req.body.motif === 'string' ? req.body.motif.trim().slice(0, 300) : '';
+  const local_id = req.body.local_id || req.body.localId || null;
+  const { data, error } = await supabase.rpc('transferer_stock_service', {
+    p_service: String(service).trim(), p_lignes: lignes.map(l => ({ id: l.id, qte: -Number(l.qte) })), p_local_id: local_id ? `${local_id}-retour` : null,
+  });
+  if (error) {
+    if (error.code === '42883') return res.status(500).json({ error: "La fonction SQL transferer_stock_service n'existe pas encore dans Supabase — colle stock_par_service.sql dans le SQL Editor." });
+    return res.status(500).json({ error: error.message });
+  }
+  if (data.deja_applique) return res.json({ success: true, deja_applique: true, items: data.items });
+  if (!data.succes) {
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} (il en reste ${m.disponible} dans le service)`).join(', ');
+    return res.status(409).json({ error: `Retour impossible : le service n'en a pas autant — ${detail}`, manquants: data.manquants });
+  }
+  await enregistrerAuditServeur(req, 'stock_service_retourne', { service: String(service).trim(), lignes: lignes.map(l => ({ id: l.id, quantite: Number(l.qte) })), motif: motif || null });
+  res.json({ success: true, items: data.items });
 });
 
 // Ajoute du stock à UN médicament de façon atomique (voir fonction_maj_stock_medicament.sql) —
