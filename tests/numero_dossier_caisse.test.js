@@ -87,8 +87,27 @@ test("infirmier / archiviste : donner un numéro à la création est REFUSÉ (40
   const r = await appeler({ numero_dossier: '1234' });
   assert.strictEqual(r.code, 403);
   assert.strictEqual(r.corps.code, 'NUMERO_RESERVE_CAISSE');
-  assert.match(r.corps.error, /Seule la caisse peut donner un numéro/);
+  assert.match(r.corps.error, /Tu ne peux pas donner de numéro de dossier/);
   assert.strictEqual(supabase.dossiers.length, 0);
+});
+
+test("archive (dossier_numero_saisir) : crée un patient AVEC le numéro qu'il a déjà, ou SANS numéro (en attente : le site le donnera au premier épisode) ; numéro réservé refusé", async () => {
+  const { appeler, supabase } = routeCreation({ droits: ['dossier_creer', 'dossier_numero_saisir'] });
+  const avec = await appeler({ numero_dossier: ' 4410 ', local_id: 'a-1' });
+  assert.strictEqual(avec.code, 201); assert.strictEqual(avec.corps.numero_dossier, '4410');
+  const sans = await appeler({ nom: 'Jean Paul', local_id: 'a-2' });
+  assert.strictEqual(sans.code, 201); assert.ok(N.estEnAttente(sans.corps.numero_dossier), 'sans numéro : provisoire, jamais un numéro inventé');
+  const reserve = await appeler({ nom: 'Autre Un', numero_dossier: 'AUTO-5' });
+  assert.strictEqual(reserve.code, 400);
+  assert.strictEqual(supabase.dossiers.length, 2);
+});
+
+test("archive : taper le numéro à la création ne lui donne PAS le droit de donner ou changer le numéro d'un dossier existant (caisse seulement)", async () => {
+  const r = routesNumero({ droits: ['dossier_creer', 'dossier_numero_saisir'], rpc: { numero_dossier_propose: { data: '5002', error: null } } });
+  assert.strictEqual((await r.appeler('GET /api/dossiers/numero-propose')).code, 403);
+  const donne = await r.appeler('POST /api/dossiers/:id/numero', { params: { id: 'd1' }, body: { numero: '7777' } });
+  assert.strictEqual(donne.code, 403);
+  assert.strictEqual(r.appelsRpc.length, 0);
 });
 
 test("la caisse : peut créer un dossier avec un numéro, ou sans (en attente) ; un numéro réservé ou trop long est refusé (400)", async () => {

@@ -102,7 +102,8 @@ const PERMISSIONS_PAR_DEFAUT = [
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
-  { role: 'archiviste', permissions: ['fiche_patient_voir','facturation_voir'] },
+  // 22/10 (Esdras) : l'archive crée des patients, avec ou sans numéro de dossier (elle tape celui que la personne a déjà) ; le site ne donne un numéro qu'à qui n'en a pas.
+  { role: 'archiviste', permissions: ['dossier_creer','dossier_numero_saisir','fiche_patient_voir','facturation_voir'] },
   // Retour d'Esdras (28/08) : "l'infirmier ne peut voir que Dossier/Épisode et Fiche Patient" —
   // rapport_chf_voir déplacé vers infirmier_chef (nouveau rôle, ci-dessous) ; facturation_voir
   // jamais accordé ici (Calcul Facture/Facturation exclus, c'est justement ce qu'on retire).
@@ -1567,12 +1568,14 @@ app.post('/api/dossiers', async (req, res) => {
   const erreurIdentite = erreurIdentiteDossier({ sexe, date_naissance });
   if (erreurIdentite) return res.status(400).json({ error: erreurIdentite, code: 'IDENTITE_INCOMPLETE' });
   // 16/10 (Esdras) : SEULE LA CAISSE donne un numéro de dossier (quand la personne a payé). Sans numéro, le dossier est créé « en attente » sous un numéro provisoire
-  // (EN-ATTENTE-…) que la caisse remplace ensuite (POST /api/dossiers/:id/numero). Un numéro fourni par quelqu'un qui n'est pas de la caisse est REFUSÉ, jamais ignoré en silence.
+  // (EN-ATTENTE-…) que la caisse remplace ensuite (POST /api/dossiers/:id/numero). Un numéro fourni par quelqu'un qui n'a ni la caisse ni dossier_numero_saisir (archive) est REFUSÉ, jamais ignoré en silence.
   const numeroDemande = numeroSaisi === undefined || numeroSaisi === null ? '' : String(numeroSaisi).trim();
   let numero_dossier;
   if (numeroDemande) {
-    if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
-      return res.status(403).json({ error: "Seule la caisse peut donner un numéro de dossier. Crée le dossier sans numéro : la caisse le donnera après le paiement.", code: 'NUMERO_RESERVE_CAISSE' });
+    // 22/10 (Esdras) : à la CRÉATION du dossier, la caisse ET l'archive (dossier_numero_saisir) peuvent taper le numéro d'une personne qui en a déjà un.
+    // Donner ou changer le numéro d'un dossier existant reste réservé à la caisse (routes plus bas).
+    if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'dossier_numero_saisir'))) {
+      return res.status(403).json({ error: "Tu ne peux pas donner de numéro de dossier. Crée le dossier sans numéro : il sera donné automatiquement.", code: 'NUMERO_RESERVE_CAISSE' });
     }
     const erreurNumero = erreurNumeroDossier(numeroDemande);
     if (erreurNumero) return res.status(400).json({ error: erreurNumero });
