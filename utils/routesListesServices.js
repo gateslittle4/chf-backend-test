@@ -72,6 +72,11 @@ function creerRoutesListesServices({ supabase, aPermission, maintenant = () => n
         const { error } = await supabase.from(table).update({ [colonne]: nouveau }).eq(colonne, ancien);
         if (error && !tableAbsente(error)) return res.status(500).json({ error: `Renommage interrompu (${table}.${colonne}) : ${error.message}. Rien n'a été changé dans la liste : réessayez.` });
       }
+      // 1 bis) 22/10 : le stock réquisitionné par ce service (médicaments) suit son nouveau nom — voir sql/stock_par_service.sql. Fonction absente = pas encore collée : on continue.
+      if (type === 'services_hospitalisation' && typeof supabase.rpc === 'function') {
+        const { error } = await supabase.rpc('renommer_service_stock', { p_ancien: ancien, p_nouveau: nouveau });
+        if (error && !['42883', 'PGRST202'].includes(String(error.code))) return res.status(500).json({ error: `Renommage interrompu (stock du service) : ${error.message}. Rien n'a été changé dans la liste : réessayez.` });
+      }
       // 2) Listes d'objets qui portent le nom (les lits d'un service).
       for (const { type: autre, champ } of cfg.catalogues) {
         const items = await lireListe(autre);

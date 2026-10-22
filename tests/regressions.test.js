@@ -550,11 +550,11 @@ test("Pièces jointes : le bucket Storage est privé (public: false) et créé a
 // Retour d'Esdras (23/08) : réquisition de stock par un autre service, jusqu'ici seulement
 // possible en corrigeant chaque médicament un par un dans "Gestion des stocks" (fastidieux, sans
 // trace de quel service a pris quoi).
-test("POST /api/requisitions exige stock_gerer (pas caisse_travailler — retirer du stock pour un service n'est pas une vente), réutilise decrementer_stock_medicaments (tout-ou-rien) et renvoie 409 si le stock est insuffisant", () => {
+test("POST /api/requisitions exige stock_gerer (pas caisse_travailler — donner du stock à un service n'est pas une vente), passe par transferer_stock_service (atomique, tout-ou-rien, 22/10 : le stock devient celui du service) et renvoie 409 si la pharmacie n'en a pas assez", () => {
   const bloc = blocRoutePermission("app.post('/api/requisitions'", "app.get('/api/requisitions'");
   assert.match(bloc, /aPermission\(req\.user\.id, 'stock_gerer'\)/, "doit exiger stock_gerer");
   assert.doesNotMatch(bloc, /'caisse_travailler'/, "une réquisition n'est pas une vente");
-  assert.match(bloc, /supabase\.rpc\('decrementer_stock_medicaments'/, "doit réutiliser la fonction atomique déjà utilisée pour les ventes, pas une nouvelle fonction dupliquée");
+  assert.match(bloc, /supabase\.rpc\('transferer_stock_service'/, "doit passer par la fonction atomique qui déplace le stock de la pharmacie vers le service (une seule transaction)");
   assert.match(bloc, /res\.status\(409\)/, "doit refuser (409) si le stock est insuffisant, pas laisser passer");
 });
 
@@ -981,7 +981,7 @@ test("la sauvegarde quotidienne envoie une alerte CallMeBot en cas d'échec, en 
 
 test("POST /api/stock/decrementer envoie une alerte CallMeBot SEULEMENT quand un article FRANCHIT son seuil (avant > seuil, après <= seuil) — jamais à chaque vente d'un article déjà bas", () => {
   const debut = serverSrc.indexOf("app.post('/api/stock/decrementer'");
-  const bloc = serverSrc.slice(debut, debut + 3500);
+  const bloc = serverSrc.slice(debut, debut + 5200); // 22/10 : élargi (choix du stock du service avant le décrément)
   assert.match(bloc, /const \{ data: avantData \} = await supabase\.from\('catalog'\)\.select\('items'\)\.eq\('type', 'medicaments'\)\.single\(\);/, "doit lire l'état AVANT le décrément, pas seulement après");
   assert.match(bloc, /\(avant\.seuilAlerte \?\? seuilParDefaut\) < avant\.quantite && apres\.quantite <= \(avant\.seuilAlerte \?\? seuilParDefaut\)/, "doit détecter un franchissement (avant au-dessus, après en-dessous), pas juste 'être bas'");
   assert.match(bloc, /envoyerCallMeBot\(`📦 CHF : stock bas/);
@@ -1705,7 +1705,7 @@ test("Une réquisition est idempotente : local_id sur la ligne ET sur le décré
   assert.match(bloc, /const local_id = req\.body\.local_id \|\| req\.body\.localId \|\| null;/);
   assert.match(bloc, /from\('requisitions'\)\.select\('\*'\)\.eq\('local_id', local_id\)/, "doit d'abord chercher une réquisition déjà enregistrée sous ce local_id");
   const iLecture = bloc.indexOf(".eq('local_id', local_id)");
-  const iDecrement = bloc.indexOf("supabase.rpc('decrementer_stock_medicaments'");
+  const iDecrement = bloc.indexOf("supabase.rpc('transferer_stock_service'");
   assert.ok(iLecture !== -1 && iLecture < iDecrement, "la reconnaissance du rejeu doit précéder le décrément — sinon le stock sort avant qu'on s'aperçoive du doublon");
   // 2. Le décrément lui-même passe par la surcharge idempotente (celle du 01/09).
   assert.match(bloc, /p_local_id: local_id,/, "le décrément doit être protégé même si l'insert échoue ensuite et que l'opération est rejouée");
