@@ -14,14 +14,14 @@ function bloc(debutMarqueur, finMarqueur) {
   return src.slice(d, f);
 }
 
-test("POST /api/fiches : une fiche d'exonération exige demandes_repondre, pas seulement caisse_travailler (sinon un caissier quelconque s'auto-accorde une remise)", () => {
+test("POST /api/fiches : une fiche d'exonération exige demandes_repondre OU exoneration_accorder (22/10 : la caisse accorde), pas seulement caisse_travailler (sinon un caissier quelconque s'auto-accorde une remise)", () => {
   const b = bloc("app.post('/api/fiches'", "app.get('/api/fiches/episode/:episodeId'");
-  assert.match(b, /mode_paiement === 'exoneration' && !\(await aPermission\(req\.user\.id, 'demandes_repondre'\)\)/);
+  assert.match(b, /mode_paiement === 'exoneration' && !\(await aPermission\(req\.user\.id, 'demandes_repondre'\)\) && !\(await aPermission\(req\.user\.id, 'exoneration_accorder'\)\)/);
 });
 
-test("POST /api/paiements : un paiement en mode exoneration exige demandes_repondre, même chose", () => {
+test("POST /api/paiements : un paiement en mode exoneration exige demandes_repondre OU exoneration_accorder, même chose", () => {
   const b = bloc("app.post('/api/paiements'", "app.get('/api/depenses-caisse'");
-  assert.match(b, /req\.body\.mode === 'exoneration' && !\(await aPermission\(req\.user\.id, 'demandes_repondre'\)\)/);
+  assert.match(b, /if \(req\.body\.mode === 'exoneration'\) \{\s*const parLaDirection = await aPermission\(req\.user\.id, 'demandes_repondre'\);\s*if \(!parLaDirection && !\(await aPermission\(req\.user\.id, 'exoneration_accorder'\)\)\)/);
 });
 
 test("Lecture d'un dossier, recherche, épisodes ouverts, liste des épisodes, fiches d'un épisode : exigent au moins fiche_patient_voir (fermeture d'un trou structurel, aucun rôle actuel n'est affecté)", () => {
