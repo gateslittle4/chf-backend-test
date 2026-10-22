@@ -818,10 +818,14 @@ test("GET /api/dossiers/:id/historique n'inclut dernierPaiement/soldeDepot que s
 test("PERMISSIONS_PAR_DEFAUT (miroir serveur) : dossier_creer retiré de tous les rôles sauf infirmier, fiche_patient_voir_finances accordée à direction/comptable/auditeur — reflète exactement le retour d'Esdras (\"seul l'infirmier peut créer un dossier, la caisse crée l'épisode et travaille au calculateur, archiviste et infirmier consultent le dossier\")", () => {
   const bloc = serverSrc.slice(serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT'), serverSrc.indexOf('async function aPermission'));
   assert.match(bloc, /\{ role: 'infirmier', permissions: \['dossier_creer'/, "infirmier doit garder dossier_creer");
-  for (const role of ['direction', 'comptable', 'auditeur', 'lecteur', 'archiviste']) {
+  for (const role of ['direction', 'comptable', 'auditeur', 'lecteur']) {
     const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
     assert.doesNotMatch(ligne, /'dossier_creer'/, `${role} ne doit plus avoir dossier_creer dans le miroir serveur`);
   }
+  // 22/10 (Esdras) : l'archive crée des patients (avec ou sans numéro de dossier) — seule exception à « dossier_creer = infirmier ».
+  const ligneArchiviste = bloc.slice(bloc.indexOf("{ role: 'archiviste'"), bloc.indexOf('\n', bloc.indexOf("{ role: 'archiviste'")));
+  assert.match(ligneArchiviste, /'dossier_creer'/);
+  assert.match(ligneArchiviste, /'dossier_numero_saisir'/);
   for (const role of ['direction', 'comptable', 'auditeur']) {
     const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
     assert.match(ligne, /'fiche_patient_voir_finances'/, `${role} doit avoir fiche_patient_voir_finances dans le miroir serveur`);
