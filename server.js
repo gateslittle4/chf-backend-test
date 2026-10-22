@@ -99,7 +99,7 @@ const {
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
   { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation','stock_reception','requisition_modifier'] },
-  { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir'] },
+  { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir','exoneration_accorder'] },
   { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
   // 22/10 (Esdras) : l'archive crée des patients, avec ou sans numéro de dossier (elle tape celui que la personne a déjà) ; le site ne donne un numéro qu'à qui n'en a pas.
@@ -115,12 +115,12 @@ const PERMISSIONS_PAR_DEFAUT = [
   { role: 'medecin', permissions: ['dossier_creer','episode_creer','fiche_patient_voir','fiche_patient_modifier','fiche_patient_voir_finances'] },
   // 08/10 (Krystofia) : rôle pharmacien — mêmes droits de caisse que direction/comptable, sans les droits
   // comptables, plus pharmacie_voir (onglet Pharmacie). Miroir de utils/permissions.js (chf-app2).
-  { role: 'pharmacien', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir'] },
+  { role: 'pharmacien', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','exoneration_accorder'] },
   // 09/10 (Esdras) : "pharmacien en chef : tout ce que fait un pharmacien, et il peut modifier les stocks, mais
   // cliquable dans Rôles & permissions" — exactement les droits du pharmacien + stock_gerer (ajouter/définir le
   // stock, dons, réquisitions). stock_gerer reste une case de la matrice : la décocher le retire sans toucher au code.
   // 14/10 (Esdras) : + catalogue_gerer (médicaments, prix). Miroir de utils/permissions.js (chf-app2).
-  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer','catalogue_gerer','stock_reception','requisition_modifier'] },
+  { role: 'pharmacien_chef', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','pharmacie_voir','stock_gerer','catalogue_gerer','stock_reception','requisition_modifier','exoneration_accorder'] },
   // Retour d'Esdras (27/08) : "je veux créer un rôle pour visiteur, voir mais ne peut rien
   // modifier" — que des permissions "voir", jamais une action (créer/modifier/annuler/gérer).
   // analytics_voir (inclut les salaires du personnel) volontairement exclu.
@@ -2306,8 +2306,9 @@ app.post('/api/fiches', async (req, res) => {
   // Faille d'audit du 21/10 : une exonération ne peut être APPLIQUÉE (fiche créée avec ce mode) que par quelqu'un qui peut l'ACCORDER (demandes_repondre) —
   // sans ce contrôle, n'importe quel compte ayant seulement caisse_travailler (ex. comptable, pharmacien) pouvait appeler cette route directement (hors écran)
   // avec mode_paiement: 'exoneration' et s'auto-accorder une remise, sans jamais passer par la direction (voir Demandes.js, le seul appelant légitime).
-  if (mode_paiement === 'exoneration' && !(await aPermission(req.user.id, 'demandes_repondre'))) {
-    return res.status(403).json({ error: "Une exonération doit être accordée par la direction (permission 'demandes_repondre')." });
+  // 22/10 (Esdras) : la CAISSE peut aussi accorder une exonération (droit exoneration_accorder), sans attendre la direction — motif obligatoire et trace dans le journal d'audit, voir POST /api/paiements.
+  if (mode_paiement === 'exoneration' && !(await aPermission(req.user.id, 'demandes_repondre')) && !(await aPermission(req.user.id, 'exoneration_accorder'))) {
+    return res.status(403).json({ error: "Tu n'as pas le droit d'accorder une exonération (permission 'exoneration_accorder' ou 'demandes_repondre').", code: 'EXONERATION_NON_AUTORISEE' });
   }
 
   // Idempotence : si cette transaction précise a déjà été enregistrée (réponse perdue
@@ -2883,8 +2884,25 @@ app.post('/api/paiements', async (req, res) => {
     return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
   }
   // Même correctif que POST /api/fiches ci-dessus (faille d'audit du 21/10) : seule la direction (demandes_repondre) peut enregistrer un paiement d'exonération.
-  if (req.body.mode === 'exoneration' && !(await aPermission(req.user.id, 'demandes_repondre'))) {
-    return res.status(403).json({ error: "Une exonération doit être accordée par la direction (permission 'demandes_repondre')." });
+  // 22/10 (Esdras) : la caisse accorde aussi (exoneration_accorder). Hors direction : motif obligatoire (en ligne ; un rejeu hors ligne n'est jamais refusé) et ligne « exoneration_accordee_caisse » dans le journal d'audit.
+  let auditExoneration = null; // écrit seulement une fois le paiement réellement enregistré
+  if (req.body.mode === 'exoneration') {
+    const parLaDirection = await aPermission(req.user.id, 'demandes_repondre');
+    if (!parLaDirection && !(await aPermission(req.user.id, 'exoneration_accorder'))) {
+      return res.status(403).json({ error: "Tu n'as pas le droit d'accorder une exonération (permission 'exoneration_accorder' ou 'demandes_repondre').", code: 'EXONERATION_NON_AUTORISEE' });
+    }
+    if (!parLaDirection) {
+      const exo = (req.body.exoneration && typeof req.body.exoneration === 'object') ? req.body.exoneration : {};
+      const motifExo = typeof exo.motif === 'string' ? exo.motif.trim() : '';
+      const rejeuExo = estRejeu(req);
+      if (motifExo.length < 3 && !rejeuExo) {
+        return res.status(400).json({ error: "Écris le motif de l'exonération (3 caractères au moins).", code: 'MOTIF_EXONERATION_REQUIS' });
+      }
+      auditExoneration = {
+        fiche_id: req.body.fiche_id || req.body.ficheId || null, episode_id: req.body.episode_id || null, patient: req.body.patient_nom || null,
+        montant_exonere: Number(exo.montantExonere) || null, pourcentage: Number(exo.pourcentage) || null, motif: motifExo || null, rejeu: rejeuExo,
+      };
+    }
   }
   const local_id = req.body.local_id || req.body.localId;
   if (local_id) {
@@ -2916,7 +2934,7 @@ app.post('/api/paiements', async (req, res) => {
       p_corps: { ...corps, local_id: local_id || null }, p_ajout: ajout, p_remboursement_credit: corps.mode === 'remboursement_credit',
       p_heure_serveur: !estRejeu(req), // en direct : la base date le paiement sous le verrou ; rejeu hors ligne : date de l'appareil gardée
     });
-    if (!erreurAtomique) return res.status(201).json(dataAtomique);
+    if (!erreurAtomique) { if (auditExoneration) enregistrerAuditServeur(req, 'exoneration_accordee_caisse', auditExoneration); return res.status(201).json(dataAtomique); }
     if (estRefusRemboursement(erreurAtomique)) return res.status(400).json({ error: erreurAtomique.message });
     if (erreurAtomique.code === '23505') {
       const { data: existant } = local_id ? await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle() : { data: null };
@@ -2987,6 +3005,7 @@ app.post('/api/paiements', async (req, res) => {
     }
     return res.status(500).json({ error: error.message });
   }
+  if (auditExoneration) enregistrerAuditServeur(req, 'exoneration_accordee_caisse', auditExoneration);
   res.status(201).json(data);
 });
 
