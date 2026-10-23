@@ -27,16 +27,9 @@ test('une fiche sous la limite, encaissée aujourd\'hui, avec motif : acceptée'
   assert.strictEqual(v.horsDelai, false);
 });
 
-test('« inférieur à 7500 » : 7499 passe, 7500 pile est refusé', () => {
-  assert.strictEqual(eval_({ fiche: fiche(7499), paiements: [cash(7499)] }).ok, true);
-  const v = eval_({ fiche: fiche(7500), paiements: [cash(7500)] });
-  assert.strictEqual(v.ok, false);
-  assert.strictEqual(v.code, 'MONTANT_AU_DESSUS_LIMITE');
-});
-
-test('le plafond suit le paramètre', () => {
-  assert.strictEqual(eval_({ parametres: { montantRetraitFicheCaisse: 2000 } }).code, 'MONTANT_AU_DESSUS_LIMITE');
-  assert.strictEqual(eval_({ fiche: fiche(10000), paiements: [cash(10000)], parametres: { montantRetraitFicheCaisse: 15000 } }).ok, true);
+test('23/10 : plus de plafond de montant pour la caisse — comme la direction, toute fiche de la même session', () => {
+  assert.strictEqual(eval_({ fiche: fiche(7500), paiements: [cash(7500)] }).ok, true);
+  assert.strictEqual(eval_({ fiche: fiche(250000), paiements: [cash(250000)], parametres: { montantRetraitFicheCaisse: 2000 } }).ok, true);
 });
 
 test('encaissée hier : refusée (jour d\'Haïti), sauf rejeu de la file hors ligne qui passe mais est signalé', () => {
@@ -168,18 +161,10 @@ test('route : sans aucun des deux droits → 403 et rien ne bouge', async () => 
   assert.strictEqual(m.tables.fiches[0].supprime_le, null);
 });
 
-test('route : au-dessus de la limite → 403 MONTANT_AU_DESSUS_LIMITE, rien supprimé, tentative tracée', async () => {
-  const m = monter(donnees({ fiches: [{ id: 'f1', episode_id: 'e1', numero_fiche: 1, total_global: 9000, date_creation: maintenantISO(), supprime_le: null }] }));
-  const r = await m.appeler({});
-  assert.strictEqual(r.code, 403);
-  assert.strictEqual(r.corps.code, 'MONTANT_AU_DESSUS_LIMITE');
-  assert.strictEqual(m.tables.paiements[0].supprime_le, null);
-  assert.ok(m.audit.some(x => x.a === 'fiche_retrait_caisse_refuse'));
-});
-
-test('route : le plafond lu est celui des Paramètres', async () => {
-  const m = monter({ ...donnees(), parametres: { montantRetraitFicheCaisse: 2000 } });
-  assert.strictEqual((await m.appeler({})).code, 403);
+test('route : une grosse fiche de la session se retire quand même (plus de plafond)', async () => {
+  const m = monter(donnees({ fiches: [{ id: 'f1', episode_id: 'e1', numero_fiche: 1, total_global: 90000, date_creation: maintenantISO(), supprime_le: null }] }));
+  assert.strictEqual((await m.appeler({})).code, 200);
+  assert.ok(m.tables.paiements[0].supprime_le);
 });
 
 test('route : la direction (dossier_annuler) n\'a ni plafond ni délai, mais le motif reste obligatoire', async () => {
@@ -269,4 +254,12 @@ test('route : autre erreur de la base → 500, rien d\'écrit côté serveur', a
   const m = monter({ ...donnees(), fonctionSolde: { code: '08006', message: 'connection failure' } });
   assert.strictEqual((await m.appeler({})).code, 500);
   assert.strictEqual(m.tables.fiches[0].supprime_le, null);
+});
+
+test('23/10 : la croix de la direction (DELETE /api/fiches/:id) passe aussi par la fonction qui recalcule la dette, avec repli si elle manque', () => {
+  const d = source.indexOf("app.delete('/api/fiches/:id'");
+  const bloc = source.slice(d, source.indexOf("app.post('/api/fiches/:id/retirer-caisse'", d));
+  assert.match(bloc, /rpc\('retirer_fiche_ajuster_solde', \{ p_fiche: req\.params\.id, p_paiements:/);
+  assert.match(bloc, /estRefusSolde\(erreurSolde\)\) return res\.status\(409\)/);
+  assert.match(bloc, /estFonctionAbsente\(erreurSolde\)\) return res\.status\(500\)/);
 });

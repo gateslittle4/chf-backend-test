@@ -34,11 +34,9 @@ function evaluerRetraitCaisse({ fiche, paiements, episode, parametres, motif, ma
   if (texte.length < MOTIF_MIN) return refus('MOTIF_REQUIS', `Un motif d'au moins ${MOTIF_MIN} caractères est obligatoire.`);
   if (texte.length > MOTIF_MAX) return refus('MOTIF_TROP_LONG', `Motif trop long (${MOTIF_MAX} caractères au maximum).`);
 
+  // 23/10 (Esdras) : « comme la direction, les fiches de la même session » — plus de plafond de montant pour la caisse.
   const limite = limiteRetrait(parametres);
   const total = Number(fiche.total_global) || 0;
-  if (!(total < limite)) {
-    return refus('MONTANT_AU_DESSUS_LIMITE', `Cette fiche (${total} Gdes) dépasse le montant que la caisse peut retirer (${limite} Gdes). Voir la direction.`);
-  }
   if (episode && (episode.verrouille_facture || episode.numero_lot)) {
     return refus('DOSSIER_VERROUILLE', 'Ce dossier est déjà facturé au partenaire : la fiche ne peut plus être retirée par la caisse.');
   }

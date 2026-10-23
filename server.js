@@ -2479,11 +2479,19 @@ app.delete('/api/fiches/:id', async (req, res) => {
   // de DELETE, cascade manuelle vers les paiements de CETTE fiche (paiements.fiche_id est ON
   // DELETE CASCADE en base, mais seulement pour un vrai DELETE).
   const maintenant = new Date().toISOString();
-  const { error: erreurPaiements } = await supabase.from('paiements').update({ supprime_le: maintenant }).eq('fiche_id', req.params.id).is('supprime_le', null);
-  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
-
-  const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
-  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  // 23/10 : fiche + paiements à la corbeille ET dette des paiements d'après recalculée, en une opération (sql/retrait_fiche_solde.sql) — avant, supprimer une
+  // fiche à crédit laissait sa dette recopiée dans les paiements postérieurs. Fonction pas encore collée : ancien chemin.
+  const { data: paiementsFiche, error: erreurLecturePaiements } = await supabase.from('paiements').select('id').eq('fiche_id', req.params.id).is('supprime_le', null);
+  if (erreurLecturePaiements) return res.status(500).json({ error: erreurLecturePaiements.message });
+  const { error: erreurSolde } = await supabase.rpc('retirer_fiche_ajuster_solde', { p_fiche: req.params.id, p_paiements: (paiementsFiche || []).map(p => p.id), p_horodatage: maintenant });
+  if (erreurSolde) {
+    if (estRefusSolde(erreurSolde)) return res.status(409).json({ error: erreurSolde.message, code: erreurSolde.code });
+    if (!estFonctionAbsente(erreurSolde)) return res.status(500).json({ error: erreurSolde.message });
+    const { error: erreurPaiements } = await supabase.from('paiements').update({ supprime_le: maintenant }).eq('fiche_id', req.params.id).is('supprime_le', null);
+    if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+    const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
+    if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  }
 
   // Les fiches suivantes remontent d'un numéro (14/10, reprise de chf-demo2) : supprimer la Fiche 1 ne laisse pas un dossier qui commence à la
   // Fiche 2. Renumérotation atomique en base (sql/renumerotation_fiches.sql). Si le script n'est pas encore collé, la suppression reste valable
