@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const src = require('./serveurSource').lireServeur();
 function bloc(debutMarqueur, finMarqueur) {
   const d = src.indexOf(debutMarqueur);
   assert.ok(d >= 0, `marqueur introuvable : ${debutMarqueur}`);

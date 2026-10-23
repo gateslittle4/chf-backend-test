@@ -164,7 +164,7 @@ test("Seuils par défaut : très au-dessus d'un usage normal (une caisse, tout l
 });
 
 test("server.js : limites branchées au bon endroit (après l'identité, avant l'idempotence et les routes), mauvais jetons comptés, pages publiques limitées, trust proxy réglable", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const iVerif = src.indexOf("app.use('/api', verifyToken);");
   const iLimite = src.indexOf("app.use('/api', limiteUtilisateur);");
   const iIdem = src.indexOf("app.use('/api', creerMiddlewareIdempotence(supabase));");

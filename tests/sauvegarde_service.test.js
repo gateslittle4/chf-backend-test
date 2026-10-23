@@ -8,7 +8,7 @@ const path = require('node:path');
 const S = require('../utils/sauvegarde');
 const { creerServiceSauvegarde } = require('../utils/sauvegardeServeur');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Fausse base : tables en mémoire (select / order / range / insert / update / eq) + Storage en mémoire. `.in()` n'existe PAS : l'appeler fait échouer le test.

@@ -81,7 +81,7 @@ test('contrôles paiements et fermeture : pas de faux positifs (dépôt, rembour
 });
 
 test('POST /api/episodes écrit date_fermeture pour un épisode créé déjà clôturé (Achat Express)', () => {
-  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /\.\.\.\(d\.status === 'archived' \? \{ date_fermeture: new Date\(\)\.toISOString\(\) \} : \{\}\)/);
 });
 

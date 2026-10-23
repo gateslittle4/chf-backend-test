@@ -35,7 +35,7 @@ test("Le script de journal ne contient aucune commande destructrice et n'est lu 
   assert.doesNotMatch(sql, /\bDROP\b|\bDELETE\b|\bTRUNCATE\b|\bREVOKE\b/i);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.migrations_appliquees/);
   assert.match(sql, /ENABLE ROW LEVEL SECURITY/);
-  const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const serveur = require('./serveurSource').lireServeur();
   assert.doesNotMatch(serveur, /from\('migrations_appliquees'\)/, 'aucune route ne lit ce journal');
   assert.match(serveur, /'migrations_appliquees'/, 'mais il est sauvegardé avec le reste (16/10, sauvegarde compressée)');
 });

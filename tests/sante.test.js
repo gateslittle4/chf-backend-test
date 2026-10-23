@@ -25,7 +25,7 @@ test("Ne renvoie aucune donnée de la base : seulement l'état, l'heure et la du
   assert.deepStrictEqual(Object.keys(r).sort(), ['base', 'duree_ms', 'statut']);
 });
 test("server.js : /sante et /sante/complet sont publiques (avant verifyToken) ; /sante/complet renvoie 503 si la base est dégradée", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const iSante = src.indexOf("app.get('/sante'");
   assert.ok(iSante !== -1 && iSante < src.indexOf("app.use('/api', verifyToken)"));
   assert.match(src, /app\.get\('\/sante\/complet', limitePublique, async/);

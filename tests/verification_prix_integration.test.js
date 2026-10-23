@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 const { verifierTotalFiche } = require('../utils/verificationPrixFiche');
 const { estRejeu: ESTREJEU } = require('../utils/heureServeur');
 
