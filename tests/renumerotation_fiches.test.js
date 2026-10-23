@@ -81,8 +81,8 @@ function monter(fichesInitiales, { sansFonctions = false } = {}) {
   const fin = serverSrc.indexOf('// Route : récupération du catalogue');
   assert.ok(debut > 0 && fin > debut);
   const auditer = async (_req, action, details) => { audits.push({ action, details }); };
-  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'reactiverEpisodeSuspendu', 'console', serverSrc.slice(debut, fin))(
-    app, supabase, async () => true, (v) => /^[0-9a-f-]{8,}$/i.test(String(v)) || String(v).startsWith('f') || String(v).startsWith('nouvelle'), auditer, async () => {}, { ...console, warn() {} });
+  new Function('app', 'supabase', 'aPermission', 'estUnVraiUuid', 'enregistrerAuditServeur', 'reactiverEpisodeSuspendu', 'estRefusSolde', 'estFonctionAbsente', 'console', serverSrc.slice(debut, fin))(
+    app, supabase, async () => true, (v) => /^[0-9a-f-]{8,}$/i.test(String(v)) || String(v).startsWith('f') || String(v).startsWith('nouvelle'), auditer, async () => {}, (e) => !!e && ['CHF11', 'CHF12'].includes(e.code), (e) => !!e && ['PGRST202', '42883'].includes(e.code), { ...console, warn() {} });
   const appeler = async (cle, { corps = {}, params = {} } = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaires[cle]({ body: corps, params, user: { id: 'u1', email: 'caisse@chf.test' } }, res);

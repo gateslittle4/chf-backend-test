@@ -48,7 +48,7 @@ const { genererLienReinitialisation } = require('./utils/lienReinitialisation');
 const { fermerPostesExpires } = require('./utils/fermetureAutoPostes');
 const { contenuDesFiches } = require('./utils/contenuEpisode');
 const { verifierSante } = require('./utils/sante');
-const { evaluerRetraitCaisse, MOTIF_MIN } = require('./utils/retraitFicheCaisse');
+const { evaluerRetraitCaisse, estRefusSolde, MOTIF_MIN } = require('./utils/retraitFicheCaisse');
 const { creerRoutesDoublons } = require('./utils/routesDoublons');
 const { creerRoutesEtatSysteme } = require('./utils/routesEtatSysteme');
 const { creerRoutesListesServices } = require('./utils/routesListesServices');
@@ -2479,11 +2479,19 @@ app.delete('/api/fiches/:id', async (req, res) => {
   // de DELETE, cascade manuelle vers les paiements de CETTE fiche (paiements.fiche_id est ON
   // DELETE CASCADE en base, mais seulement pour un vrai DELETE).
   const maintenant = new Date().toISOString();
-  const { error: erreurPaiements } = await supabase.from('paiements').update({ supprime_le: maintenant }).eq('fiche_id', req.params.id).is('supprime_le', null);
-  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
-
-  const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
-  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  // 23/10 : fiche + paiements à la corbeille ET dette des paiements d'après recalculée, en une opération (sql/retrait_fiche_solde.sql) — avant, supprimer une
+  // fiche à crédit laissait sa dette recopiée dans les paiements postérieurs. Fonction pas encore collée : ancien chemin.
+  const { data: paiementsFiche, error: erreurLecturePaiements } = await supabase.from('paiements').select('id').eq('fiche_id', req.params.id).is('supprime_le', null);
+  if (erreurLecturePaiements) return res.status(500).json({ error: erreurLecturePaiements.message });
+  const { error: erreurSolde } = await supabase.rpc('retirer_fiche_ajuster_solde', { p_fiche: req.params.id, p_paiements: (paiementsFiche || []).map(p => p.id), p_horodatage: maintenant });
+  if (erreurSolde) {
+    if (estRefusSolde(erreurSolde)) return res.status(409).json({ error: erreurSolde.message, code: erreurSolde.code });
+    if (!estFonctionAbsente(erreurSolde)) return res.status(500).json({ error: erreurSolde.message });
+    const { error: erreurPaiements } = await supabase.from('paiements').update({ supprime_le: maintenant }).eq('fiche_id', req.params.id).is('supprime_le', null);
+    if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+    const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', req.params.id).select();
+    if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  }
 
   // Les fiches suivantes remontent d'un numéro (14/10, reprise de chf-demo2) : supprimer la Fiche 1 ne laisse pas un dossier qui commence à la
   // Fiche 2. Renumérotation atomique en base (sql/renumerotation_fiches.sql). Si le script n'est pas encore collé, la suppression reste valable
@@ -2502,9 +2510,12 @@ app.delete('/api/fiches/:id', async (req, res) => {
 
 // 21/10 (Esdras) : un client prend un service puis n'en veut plus, ou le médecin déplace l'acte — la caisse doit pouvoir retirer
 // la fiche déjà encaissée, sans passer par la direction, pour les petits montants. Mêmes effets que DELETE /api/fiches/:id
-// (fiche + paiements à la corbeille, renumérotation) ; les limites (montant < paramètre « montantRetraitFicheCaisse », jour même,
-// pas de crédit / partenaire / exonération, dossier non facturé) sont dans utils/retraitFicheCaisse.js. « dossier_annuler »
+// (fiche + paiements à la corbeille, renumérotation) ; les limites (montant < paramètre « montantRetraitFicheCaisse », jour même ou
+// session de caisse ouverte, dossier non facturé) sont dans utils/retraitFicheCaisse.js. « dossier_annuler »
 // (direction) garde son droit sans ces limites. Rejeu hors ligne : jamais refusé pour le délai, seulement signalé dans l'audit.
+// 22/10 : « Corriger » (le corps porte `correction: true`) = le même retrait, suivi côté écran de la fiche refaite à la même place ;
+// tous les modes de paiement sont acceptés et la DETTE du patient est recalculée par la base (sql/retrait_fiche_solde.sql) : retirer une
+// fiche à crédit ou en paiement partiel la retire aussi du solde de chaque paiement d'après.
 app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
   const peutTout = await aPermission(req.user.id, 'dossier_annuler');
   if (!peutTout && !(await aPermission(req.user.id, 'caisse_travailler'))) {
@@ -2528,13 +2539,18 @@ app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
     paiements = parLocalId || [];
   }
   const { data: parametresDoc } = await supabase.from('catalog').select('items').eq('type', 'parametres').maybeSingle();
+  // Session de caisse OUVERTE de la personne : un encaissement fait depuis son ouverture compte comme « la même session » (voir utils/retraitFicheCaisse.js).
+  const { data: ligneSessions } = await supabase.from('catalog').select('items').eq('type', 'sessions_caisse').maybeSingle();
+  const sessionOuverte = ((ligneSessions && ligneSessions.items) || []).find(x => x && x.uid === req.user.id && x.statut === 'ouverte' && !x.fermetureISO);
+  const debutSessionMs = sessionOuverte ? Date.parse(sessionOuverte.ouvertureISO) : null;
   const rejeu = estRejeu(req);
   const motif = req.body && req.body.motif;
+  const correction = !!(req.body && req.body.correction);
   let horsDelai = false;
   if (!peutTout) {
-    const verdict = evaluerRetraitCaisse({ fiche, paiements, episode, parametres: parametresDoc && parametresDoc.items, motif, rejeu });
+    const verdict = evaluerRetraitCaisse({ fiche, paiements, episode, parametres: parametresDoc && parametresDoc.items, motif, debutSessionMs, rejeu });
     if (!verdict.ok) {
-      enregistrerAuditServeur(req, 'fiche_retrait_caisse_refuse', { fiche_id: fiche.id, numero_fiche: fiche.numero_fiche, total: fiche.total_global, code: verdict.code, rejeu });
+      enregistrerAuditServeur(req, 'fiche_retrait_caisse_refuse', { fiche_id: fiche.id, numero_fiche: fiche.numero_fiche, total: fiche.total_global, code: verdict.code, correction, rejeu });
       return res.status(403).json({ error: verdict.message, code: verdict.code });
     }
     horsDelai = verdict.horsDelai;
@@ -2544,12 +2560,20 @@ app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
 
   const maintenant = new Date().toISOString();
   const idsPaiements = (paiements || []).map(p => p.id);
-  if (idsPaiements.length > 0) {
-    const { error } = await supabase.from('paiements').update({ supprime_le: maintenant }).in('id', idsPaiements).is('supprime_le', null);
-    if (error) return res.status(500).json({ error: error.message });
-  }
-  const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', fiche.id).select();
-  if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  // Une seule opération de la base (sql/retrait_fiche_solde.sql) : paiements + fiche à la corbeille ET dette des paiements d'après recalculée,
+  // sous le verrou de l'épisode. Fonction pas encore collée (42883 / PGRST202) : ancien chemin, sans recalcul de dette.
+  let resultatSolde = null;
+  const { data: dataSolde, error: erreurSolde } = await supabase.rpc('retirer_fiche_ajuster_solde', { p_fiche: fiche.id, p_paiements: idsPaiements, p_horodatage: maintenant });
+  if (erreurSolde) {
+    if (estRefusSolde(erreurSolde)) return res.status(409).json({ error: erreurSolde.message, code: erreurSolde.code });
+    if (!estFonctionAbsente(erreurSolde)) return res.status(500).json({ error: erreurSolde.message });
+    if (idsPaiements.length > 0) {
+      const { error } = await supabase.from('paiements').update({ supprime_le: maintenant }).in('id', idsPaiements).is('supprime_le', null);
+      if (error) return res.status(500).json({ error: error.message });
+    }
+    const { error: erreurFiche } = await supabase.from('fiches').update({ supprime_le: maintenant }).eq('id', fiche.id).select();
+    if (erreurFiche) return res.status(500).json({ error: erreurFiche.message });
+  } else resultatSolde = dataSolde || null;
 
   let renumerotation = null;
   if (fiche.episode_id) {
@@ -2557,13 +2581,15 @@ app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
     if (erreurRenumerotation) console.warn('Renumérotation des fiches non faite (script SQL pas collé ?) :', erreurRenumerotation.message);
     else renumerotation = numeros || [];
   }
-  enregistrerAuditServeur(req, 'fiche_retiree_caisse', {
+  enregistrerAuditServeur(req, correction ? 'fiche_corrigee_caisse' : 'fiche_retiree_caisse', {
     fiche_id: fiche.id, episode_id: fiche.episode_id, numero_fiche: fiche.numero_fiche, total: fiche.total_global,
     montant_rembourse: (paiements || []).reduce((s, p) => s + (Number(p.montant) || 0), 0),
     modes: [...new Set((paiements || []).map(p => p.mode))], motif: String(motif).trim(),
     fiche_creee_par: fiche.cree_par || null, avec_droit_direction: peutTout, hors_delai: horsDelai, rejeu,
+    dette_retiree: resultatSolde ? Number(resultatSolde.dette_retiree) || 0 : null, paiements_ajustes: resultatSolde ? Number(resultatSolde.paiements_ajustes) || 0 : null,
+    session_de_caisse: sessionOuverte ? sessionOuverte.id || null : null,
   });
-  res.json({ success: true, renumerotation });
+  res.json({ success: true, renumerotation, dette_retiree: resultatSolde ? Number(resultatSolde.dette_retiree) || 0 : 0 });
 });
 
 // Restauration d'une fiche mise à la corbeille — même logique que /api/episodes/:id/restaurer :
