@@ -7,7 +7,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 
 test("Aucune route dupliquée (même méthode + même chemin) — le bug qui désactivait silencieusement l'anti-doublon patient", () => {
   const routes = [...serverSrc.matchAll(/^app\.(get|post|put|patch|delete)\('([^']+)'/gm)]
@@ -89,7 +89,7 @@ test("POST /api/paiements en mode remboursement_credit relit le solde en base �
 // se basaient sur une transaction qui n'existe plus — pouvant masquer une vraie dette ou bloquer
 // un remboursement légitime.
 test("GET /api/dossiers/:id/historique et le calcul du plafond de remboursement de crédit (POST /api/paiements) excluent tous les deux un paiement ANNULÉ du 'dernier paiement' — via .or('annule.eq.false,annule.is.null'), pas .eq('annule', false) qui exclurait à tort les paiements d'avant cette fonctionnalité (annule=NULL)", () => {
-  const blocHistorique = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  const blocHistorique = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("async function assurerBucketPiecesJointes"));
   assert.match(blocHistorique, /\.or\('annule\.eq\.false,annule\.is\.null'\)/, "GET /api/dossiers/:id/historique doit exclure les paiements annulés du dernier paiement");
 
   const blocPaiements = serverSrc.slice(serverSrc.indexOf("app.post('/api/paiements'"), serverSrc.indexOf("app.patch('/api/paiements/:id/annuler'"));
@@ -800,7 +800,7 @@ test("GET /api/episodes/:id/solde-depot expose le solde de dépôt réellement d
 });
 
 test("GET /api/dossiers/:id/historique inclut soldeDepot par épisode (affiché sur Fiche Patient, très consulté par l'archiviste) — recalculé à partir de tout l'historique des paiements, pas seulement le dernier", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("async function assurerBucketPiecesJointes"));
   assert.doesNotMatch(bloc, /\.order\('date_paiement', \{ ascending: false \}\)\.limit\(1\)/, "ne doit plus se limiter au dernier paiement — calculerSoldeDepot a besoin de tout l'historique");
   assert.match(bloc, /\.\.\.calculerSoldeDepot\(paiements\)/, "chaque épisode enrichi doit porter son soldeDepot");
 });
@@ -810,7 +810,7 @@ test("GET /api/dossiers/:id/historique inclut soldeDepot par épisode (affiché 
 // côté client, FichePatient.js) : une donnée financière ne doit jamais transiter vers un navigateur
 // qui n'a pas le droit de la voir, même consultable via l'onglet réseau.
 test("GET /api/dossiers/:id/historique n'inclut dernierPaiement/soldeDepot que si l'appelant a fiche_patient_voir_finances — vérifié UNE fois pour tout le dossier, pas par épisode", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("async function assurerBucketPiecesJointes"));
   assert.match(bloc, /const peutVoirFinances = await aPermission\(req\.user\.id, 'fiche_patient_voir_finances'\);/);
   assert.match(bloc, /if \(!peutVoirFinances\) return \{ \.\.\.ep, dernierPaiement: null, intervention, fichesDetail \};/, "sans la permission, dernierPaiement et soldeDepot/totalDepots ne doivent jamais quitter le serveur (intervention et fichesDetail restent inclus, jamais une donnée financière)");
 });
@@ -844,7 +844,7 @@ test("extraireIntervention() détecte accouchement/césarienne/chirurgie dans le
 });
 
 test("GET /api/dossiers/:id/historique inclut intervention par épisode, même sans fiche_patient_voir_finances (jamais une donnée financière)", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("async function assurerBucketPiecesJointes"));
   assert.match(bloc, /const intervention = extraireIntervention\(fiches\);/);
   assert.match(bloc, /return \{ \.\.\.ep, dernierPaiement: \(paiements && paiements\[0\]\) \|\| null, intervention, fichesDetail, \.\.\.calculerSoldeDepot\(paiements\) \};/);
 });
@@ -859,7 +859,7 @@ test("extraireFichesDetail() regroupe les lignes facturées par fiche (avec la d
 });
 
 test("GET /api/dossiers/:id/historique : la requête sur fiches inclut date_creation (pour grouper fichesDetail par visite) en plus de raw_state", () => {
-  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("// ============================================================\n// PIÈCES JOINTES"));
+  const bloc = serverSrc.slice(serverSrc.indexOf("app.get('/api/dossiers/:id/historique'"), serverSrc.indexOf("async function assurerBucketPiecesJointes"));
   assert.match(bloc, /\.from\('fiches'\)\.select\('raw_state, date_creation'\)\.eq\('episode_id', ep\.id\)/);
   assert.match(bloc, /const fichesDetail = extraireFichesDetail\(fiches\);/);
 });
@@ -1420,7 +1420,7 @@ test("PATCH /api/depenses-caisse/:id/repondre exige caisse_travailler et verroui
 // fiche entière : l'hôpital encaisse deux fois la même somme et le patient perd ce qu'il a versé,
 // sans que rien ne l'affiche nulle part.
 test("Transfert partenaire : refuse d'annuler un crédit déjà partiellement remboursé en espèces", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const debut = src.indexOf("app.post('/api/episodes/:id/rembourser-transferer-partenaire'");
   assert.notStrictEqual(debut, -1, 'la route doit exister');
   const route = src.slice(debut, src.indexOf('\napp.', debut + 10));
@@ -1444,7 +1444,7 @@ test("Transfert partenaire : refuse d'annuler un crédit déjà partiellement re
 // montait sans jamais redescendre, jusqu'au redémarrage de Render — qui remet au passage le
 // compteur à zéro.
 test("Portail patient : le compteur anti-force-brute ne garde pas ses clés pour toujours", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const route = src.slice(src.indexOf("app.post('/portail-patient/recherche'"), src.indexOf('async function verifyToken'));
   assert.match(route, /if \(tentativesPortailPatient\.size > 5000\) \{/, "un balayage doit exister");
   assert.match(route, /if \(!ts\.some\(t => maintenant - t < FENETRE_LIMITE_PORTAIL_MS\)\) tentativesPortailPatient\.delete\(k\);/,
@@ -1464,7 +1464,7 @@ test("Portail patient : le compteur anti-force-brute ne garde pas ses clés pour
 // cash, ou qui laisse un dépôt pour une prochaine visite, voyait sa créance s'effacer partout — et
 // le serveur refusait ensuite tout remboursement ("Aucun solde de crédit à rembourser").
 test("Paiements : le solde de crédit d'un épisode est REPORTÉ, une dette ne peut plus s'effacer toute seule", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const route = src.slice(src.indexOf("app.post('/api/paiements'"), src.indexOf("app.patch('/api/paiements/:id/annuler'"));
 
   // Une seule lecture du solde, partagée — pas deux définitions qui pourraient diverger.
@@ -1504,7 +1504,7 @@ test("Paiements : le solde de crédit d'un épisode est REPORTÉ, une dette ne p
 // session sans avoir catalogue_gerer (réservé à direction/administrateur pour les vrais
 // catalogues — tarifs, médicaments).
 test("Sessions de caisse : un caissier (caisse_travailler) peut ouvrir et fermer sa propre session, sans catalogue_gerer", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
 
   const routePut = src.slice(src.indexOf("app.put('/api/catalog/:type'"), src.indexOf("app.post('/api/catalog/:type/item'"));
   assert.match(routePut, /\} else if \(type === 'sessions_caisse'\) \{\s*\n\s*permissionOk = await aPermission\(req\.user\.id, 'caisse_travailler'\);/,
@@ -1534,7 +1534,7 @@ test("Sessions de caisse : un caissier (caisse_travailler) peut ouvrir et fermer
 // fabriqués — sans laisser de trace autre que le journal d'audit tenu côté navigateur, lui-même
 // contournable de la même façon.
 test("Sessions de caisse : un caissier ne peut fermer/modifier que SA PROPRE session (pas celle d'un collègue)", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const routePatch = src.slice(src.indexOf("app.patch('/api/catalog/:type/champs'"), src.indexOf("app.delete('/api/catalog/:type/item/:id'"));
 
   assert.match(routePatch, /if \(type === 'sessions_caisse' && !\(await aPermission\(req\.user\.id, 'catalogue_gerer'\)\)\) \{/,
@@ -1557,7 +1557,7 @@ test("Sessions de caisse : un caissier ne peut fermer/modifier que SA PROPRE ses
 // tous les jours et réutilise supprimer_article_catalogue, déjà en prod — aucune nouvelle fonction
 // SQL ni colonne requise pour cette partie.
 test("Corbeille catalogue : purgerCorbeilleCatalogue ne supprime pour de bon qu'après 30 jours, via la RPC déjà existante", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /const JOURS_CORBEILLE_CATALOGUE = 30;/);
   const blocFonction = src.slice(src.indexOf('async function purgerCorbeilleCatalogue'), src.indexOf("cron.schedule('0 6 * * *', async () => {\n  try {\n    const resultat = await purgerCorbeilleCatalogue"));
   assert.match(blocFonction, /for \(const type of \['medicaments', 'actes'\]\)/, "seuls medicaments/actes sont concernés par CETTE fonction — dossiers/fiches/pièces jointes ont leur propre purgerCorbeilleDossiers() séparée (voir plus bas), partenaires ONG n'ont encore aucune route de suppression");
@@ -1619,7 +1619,7 @@ test("POST /api/dossiers/:id/pieces-jointes/:fichierId/restaurer annule juste la
 });
 
 test("purgerCorbeilleDossiers() fait un VRAI DELETE après 30 jours (déclenche enfin la cascade base de données) et retire le fichier Storage des pièces jointes purgées", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /const JOURS_CORBEILLE_DOSSIERS = 30;/);
   const blocFonction = src.slice(src.indexOf('async function purgerCorbeilleDossiers'), src.indexOf('const JOURS_TRACES_DECREMENT_STOCK'));
   assert.match(blocFonction, /from\('episodes'\)\.delete\(\)\.lt\('supprime_le', limite\)\.not\('supprime_le', 'is', null\)/, "les dossiers expirés doivent subir un vrai DELETE — c'est ce qui déclenche enfin la cascade base vers fiches/paiements");
@@ -1632,7 +1632,7 @@ test("purgerCorbeilleDossiers() fait un VRAI DELETE après 30 jours (déclenche 
 });
 
 test("Les lectures qui alimentent l'écran (dossiers/épisodes, fiches d'un épisode, pièces jointes, paiements) excluent toutes les lignes à la corbeille — sinon un dossier 'supprimé' réapparaîtrait", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   // episodeVersFlat (chemin unitaire) ET episodesVersFlatEnLot (chemin groupé) doivent filtrer
   // À L'IDENTIQUE — sinon les deux chemins ne produiraient plus le même résultat (voir le
   // commentaire au-dessus d'assemblerEpisodeFlat : "ne jamais dupliquer cette logique ailleurs").
@@ -1656,7 +1656,7 @@ test("Les lectures qui alimentent l'écran (dossiers/épisodes, fiches d'un épi
 // "je ne veux pas oublier la racine de l'enfant". nom_origine fige le nom du dossier à sa
 // création, pour toujours ; PUT /api/dossiers/:id (le renommage) ne doit JAMAIS y toucher.
 test("POST /api/dossiers fige nom_origine=nom à la création (avec repli 42703 si la colonne n'existe pas encore) ; PUT /api/dossiers/:id ne le modifie jamais", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const blocPost = src.slice(src.indexOf("app.post('/api/dossiers'"), src.indexOf("app.get('/api/dossiers/:id'"));
   // 14/10 : la ligne est construite une fois (ligneDossier) — le premier essai l'insère telle quelle, avec nom_origine ; les replis retirent d'abord
   // nom_origine (comme avant), puis le sexe en dernier recours.
@@ -1697,7 +1697,7 @@ test("POST /api/stock/decrementer et /decrementer-dons transmettent local_id à 
 // lignes pour une seule demande. Leçon à garder : une hypothèse écrite dans un commentaire (ou
 // gelée dans un test) n'est pas une garantie — seul le code l'est.
 test("Une réquisition est idempotente : local_id sur la ligne ET sur le décrément, pour qu'un rejeu ne sorte pas le stock deux fois", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   // Borne sur la route suivante plutôt qu'un nombre de caractères : la route a grandi avec le
   // correctif du 03/09 et une fenêtre fixe (3000) coupait juste avant l'insert à vérifier.
   const bloc = src.slice(src.indexOf("app.post('/api/requisitions'"), src.indexOf("app.get('/api/requisitions'"));
@@ -1716,7 +1716,7 @@ test("Une réquisition est idempotente : local_id sur la ligne ET sur le décré
 });
 
 test("Les 2 routes d'AJOUT de stock sont idempotentes — un rejeu ne fait pas entrer la quantité deux fois", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   for (const [route, fonction, borne] of [
     ["app.post('/api/stock/ajouter'", 'ajouter_stock_medicament', "app.patch('/api/stock/:id'"],
     ["app.post('/api/stock/ajouter-don'", 'ajouter_stock_don_medicament', "app.post('/api/stock/decrementer-dons'"],
@@ -1732,7 +1732,7 @@ test("Les 2 routes d'AJOUT de stock sont idempotentes — un rejeu ne fait pas e
 });
 
 test("Les traces d'idempotence du stock sont purgées automatiquement — sinon la table grossit indéfiniment", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /const JOURS_TRACES_DECREMENT_STOCK = 90;/);
   assert.match(src, /async function purgerTracesDecrementStock\(\) \{/);
   assert.match(src, /from\('decrements_stock_appliques'\)\.delete\(\)\.lt\('applique_le', limite\)/);
@@ -1750,7 +1750,7 @@ test("Les traces d'idempotence du stock sont purgées automatiquement — sinon 
 // ============================================================
 
 test("Les routes d'invitation publiques sont AVANT app.use('/api', verifyToken) — une personne invitée n'a pas encore de compte", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const iVerif = src.indexOf("app.get('/invitation/:token'");
   const iCreation = src.indexOf("app.post('/invitation/:token/creer-compte'");
   // lastIndexOf : ce chemin est cité dans plusieurs commentaires plus haut (dont celui du portail
@@ -1763,7 +1763,7 @@ test("Les routes d'invitation publiques sont AVANT app.use('/api', verifyToken) 
 });
 
 test("Le rôle d'un compte créé par invitation vient TOUJOURS de la ligne en base, jamais du corps de la requête", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
   // Le corps n'est déstructuré que pour ces 3 champs — pas de `role` parmi eux.
   assert.match(bloc, /const \{ identifiant, displayName, password \} = req\.body \|\| \{\};/);
@@ -1772,7 +1772,7 @@ test("Le rôle d'un compte créé par invitation vient TOUJOURS de la ligne en b
 });
 
 test("Le lien d'invitation est à USAGE UNIQUE, réservé atomiquement par Postgres avant la création du compte", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
   // La condition d'unicité doit être DANS la requête SQL (évaluée par Postgres), pas un `if` en
   // JavaScript entre une lecture et une écriture : deux personnes qui ouvrent le même lien en
@@ -1792,7 +1792,7 @@ test("Le lien d'invitation est à USAGE UNIQUE, réservé atomiquement par Postg
 });
 
 test("Un lien d'invitation ne peut JAMAIS donner le rôle administrateur", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const ligne = src.match(/const ROLES_INVITABLES = \[[^\]]*\];/);
   assert.ok(ligne, 'ROLES_INVITABLES doit exister');
   assert.doesNotMatch(ligne[0], /'administrateur'/, "un lien voyage dans WhatsApp : les pleins pouvoirs se donnent à la main");
@@ -1813,7 +1813,7 @@ test("Le jeton d'invitation est cryptographiquement imprévisible et sa durée d
 });
 
 test("Les 3 routes d'administration des invitations exigent utilisateurs_gerer", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   for (const route of ["app.post('/api/admin/invitations'", "app.get('/api/admin/invitations'", "app.patch('/api/admin/invitations/:token/revoquer'"]) {
     const i = src.indexOf(route);
     assert.ok(i !== -1, `route introuvable : ${route}`);
@@ -1822,7 +1822,7 @@ test("Les 3 routes d'administration des invitations exigent utilisateurs_gerer",
 });
 
 test("L'identifiant choisi par la personne invitée ne peut pas sortir du domaine @chf.com", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const bloc = src.slice(src.indexOf("app.post('/invitation/:token/creer-compte'"), src.indexOf("// Vérification via Firebase Admin SDK"));
   assert.match(bloc, /\/\^\[a-z0-9\._-\]\{3,40\}\$\/\.test\(identifiantPropre\)/, "liste blanche stricte : ni @, ni espace, ni accent");
   assert.match(bloc, /const email = `\$\{identifiantPropre\}@chf\.com`;/, "le domaine est imposé par le serveur, jamais fourni par l'invité");
@@ -1830,7 +1830,7 @@ test("L'identifiant choisi par la personne invitée ne peut pas sortir du domain
 });
 
 test("La table invitations est sauvegardée et purgée automatiquement", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const bloc = src.slice(src.indexOf('const TABLES_A_SAUVEGARDER'), src.indexOf('async function sauvegarderVersStorage'));
   assert.match(bloc, /'invitations'/);
   assert.match(src, /const JOURS_CONSERVATION_INVITATIONS = 90;/);
@@ -1947,7 +1947,7 @@ test("miroir serveur PERMISSIONS_PAR_DEFAUT : audit_voir présent pour direction
 test(".env.example documente TOUTES les variables d'environnement lues par server.js", () => {
   const modele = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
   const documentees = [...modele.matchAll(/^([A-Z0-9_]+)=/gm)].map(m => m[1]);
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const lues = [...new Set([...src.matchAll(/process\.env\.([A-Z0-9_]+)/g)].map(m => m[1]))];
   const manquantes = lues.filter(v => !documentees.includes(v));
   assert.deepStrictEqual(manquantes, [],
@@ -1972,7 +1972,7 @@ test(".env.example ne contient JAMAIS de vraie valeur — c'est un modèle, et i
 // ============================================================
 
 test("POST /api/episodes est idempotente : elle vérifie local_id AVANT d'insérer, l'écrit en base, et rattrape la collision 23505 de deux rejeux simultanés", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const debut = src.indexOf("app.post('/api/episodes'");
   assert.ok(debut > 0, "route POST /api/episodes introuvable");
   const corps = src.slice(debut, src.indexOf("app.put('/api/episodes/:id'", debut));
@@ -1982,7 +1982,7 @@ test("POST /api/episodes est idempotente : elle vérifie local_id AVANT d'insér
 });
 
 test("TOUTE route de création empruntée par la file d'attente hors ligne protège contre le rejeu — recensement exhaustif, pour qu'une nouvelle route ne rouvre pas le trou", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const lignes = src.split('\n');
   // Routes atteignables depuis la file d'attente hors ligne (api/supabase.js et
   // api/apiDossierEpisode.js côté app) : celles qui enregistrent une donnée métier créée par
@@ -2384,7 +2384,7 @@ test("POST /api/fiches : le rejeu d'une fiche déjà enregistrée (file hors lig
 
 // 30/09 : GET /api/ids-locaux — correspondances id local -> vrai id (file bloquée côté app).
 test("GET /api/ids-locaux : protégée (sous /api), format local_id filtré, 100 max, dossiers/épisodes/fiches seulement", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const i = src.indexOf("app.get('/api/ids-locaux'");
   assert.ok(i > src.indexOf("app.use('/api', verifyToken)"), 'doit être déclarée après verifyToken');
   const bloc = src.slice(i, i + 1200);
@@ -2396,7 +2396,7 @@ test("GET /api/ids-locaux : protégée (sous /api), format local_id filtré, 100
 
 // 01/10 : suppression d'un compte — garde-fous.
 test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même, administrateur seulement par un administrateur (jamais le dernier), compte actif ou non, Firebase + ligne users, journal", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const i = src.indexOf("app.delete('/api/admin/users/:uid'");
   assert.ok(i > src.indexOf("app.use('/api', verifyToken)"));
   const bloc = src.slice(i, i + 2600);
@@ -2413,7 +2413,7 @@ test("DELETE /api/admin/users/:uid : utilisateurs_gerer, jamais soi-même, admin
 // Audit de sécurité du 02/10 : un jeton Firebase valide SANS ligne dans `users` ne donne plus accès à l'API,
 // et l'API envoie des en-têtes de protection.
 test("verifyToken refuse un jeton valide qui n'a aucun profil CHF (compte Firebase créé par un tiers)", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const debut = src.indexOf('async function verifyToken');
   const bloc = src.slice(debut, src.indexOf("app.use('/api', verifyToken);", debut));
   assert.match(bloc, /if \(!profil\) \{/, 'le cas « aucun profil » doit être refusé');
@@ -2426,7 +2426,7 @@ test("verifyToken refuse un jeton valide qui n'a aucun profil CHF (compte Fireba
 // absente, des droits...) répondait 403 « Ce compte n'est pas autorisé » à TOUT LE MONDE en même temps.
 // Ce test EXÉCUTE vraiment verifyToken (extrait de server.js, avec de fausses dépendances), cas par cas.
 test("verifyToken : une ERREUR de lecture du profil répond 503 (transitoire, l'app réessaie), jamais 403 « compte non autorisé » ; un profil réellement absent/désactivé/expiré reste refusé", async () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   const debut = src.indexOf('async function verifyToken');
   const corps = src.slice(debut, src.indexOf("app.use('/api', verifyToken);", debut));
   const silence = { warn() {}, error() {}, log() {} };
@@ -2480,7 +2480,7 @@ test("verifyToken : une ERREUR de lecture du profil répond 503 (transitoire, l'
 });
 
 test("l'API envoie nosniff, HSTS et no-referrer, et n'annonce plus Express", () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /app\.disable\('x-powered-by'\)/);
   for (const e of ['X-Content-Type-Options', 'Strict-Transport-Security', 'Referrer-Policy']) assert.ok(src.includes(e), e);
 });

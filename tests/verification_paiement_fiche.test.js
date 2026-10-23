@@ -55,7 +55,7 @@ test('une vente sans fiche retrouvable est refusée ; dépôts et remboursements
 });
 
 // ---- le branchement dans server.js (middleware placé avant la route) ----
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 const VRAI_SOLDE = (() => { const d = serverSrc.indexOf('function calculerSoldeDepot'); return new Function(`${serverSrc.slice(d, serverSrc.indexOf('\n}\n', d) + 3)}; return calculerSoldeDepot;`)(); })();
 function monter({ fiches = [], paiements = [], episodes = [], vraiSolde = false } = {}) {
   const tables = { fiches, paiements, episodes };
