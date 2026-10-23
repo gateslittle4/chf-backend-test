@@ -142,7 +142,7 @@ test("Sans clé, en GET, ou table absente (script SQL pas encore appliqué) : la
 });
 
 test("server.js monte le middleware APRÈS verifyToken (la clé est rangée par personne) et purge les vieilles clés chaque nuit", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
   const iJeton = src.indexOf("app.use('/api', verifyToken);");
   const iIdem = src.indexOf("app.use('/api', creerMiddlewareIdempotence(supabase));");
   assert.ok(iJeton !== -1 && iIdem > iJeton);

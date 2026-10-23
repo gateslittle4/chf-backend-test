@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { motifDerogationValide } = require('../utils/actesNaissance');
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
 function fabriquer({ ouverts = [], droits = ['episode_creer'] } = {}) {
   const etat = { crees: [], audits: [] };

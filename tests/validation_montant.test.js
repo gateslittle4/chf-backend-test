@@ -59,7 +59,7 @@ test("lireMontant et normaliserMontant : texte → nombre, arrondi au centime", 
 });
 
 test("server.js : le montant est contrôlé AVANT le contrôle du paiement partiel et le calcul du solde, sur la copie du corps", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const debut = src.indexOf("app.post('/api/paiements'");
   const route = src.slice(debut, src.indexOf('\napp.', debut + 10));
   const iCopie = route.indexOf('const corps = { ...req.body };');

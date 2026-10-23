@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const N = require('../utils/numeroDossier');
 const { memePatient, formaterNomPropre, erreurIdentiteDossier } = require('../utils/dossiers');
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Règles pures

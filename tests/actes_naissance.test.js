@@ -48,7 +48,7 @@ test('dérogation : motif d\'au moins 5 caractères', () => {
 
 // Le contrôle serveur est extrait du code réel (server.js) et exécuté avec une base simulée.
 function fabriquer({ fiches = [], annules = [], permissions = ['acte_naissance_derogation'] } = {}) {
-  const serveur = require('./serveurSource').lireServeur();
+  const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const debut = serveur.indexOf("app.use('/api/fiches', async (req, res, next) => {");
   const fin = serveur.indexOf("app.use('/api/episodes', (req, res, next) => {");
   const finEpisodes = serveur.indexOf('\n});\n', fin) + 5;
@@ -117,7 +117,7 @@ test('serveur : Achat Express (fiches créées avec l\'épisode) : deux actes de
   assert.strictEqual(un.suite, true);
   const deux = await f.appeler('/api/episodes', { fiches: [{ rawState: { lignesCalcul: [acte('Délivrance', 'accouchement'), acte('Césarienne Simple', 'cesarienne')] } }], derogation_naissance: { motif: 'peu importe, pas permis ici' } });
   assert.strictEqual(deux.code, 409); assert.strictEqual(deux.corps.code, 'ACTE_NAISSANCE_MULTIPLE');
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /if \(req\.derogationNaissanceAAuditer\) enregistrerAuditServeur\(req, 'derogation_acte_naissance'/);
   assert.match(src.slice(src.indexOf("{ role: 'direction'"), src.indexOf("{ role: 'direction'") + 600), /'acte_naissance_derogation'/);
 });

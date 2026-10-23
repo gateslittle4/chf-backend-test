@@ -30,10 +30,8 @@ npm test                # ≈ 650 tests ; un seul échec connu : le test de perf
 ## Où trouver quoi
 
 ```
-server.js       Le point d'entrée (≈ 750 lignes) : configuration, sécurité (jeton Firebase, limiteur, idempotence), lecteurs partagés,
-                puis « montage des routes » (l'ordre compte pour Express)
-routes/         Les ≈ 100 routes /api/…, un fichier par domaine : publiques, episodes, rechercheDossiers, exploitation, dossiers,
-                parcoursEpisode, fiches, catalogue, caisse, partenaires, stock, administration, sauvegarde
+server.js       Toutes les routes /api/… (≈ 100), dans l'ordre : sécurité (jeton Firebase, limiteur, idempotence),
+                puis dossiers/épisodes, fiches, paiements, caisse, stock, utilisateurs, rapports, sauvegarde
 utils/          Les règles métier, une par fichier, testables sans serveur :
                 verificationPrixFiche.js (prix contre le catalogue), soldeAtomique.js, paiementPartiel.js,
                 retraitFicheCaisse.js (retirer / corriger une fiche), validationMontant.js, roles.js,
@@ -58,7 +56,7 @@ noter dans le journal (`node scripts/verifier-sql.js`). Appliquer le SQL **avant
   schéma navigateur / serveur / base, parcours d'un encaissement, mode hors ligne, argent, droits.
 - **`NOTES_POUR_PROCHAIN_CLAUDE.md`** — les pièges du backend, les chantiers en cours, les
   repères d'environnement. Long : le chercher avec `grep`.
-- **`server.js` et `routes/`** — tout le serveur, commenté en français. Les commentaires expliquent
+- **`server.js`** — tout le serveur, commenté en français. Les commentaires expliquent
   *pourquoi* le code est écrit comme ça, pas seulement ce qu'il fait.
 - **`sql/`** — les migrations appliquées à la base, avec leur contexte.
 - **`PLAN_RLS.md`** — le plan de sécurisation des accès aux données.

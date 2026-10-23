@@ -10,7 +10,7 @@ const { appliquerHeureAuPaiement, estRejeu } = require('../utils/heureServeur');
 const { validerMontantPaiement, normaliserMontant } = require('../utils/validationMontant');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('../utils/paiementPartiel');
 
-const src = require('./serveurSource').lireServeur();
+const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
 test("estFonctionAbsente : PGRST202, 42883 ou un message « introuvable » sur la fonction ; jamais une autre erreur", () => {
   assert.strictEqual(estFonctionAbsente({ code: 'PGRST202', message: 'Could not find the function public.enregistrer_paiement_atomique(...) in the schema cache' }), true);

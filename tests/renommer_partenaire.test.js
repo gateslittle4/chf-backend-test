@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const serveurSrc = require('./serveurSource').lireServeur();
+const serveurSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
 function monter({ role = 'administrateur', reponseRpc = { data: { episodes: 3, paiements: 2, dons: 1 }, error: null }, nomAvant = 'AVSI' } = {}) {
   const debut = serveurSrc.indexOf("app.patch('/api/ong-partenaires/:id/renommer'");

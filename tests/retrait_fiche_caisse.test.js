@@ -88,7 +88,7 @@ test('fiche sans paiement : le jour de création sert de référence', () => {
 });
 
 // ---- La route elle-même (extraite de server.js, base simulée) ----
-const source = require('./serveurSource').lireServeur();
+const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const debut = source.indexOf("app.post('/api/fiches/:id/retirer-caisse'");
 const fin = source.indexOf("// Restauration d'une fiche mise à la corbeille", debut);
 assert.ok(debut > 0 && fin > debut, 'route introuvable dans server.js');

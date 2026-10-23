@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { calculerAnomalies, moisDe, moisPrecedent } = require('../utils/anomalies');
 
-const serveurSrc = require('./serveurSource').lireServeur();
+const serveurSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const UTIL = [
   { id: 'u1', display_name: 'Marie', role: 'pharmacien' }, { id: 'u2', display_name: 'Paul', role: 'comptable' },
   { id: 'u3', display_name: 'Rose', role: 'pharmacien' }, { id: 'u4', display_name: 'Jean', role: 'comptable' }, { id: 'adm', display_name: 'Esdras', role: 'administrateur' },
@@ -88,7 +88,7 @@ test("Données manquantes ou étranges : jamais d'erreur (uid absent → regroup
 test("Route GET /api/admin/anomalies : RÉSERVÉE au rôle administrateur (pas une permission), 2 mois renvoyés, lecture paginée", () => {
   const i = serveurSrc.indexOf("app.get('/api/admin/anomalies'");
   assert.ok(i > serveurSrc.indexOf("app.use('/api', verifyToken)"), 'derrière la vérification du jeton');
-  const bloc = serveurSrc.slice(i, serveurSrc.indexOf("app.post('/api/admin/invitations'", i));
+  const bloc = serveurSrc.slice(i, serveurSrc.indexOf("// Côté administrateur des liens d'invitation", i));
   assert.match(bloc, /profil\.role !== 'administrateur'/);
   assert.doesNotMatch(bloc, /aPermission\(/, "pas de permission à attribuer à un autre rôle");
   assert.match(bloc, /calculerAnomalies\(\{ \.\.\.entree, mois \}\)/);
@@ -99,7 +99,7 @@ test("Route GET /api/admin/anomalies : RÉSERVÉE au rôle administrateur (pas u
 // La route EXÉCUTÉE (extraite de server.js) sur de fausses tables.
 function appeler({ role, paiements = [], mois, echecPaiements = false }) {
   const debut = serveurSrc.indexOf("app.get('/api/admin/anomalies'");
-  const fin = serveurSrc.indexOf("app.post('/api/admin/invitations'", debut);
+  const fin = serveurSrc.indexOf("// Côté administrateur des liens d'invitation", debut);
   const tables = {
     users: [{ id: 'moi', role, display_name: 'Moi' }, ...UTIL],
     paiements, depenses_caisse: [], catalog: [{ type: 'sessions_caisse', items: [] }],
@@ -138,9 +138,4 @@ test("Exécutée : mois invalide → mois courant ; lecture impossible → erreu
   assert.match(ok.corps.mois, /^\d{4}-\d{2}$/);
   const panne = await appeler({ role: 'administrateur', mois: '2026-10', echecPaiements: true });
   assert.strictEqual(panne.code, 500); assert.match(panne.corps.error, /Lecture impossible/);
-});
-
-test("23/10 : la route importe vraiment ses trois fonctions (elles n'étaient jamais importées : la route plantait en production)", () => {
-  const module_ = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'routes', 'administration.js'), 'utf8');
-  assert.match(module_, /const \{ calculerAnomalies, moisDe, moisPrecedent \} = require\('\.\.\/utils\/anomalies'\);/);
 });

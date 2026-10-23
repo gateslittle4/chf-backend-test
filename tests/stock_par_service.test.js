@@ -8,7 +8,7 @@ let PGlite = null;
 try { ({ PGlite } = require('@electric-sql/pglite')); } catch (_) { /* dépendance de test absente : les tests SQL sont ignorés */ }
 const sauf = PGlite ? {} : { skip: 'Postgres embarqué (@electric-sql/pglite) non installé' };
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const sqlStock = fs.readFileSync(path.join(__dirname, '..', 'sql', 'stock_par_service.sql'), 'utf8');
 const tranche = (debut, fin) => { const d = serveur.indexOf(debut); const f = serveur.indexOf(fin, d + 1); assert.ok(d > 0 && f > d, `introuvable : ${debut}`); return serveur.slice(d, f); };
 const codeDecrementer = tranche("app.post('/api/stock/decrementer'", "app.post('/api/stock/restituer'");

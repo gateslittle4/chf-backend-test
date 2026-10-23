@@ -6,7 +6,7 @@ const path = require('node:path');
 const { hospitaliserEpisode, validerDemande, MODE_TRANSFERT } = require('../utils/hospitalisation');
 const { fermerConsultationsAnciennes } = require('../utils/fermetureConsultations');
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const debutFn = serveur.indexOf('function calculerSoldeDepot');
 const calculerSoldeDepot = new Function(`${serveur.slice(debutFn, serveur.indexOf('\n}\n', debutFn) + 3)}; return calculerSoldeDepot;`)();
 

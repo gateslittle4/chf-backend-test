@@ -12,7 +12,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { jetonsDuNom, memePatient } = require('../utils/dossiers');
 
-const serverSrc = require('./serveurSource').lireServeur();
+const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
 // ---------------------------------------------------------------------------------------------------------
 // Comparaison de noms

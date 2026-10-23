@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { erreurIdentiteDossier } = require('../utils/dossiers');
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const MAINTENANT = new Date('2026-10-15T12:00:00Z').getTime();
 const ok = { sexe: 'F', date_naissance: '2025-08-20' };
 

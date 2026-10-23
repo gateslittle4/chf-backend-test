@@ -33,8 +33,8 @@ test("Les autres erreurs ne sont jamais avalées (compte introuvable → relanc�
 });
 
 test("La route utilise l'aide, garde la réponse 404 pour un compte introuvable et signale l'absence de retour au site", () => {
-  const src = require('./serveurSource').lireServeur();
-  const bloc = src.slice(src.indexOf("app.post('/api/admin/generer-lien-reinitialisation'"), src.indexOf("app.get('/api/admin/anomalies'"));
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const bloc = src.slice(src.indexOf("app.post('/api/admin/generer-lien-reinitialisation'"), src.indexOf("// Côté administrateur des liens d'invitation"));
   assert.match(bloc, /genererLienReinitialisation\(getAuth\(\)/);
   assert.match(bloc, /auth\/user-not-found/);
   assert.match(bloc, /avertissement/);

@@ -28,7 +28,7 @@ test("Une fiche à la corbeille ne compte pas ; à défaut de détail par catég
 });
 
 test("GET /api/dossiers/:id/episodes-ouverts ajoute `contenu` à chaque épisode, sans jamais échouer si les fiches sont illisibles", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const i = src.indexOf("app.get('/api/dossiers/:id/episodes-ouverts'");
   const bloc = src.slice(i, i + 1600);
   assert.match(bloc, /\.from\('fiches'\)\.select\('episode_id, breakdown, raw_state, supprime_le'\)\.in\('episode_id'/);

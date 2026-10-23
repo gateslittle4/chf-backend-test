@@ -86,7 +86,7 @@ test("middleware : chaque réponse porte l'heure du serveur en millisecondes", (
 });
 
 test("server.js : l'heure est appliquée AVANT le calcul du solde, l'en-tête est exposé à CORS et le middleware est installé avant les routes", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /exposedHeaders: \[ENTETE_HEURE\]/, 'sans cela le navigateur ne peut pas lire l\'heure du serveur');
   const iMiddleware = src.indexOf('app.use(middlewareHeureServeur);');
   const iJson = src.indexOf("app.use(express.json({ limit: '10mb' }));");

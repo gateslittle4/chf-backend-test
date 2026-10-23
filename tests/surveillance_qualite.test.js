@@ -6,7 +6,7 @@ const path = require('node:path');
 const { creerSurveillance, corrections, nomCorrige, composerAlerte, ACTION_INSTANTANE, ACTION_CORRECTION } = require('../utils/surveillanceQualite');
 const { controlerQualite } = require('../utils/qualiteDonnees');
 
-const serveur = require('./serveurSource').lireServeur();
+const serveur = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const MAINTENANT = new Date('2026-10-18T12:00:00Z'); // 8h à Haïti
 
 function fauxSupabase(tables) {
@@ -143,7 +143,7 @@ test("câblage : minuteur à 7h d'Haïti, rattrapage au réveil, un seul passage
 });
 
 test("Qualité des données : toutes les routes sont réservées à l'administrateur (ni direction_voir ni fiche_patient_modifier ne suffisent) — rôle PDG sans accès", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.doesNotMatch(src, /peutSurveillerQualite/);
   const i = src.indexOf("app.get('/api/qualite-donnees'");
   const bloc = src.slice(i, src.indexOf("app.get('/api/qualite-donnees/surveillance'", i) + 600);

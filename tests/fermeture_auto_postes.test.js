@@ -86,7 +86,7 @@ test("Rien à fermer → aucune écriture ; une erreur d'écriture ne lève jama
 });
 
 test("server.js : vérification chaque minute ET au réveil du serveur", () => {
-  const src = require('./serveurSource').lireServeur();
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(src, /cron\.schedule\('\* \* \* \* \*', \(\) => \{ fermerPostesExpires\(\{ supabase \}\); \}\);/);
   assert.match(src, /setTimeout\(\(\) => \{ fermerPostesExpires\(\{ supabase \}\); \}, 20000\)\.unref\(\);/);
 });

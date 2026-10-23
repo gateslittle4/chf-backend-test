@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const src = require('./serveurSource').lireServeur();
+const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const d = src.indexOf("app.post('/api/paiements', async (req, res) => {");
 const debutCorps = src.indexOf('\n', d) + 1;
 const fin = src.indexOf('  const local_id = req.body.local_id || req.body.localId;', d);

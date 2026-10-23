@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const source = require('./serveurSource').lireServeur();
+const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const debut = source.indexOf('const SOURCES_RECEPTION');
 const fin = source.indexOf('// Ajoute du stock à UN médicament de façon atomique', debut);
 assert.ok(debut > 0 && fin > debut, 'routes introuvables dans server.js');
