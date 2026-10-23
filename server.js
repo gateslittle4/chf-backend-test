@@ -67,7 +67,7 @@ setInterval(() => { limiteUtilisateur.nettoyer(); limitePublique.compteur.nettoy
 // Contrôle des montants côté serveur (13/10) : jamais de négatif, de texte, d'infini ni de montant absurde — voir utils/validationMontant.js.
 const { validerMontantPaiement, normaliserMontant } = require('./utils/validationMontant');
 // Solde ATOMIQUE (13/10) : le paiement et son solde s'écrivent en une seule opération de la base, avec un verrou par épisode — voir sql/solde_atomique.sql.
-const { estFonctionAbsente, estRefusRemboursement } = require('./utils/soldeAtomique');
+const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement } = require('./utils/soldeAtomique');
 const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('./utils/verificationPrixFiche');
 // Rôles personnalisés (09/10) : validation de la table des permissions, liste des rôles invitables, messages.
 const {
@@ -2935,7 +2935,7 @@ app.post('/api/paiements', async (req, res) => {
       p_heure_serveur: !estRejeu(req), // en direct : la base date le paiement sous le verrou ; rejeu hors ligne : date de l'appareil gardée
     });
     if (!erreurAtomique) { if (auditExoneration) enregistrerAuditServeur(req, 'exoneration_accordee_caisse', auditExoneration); return res.status(201).json(dataAtomique); }
-    if (estRefusRemboursement(erreurAtomique)) return res.status(400).json({ error: erreurAtomique.message });
+    if (estRefusRemboursement(erreurAtomique)) return res.status(400).json({ error: messageRefusRemboursement(erreurAtomique) });
     if (erreurAtomique.code === '23505') {
       const { data: existant } = local_id ? await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle() : { data: null };
       if (existant) return res.status(200).json(existant);
@@ -2983,7 +2983,7 @@ app.post('/api/paiements', async (req, res) => {
     const montant = parseFloat(corps.montant) || 0;
     if (soldeActuel <= 0) return res.status(400).json({ error: 'Aucun solde de crédit à rembourser pour cet épisode.' });
     if (montant <= 0) return res.status(400).json({ error: 'Le montant du remboursement doit être supérieur à 0.' });
-    if (montant > soldeActuel) return res.status(400).json({ error: `Le remboursement (${montant}) dépasse le solde restant (${soldeActuel}).` });
+    if (montant > soldeActuel) return res.status(400).json({ error: `Le remboursement (${montant} Gdes) dépasse le solde restant (${soldeActuel} Gdes).` });
     corps.solde_restant = soldeActuel - montant;
   } else if (corps.episode_id) {
     let soldeAnterieur;

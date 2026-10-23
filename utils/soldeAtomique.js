@@ -15,4 +15,8 @@ function estFonctionAbsente(erreur) {
 
 const estRefusRemboursement = (erreur) => !!erreur && CODES_REFUS_REMBOURSEMENT.includes(String(erreur.code || ''));
 
-module.exports = { CODES_REFUS_REMBOURSEMENT, estFonctionAbsente, estRefusRemboursement };
+// 22/10 : la caisse compte en dollars haïtiens, l'écran convertit tout montant suivi de « Gdes » (utils/monnaie.js de l'application). Le message de la base
+// (« Le remboursement (300) dépasse le solde restant (200). ») n'a pas d'unité : on la lui donne, sinon la caissière lirait des gourdes comme des dollars.
+const messageRefusRemboursement = (erreur) => String((erreur && erreur.message) || '').replace(/\((\d+(?:[.,]\d+)?)\)/g, '($1 Gdes)');
+
+module.exports = { CODES_REFUS_REMBOURSEMENT, estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement };
