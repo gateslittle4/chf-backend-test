@@ -5,7 +5,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
-const { estFonctionAbsente, estRefusRemboursement, CODES_REFUS_REMBOURSEMENT } = require('../utils/soldeAtomique');
+const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement, CODES_REFUS_REMBOURSEMENT } = require('../utils/soldeAtomique');
 const { appliquerHeureAuPaiement, estRejeu } = require('../utils/heureServeur');
 const { validerMontantPaiement, normaliserMontant } = require('../utils/validationMontant');
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('../utils/paiementPartiel');
@@ -25,6 +25,13 @@ test("estRefusRemboursement : CHF01 (rien à rembourser), CHF02 (montant ≤ 0),
   for (const code of CODES_REFUS_REMBOURSEMENT) assert.strictEqual(estRefusRemboursement({ code }), true, code);
   assert.deepStrictEqual(CODES_REFUS_REMBOURSEMENT, ['CHF01', 'CHF02', 'CHF03']);
   for (const e of [null, {}, { code: '23505' }, { code: 'CHF04' }, { code: 'PGRST202' }]) assert.strictEqual(estRefusRemboursement(e), false);
+});
+
+test("messageRefusRemboursement : le message de la base reçoit son unité (la caisse compte en dollars, l'écran convertit « N Gdes »)", () => {
+  assert.strictEqual(messageRefusRemboursement({ code: 'CHF03', message: 'Le remboursement (300) dépasse le solde restant (200).' }), 'Le remboursement (300 Gdes) dépasse le solde restant (200 Gdes).');
+  assert.strictEqual(messageRefusRemboursement({ message: 'Le remboursement (12.50) dépasse le solde restant (10).' }), 'Le remboursement (12.50 Gdes) dépasse le solde restant (10 Gdes).');
+  assert.strictEqual(messageRefusRemboursement({ message: 'Aucun solde de crédit à rembourser pour cet épisode.' }), 'Aucun solde de crédit à rembourser pour cet épisode.');
+  assert.strictEqual(messageRefusRemboursement(null), '');
 });
 
 // ---------------------------------------------------------------------------------------------------------
@@ -55,8 +62,8 @@ function routePaiements({ rpc, existants = [], insererHistorique = null } = {}) 
   const app = { post: (chemin, fn) => { if (chemin === '/api/paiements') gestionnaire = fn; } };
   const debut = src.indexOf("app.post('/api/paiements'");
   const fin = src.indexOf('\napp.', debut + 10);
-  new Function('app', 'supabase', 'aPermission', 'appliquerHeureAuPaiement', 'validerMontantPaiement', 'normaliserMontant', 'validerPaiementPartiel', 'soldeAjouteParPaiement', 'estFonctionAbsente', 'estRefusRemboursement', 'estRejeu',
-    src.slice(debut, fin))(app, supabase, async () => true, appliquerHeureAuPaiement, validerMontantPaiement, normaliserMontant, validerPaiementPartiel, soldeAjouteParPaiement, estFonctionAbsente, estRefusRemboursement, estRejeu);
+  new Function('app', 'supabase', 'aPermission', 'appliquerHeureAuPaiement', 'validerMontantPaiement', 'normaliserMontant', 'validerPaiementPartiel', 'soldeAjouteParPaiement', 'estFonctionAbsente', 'estRefusRemboursement', 'messageRefusRemboursement', 'estRejeu',
+    src.slice(debut, fin))(app, supabase, async () => true, appliquerHeureAuPaiement, validerMontantPaiement, normaliserMontant, validerPaiementPartiel, soldeAjouteParPaiement, estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement, estRejeu);
   const appeler = async (corps, headers = {}) => {
     const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
     await gestionnaire({ body: corps, user: { id: 'uid-caisse' }, headers }, res);
@@ -101,10 +108,11 @@ test("Ce que CE paiement ajoute au solde : crédit → sa dette, paiement partie
 
 test("Remboursement de crédit refusé par la base (CHF01 / CHF02 / CHF03) → 400 avec son message ; jamais 500", async () => {
   for (const [code, message] of [['CHF01', 'Aucun solde de crédit à rembourser pour cet épisode.'], ['CHF02', 'Le montant du remboursement doit être supérieur à 0.'], ['CHF03', 'Le remboursement (500) dépasse le solde restant (110).']]) {
+    const attendu = code === 'CHF03' ? 'Le remboursement (500 Gdes) dépasse le solde restant (110 Gdes).' : message; // 22/10 : l'unité est ajoutée (la caisse compte en dollars, l'écran convertit)
     const { appeler, appels } = routePaiements({ rpc: async () => ({ data: null, error: { code, message } }) });
     const r = await appeler(paiement({ mode: 'remboursement_credit', montant: 500, solde_restant: undefined }));
     assert.strictEqual(r.code, 400, code);
-    assert.strictEqual(r.corps.error, message);
+    assert.strictEqual(r.corps.error, attendu);
     assert.strictEqual(appels.insertions.length, 0, 'aucun repli : le refus est la réponse');
   }
 });
