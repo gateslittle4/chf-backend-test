@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { creerFauxSupabase } = require('./aides/fauxSupabase');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 const tranche = (debut, fin) => { const a = serverSrc.indexOf(debut); const b = serverSrc.indexOf(fin, a + 1); assert.ok(a !== -1 && b > a, `introuvable : ${debut}`); return serverSrc.slice(a, b); };
 
 function monterRoute({ colonnesAbsentes, utilisateurs, permission = true, episodes } = {}) {

@@ -13,7 +13,7 @@ const {
   verifierRoleInvitation, etatBasePourRolesPersonnalises, verifierRoleDuLienOuvert,
 } = roles;
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 function defautsDuServeur() {
   const debut = serverSrc.indexOf('const PERMISSIONS_PAR_DEFAUT = [');
   const fin = serverSrc.indexOf('\n];', debut) + 3;

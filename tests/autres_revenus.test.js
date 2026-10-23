@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const source = require('./serveurSource').lireServeur();
 const debut = source.indexOf("const MESSAGE_AUTRE_REVENU_MOTIF");
 const fin = source.indexOf("// Annulation d'un paiement — réservée", debut);
 assert.ok(debut > 0 && fin > debut, 'routes introuvables dans server.js');

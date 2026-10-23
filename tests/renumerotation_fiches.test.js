@@ -6,7 +6,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 
 function monter(fichesInitiales, { sansFonctions = false } = {}) {
   const fiches = fichesInitiales.map((f, i) => ({ id: f.id, episode_id: 'ep1', numero_fiche: f.numero_fiche, numero_fiche_avant: null, supprime_le: f.supprime_le || null, date_creation: `2026-10-14T10:0${i}:00Z`, total_global: 100, raw_state: {} }));
