@@ -739,7 +739,7 @@ async function envoyerCallMeBot(message) {
 // chaque domaine a son fichier dans routes/. L'ORDRE ci-dessous est celui d'Express : ne pas le changer sans relire les chemins qui se recouvrent
 // (ex. /api/dossiers/recherche doit rester avant /api/dossiers/:id).
 // ============================================================
-const contexte = { BUCKET_PIECES_JOINTES, FUSEAU_HAITI, ORIGINE_FRONTEND, PERMISSIONS_PAR_DEFAUT, aPermission, calculerSoldeDepot, dateOuNull, enregistrerAuditServeur, envoyerCallMeBot, episodeVersFlat, episodesVersFlatEnLot, estUnVraiUuid, extraireFichesDetail, extraireIntervention, ficheVersColonnes, flatVersStatut, flatVersTypePatient, lancerSurveillanceQualite, lireParLotsDIds, lireToutesLesPages, signatureModification, surveillanceEnCours, surveillanceQualite, synchroListes };
+const contexte = { BUCKET_PIECES_JOINTES, FUSEAU_HAITI, ORIGINE_FRONTEND, PERMISSIONS_PAR_DEFAUT, ROLES_INVITABLES, aPermission, calculerSoldeDepot, dateOuNull, enregistrerAuditServeur, envoyerCallMeBot, episodeVersFlat, episodesVersFlatEnLot, estUnVraiUuid, extraireFichesDetail, extraireIntervention, ficheVersColonnes, flatVersStatut, flatVersTypePatient, lancerSurveillanceQualite, limitePublique, lireParLotsDIds, lireToutesLesPages, signatureModification, supabase, surveillanceEnCours, surveillanceQualite, synchroListes };
 require('./routes/episodes')(app, contexte);
 require('./routes/rechercheDossiers')(app, contexte);
 require('./routes/exploitation')(app, contexte);
