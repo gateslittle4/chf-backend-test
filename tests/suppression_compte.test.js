@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const serverSrc = require('./serveurSource').lireServeur();
 
 function monter({ users, permission = true, firebaseAbsent = false, firebaseEchoue = false }) {
   const debut = serverSrc.indexOf("app.delete('/api/admin/users/:uid'");

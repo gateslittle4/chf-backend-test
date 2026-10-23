@@ -148,6 +148,6 @@ test('une base sans la table des transferts ou des réquisitions (pas encore cr�
 
 test('server.js monte la route et le fichier de notes la décrit', () => {
   const fs = require('node:fs'); const path = require('node:path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const src = require('./serveurSource').lireServeur();
   assert.match(src, /creerRoutesListesServices\(\{ supabase, aPermission \}\)\.monter\(app\)/);
 });
