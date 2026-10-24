@@ -7,7 +7,9 @@
 // remboursement de crédit). Une seule ligne, donc annuler ce paiement annule aussi la créance qui va avec :
 // pas de dette fantôme si la caissière s'est trompée. Aucun nouveau mode (la contrainte SQL
 // paiements_mode_check ne change pas) : le marqueur est details.paiement_partiel.
-const MODES_PAIEMENT_PARTIEL = ['cash', 'moncash', 'virement', 'cheque'];
+// 'exoneration' (24/10, Esdras : « d'abord l'exonération, ensuite on passe le reste à crédit ») : le montant exonéré est déjà déduit (verificationPrixFiche.js), le patient paie une partie
+// du reste — ou RIEN (montant 0) — et le reste devient la dette. Pour ce seul mode, un montant versé de 0 est donc valide.
+const MODES_PAIEMENT_PARTIEL = ['cash', 'moncash', 'virement', 'cheque', 'exoneration'];
 
 function estPaiementPartiel(corps) {
   return !!(corps && corps.details && typeof corps.details === 'object' && corps.details.paiement_partiel === true);
@@ -20,7 +22,7 @@ function validerPaiementPartiel(corps) {
     return `Un paiement partiel se fait en espèces, MonCash, virement ou chèque (pas en « ${corps.mode} »).`;
   }
   if (!corps.episode_id) return 'episode_id requis pour un paiement partiel.';
-  if (!(parseFloat(corps.montant) > 0)) return 'Un paiement partiel doit avoir un montant versé supérieur à 0 (sinon, utilise le mode Crédit).';
+  if (corps.mode === 'exoneration' ? !(parseFloat(corps.montant) >= 0) : !(parseFloat(corps.montant) > 0)) return 'Un paiement partiel doit avoir un montant versé supérieur à 0 (sinon, utilise le mode Crédit).';
   if (!(parseFloat(corps.solde_restant) > 0)) return 'Un paiement partiel doit laisser un reste à payer supérieur à 0 (sinon, c\'est un paiement complet).';
   return null;
 }

@@ -189,3 +189,14 @@ test("EN LIGNE : le même dépôt dépassé reste REFUSÉ (la caissière corrige
   assert.strictEqual(r.res.code, 400);
   assert.strictEqual(corps.details.montant_depot_utilise, 100, 'rien modifié');
 });
+
+test('exonération + reste à crédit (24/10) : total = exonéré + payé + reste ; un reste minimisé ou un exonéré gonflé est refusé', () => {
+  const exo = (pct, montantExonere) => ({ pourcentage: pct, montantExonere, motif: 'Indigent' });
+  const base = { mode: 'exoneration', details: { paiement_partiel: true } };
+  // FICHE : 5000 → 50 % = 2500 exonérés ; rien payé, 2500 à crédit
+  assert.strictEqual(verif({ ...base, montant: 0, solde_restant: 2500, exoneration: exo(50, 2500) }).ok, true);
+  assert.strictEqual(verif({ ...base, montant: 1000, solde_restant: 1500, exoneration: exo(50, 2500) }).ok, true, 'payé 1000 + reste 1500');
+  assert.strictEqual(verif({ ...base, montant: 0, solde_restant: 1000, exoneration: exo(50, 2500) }).ok, false, 'reste minimisé');
+  assert.strictEqual(verif({ ...base, montant: 0, solde_restant: 2000, exoneration: exo(60, 3000) }).ok, true, '60 % = 3000, reste 2000');
+  assert.strictEqual(verif({ ...base, montant: 0, solde_restant: 2000, exoneration: exo(50, 3000) }).ok, false, 'montant exonéré ≠ pourcentage');
+});

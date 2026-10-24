@@ -7,9 +7,9 @@ const { validerPaiementPartiel, soldeAjouteParPaiement, estPaiementPartiel, MODE
 
 const partiel = (extra = {}) => ({ episode_id: 'e1', mode: 'cash', montant: 5000, solde_restant: 5000, details: { paiement_partiel: true }, ...extra });
 
-test("un paiement partiel valide : espèces, MonCash, virement et chèque", () => {
+test("un paiement partiel valide : espèces, MonCash, virement, chèque — et exonération (reste à crédit, 24/10)", () => {
   for (const mode of MODES_PAIEMENT_PARTIEL) assert.strictEqual(validerPaiementPartiel(partiel({ mode })), null, mode);
-  assert.deepStrictEqual(MODES_PAIEMENT_PARTIEL, ['cash', 'moncash', 'virement', 'cheque']);
+  assert.deepStrictEqual(MODES_PAIEMENT_PARTIEL, ['cash', 'moncash', 'virement', 'cheque', 'exoneration']);
 });
 
 test("un paiement ordinaire n'est jamais touché par la validation (même avec un solde_restant)", () => {
@@ -23,11 +23,16 @@ test("un paiement ordinaire n'est jamais touché par la validation (même avec u
 });
 
 test("refus : mode non permis, épisode manquant, montant versé nul, reste nul ou négatif", () => {
-  for (const mode of ['credit', 'ong', 'depot', 'exoneration', 'remboursement_credit', 'remboursement_patient']) {
+  for (const mode of ['credit', 'ong', 'depot', 'remboursement_credit', 'remboursement_patient']) {
     assert.match(validerPaiementPartiel(partiel({ mode })), /espèces, MonCash, virement ou chèque/, mode);
   }
   assert.match(validerPaiementPartiel(partiel({ episode_id: undefined })), /episode_id requis/);
   for (const montant of [0, -5, '', 'abc', undefined]) assert.match(validerPaiementPartiel(partiel({ montant })), /montant versé supérieur à 0/, String(montant));
+  // Exonération puis reste à crédit : rien payé maintenant (0) est valide ; un montant négatif ou illisible ne l'est pas ; le reste doit toujours être > 0.
+  assert.strictEqual(validerPaiementPartiel(partiel({ mode: 'exoneration', montant: 0 })), null);
+  assert.strictEqual(validerPaiementPartiel(partiel({ mode: 'exoneration', montant: 1200 })), null);
+  for (const montant of [-5, '', 'abc', undefined]) assert.match(validerPaiementPartiel(partiel({ mode: 'exoneration', montant })), /montant versé/, String(montant));
+  assert.match(validerPaiementPartiel(partiel({ mode: 'exoneration', montant: 0, solde_restant: 0 })), /reste à payer supérieur à 0/);
   for (const reste of [0, -1, '', 'abc', undefined]) assert.match(validerPaiementPartiel(partiel({ solde_restant: reste })), /reste à payer supérieur à 0/, String(reste));
 });
 
@@ -57,4 +62,8 @@ test("scénario de la césarienne : 50 % versés, reste en créance, puis deux v
   solde = 3000;
   solde = solde + soldeAjouteParPaiement(partiel({ solde_restant: 700 }));
   assert.strictEqual(solde, 3700);
+});
+
+test("exonération + crédit : la dette ajoutée est le reste, même quand rien n'est payé maintenant", () => {
+  assert.strictEqual(soldeAjouteParPaiement(partiel({ mode: 'exoneration', montant: 0, solde_restant: 2500 })), 2500);
 });
