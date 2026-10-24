@@ -84,6 +84,7 @@ GET /api/autres-revenus
 POST /api/autres-revenus
 PATCH /api/autres-revenus/:id/annuler
 PATCH /api/paiements/:id/annuler
+POST /api/episodes/:id/exonerer-creance
 POST /api/episodes/:id/transferer-partenaire
 POST /api/episodes/:id/rembourser-transferer-partenaire
 POST /api/lots/prochain-numero

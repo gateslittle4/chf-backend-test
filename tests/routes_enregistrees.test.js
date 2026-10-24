@@ -22,7 +22,7 @@ function routesEnregistrees() {
   return lignes;
 }
 
-test('server.js démarre et enregistre les mêmes routes, dans le même ordre (118 entrées au moment de la découpe)', () => {
+test('server.js démarre et enregistre les mêmes routes, dans le même ordre (118 entrées à la découpe, 119 avec « exonérer une créance »)', () => {
   const reel = routesEnregistrees();
   if (process.env.UPDATE_ROUTES === '1') { fs.writeFileSync(ATTENDU, reel + '\n'); return; }
   assert.strictEqual(reel.trim(), fs.readFileSync(ATTENDU, 'utf8').trim());
