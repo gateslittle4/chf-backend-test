@@ -430,4 +430,58 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+
+// 24/10 (Esdras) : « Exonérer cette créance » — la direction décide SUR PAPIER de pardonner tout ou partie de la dette d'un patient ; c'est la caisse qui passe l'écriture
+// (même droit que toute exonération : exoneration_accorder, ou demandes_repondre pour la direction). Ligne de paiement en mode « exoneration » de 0 Gdes (aucun argent dans le tiroir),
+// la dette baisse du montant pardonné, sous le verrou par épisode (sql/exoneration_creance.sql). Motif obligatoire (ce que la direction a écrit) + ligne dans le journal d'audit.
+// Jamais en file hors ligne : la dette réelle doit être lue sur le serveur au moment de l'écriture.
+app.post('/api/episodes/:id/exonerer-creance', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' ou 'demandes_repondre' requise." });
+  }
+  const parLaDirection = await aPermission(req.user.id, 'demandes_repondre');
+  if (!parLaDirection && !(await aPermission(req.user.id, 'exoneration_accorder'))) {
+    return res.status(403).json({ error: "Tu n'as pas le droit d'accorder une exonération (permission 'exoneration_accorder' ou 'demandes_repondre').", code: 'EXONERATION_NON_AUTORISEE' });
+  }
+  if (!estUnVraiUuid(req.params.id)) return res.status(400).json({ error: 'Épisode invalide.' });
+  const motif = typeof (req.body && req.body.motif) === 'string' ? req.body.motif.trim() : '';
+  if (motif.length < 3) return res.status(400).json({ error: "Écris le motif (ce que la direction a décidé, 3 caractères au moins).", code: 'MOTIF_EXONERATION_REQUIS' });
+  if (motif.length > 300) return res.status(400).json({ error: 'Motif trop long (300 caractères au maximum).' });
+  const corpsMontant = { mode: 'exoneration', montant: req.body && req.body.montant };
+  const erreurMontant = validerMontantPaiement(corpsMontant);
+  if (erreurMontant) return res.status(400).json({ error: erreurMontant.replace('du paiement', 'à exonérer') });
+  normaliserMontant(corpsMontant);
+  const montant = corpsMontant.montant;
+  const localId = (req.body && (req.body.local_id || req.body.localId)) || null;
+  if (localId) {
+    const { data: dejaLa } = await supabase.from('paiements').select('*').eq('local_id', localId).maybeSingle();
+    if (dejaLa) return res.status(200).json(dejaLa);
+  }
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').select('id, dossier_id, type_patient, ong_partenaire').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
+  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+  if (!episode) return res.status(404).json({ error: 'Épisode introuvable.' });
+  const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
+  const texteMotif = `Exonération de créance — ${motif}`;
+  const corps = {
+    patient_nom: (dossier && dossier.nom) || null, type_patient: episode.type_patient || null, ong_partenaire: episode.ong_partenaire || null,
+    encaisse_par: req.user.email || req.user.id, traite_par_uid: req.user.id, local_id: localId,
+    details: { exoneration_creance: true, montant_exonere: montant },
+    exoneration: { montantExonere: montant, motif: texteMotif, creance: true },
+  };
+  const { data, error } = await supabase.rpc('exonerer_creance_atomique', { p_episode: req.params.id, p_montant: montant, p_corps: corps, p_heure_serveur: true });
+  if (error) {
+    if (estRefusRemboursement(error)) return res.status(400).json({ error: messageRefusRemboursement(error), code: error.code });
+    if (estFonctionAbsente(error)) return res.status(503).json({ error: "Mise à jour du serveur en cours (la fonction « exonerer_creance_atomique » n'est pas encore en base). Réessaie dans quelques minutes.", code: 'FONCTION_ABSENTE' });
+    if (error.code === '23505' && localId) {
+      const { data: existant } = await supabase.from('paiements').select('*').eq('local_id', localId).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  enregistrerAuditServeur(req, 'exoneration_creance_accordee', {
+    episode_id: req.params.id, patient: (dossier && dossier.nom) || null, montant_exonere: montant, motif: texteMotif,
+    dette_apres: data && data.solde_restant != null ? Number(data.solde_restant) : null, par_la_direction: parLaDirection,
+  });
+  res.status(201).json(data);
+});
 }; // @enveloppe
