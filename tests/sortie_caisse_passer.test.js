@@ -3,12 +3,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-function monter({ droits = ['caisse_travailler'], erreurInsert = null, existant = null } = {}) {
+function monter({ droits = ['caisse_travailler'], erreurInsert = null, existant = null, reglage } = {}) {
   const routes = {};
   const app = new Proxy({}, { get: (_, m) => (chemin, ...h) => { routes[`${String(m).toUpperCase()} ${chemin}`] = h[h.length - 1]; } });
   const audits = []; const insertions = [];
   const supabase = {
     from: (nom) => {
+      if (nom === 'catalog') { const c = { select: () => c, eq: () => c, maybeSingle: async () => ({ data: reglage === undefined ? null : { items: { autorisateursSortieCaisse: reglage } }, error: null }) }; return c; } // le réglage de la direction (Paramètres > Caisse)
       assert.strictEqual(nom, 'depenses_caisse');
       const q = {
         select: () => q, eq: () => q, maybeSingle: async () => ({ data: existant, error: null }),
@@ -51,7 +52,8 @@ test('refus : sans le droit de travailler à la caisse, sans motif, sans « auto
   assert.strictEqual(m.insertions.length, 0);
 });
 
-test("seuls Jean Jacques et Madame Dioumitrie peuvent autoriser une sortie de fonds — tout autre nom est refusé par le serveur, même si l'écran est contourné", async () => {
+test("« Autorisé par » : seule la liste réglée par la direction compte (par défaut Jean Jacques et Madame Dioumitrie) — tout autre nom est refusé par le serveur, même si l'écran est contourné", async () => {
+  // Réglage absent : la liste d'origine.
   for (const ok of ['Jean Jacques', 'Madame Dioumitrie', '  Jean Jacques  ']) {
     const m = monter();
     assert.strictEqual((await m.appeler({ ...valide, autorise_par: ok })).statut, 201, ok);
@@ -65,6 +67,17 @@ test("seuls Jean Jacques et Madame Dioumitrie peuvent autoriser une sortie de fo
     assert.match(r.json.error, /Jean Jacques et Madame Dioumitrie/);
   }
   assert.strictEqual(m.insertions.length, 0, 'rien n\'est enregistré');
+});
+
+test('la direction change la liste (Paramètres > Caisse) : le nouveau nom passe, l\'ancien est refusé ; un réglage vide ou invalide retombe sur la liste d\'origine (jamais une caisse bloquée)', async () => {
+  const modifiee = monter({ reglage: ['Madame Dioumitrie', ' Pierre Louis ', 'Pierre Louis', '', 42, null] });
+  assert.strictEqual((await modifiee.appeler({ ...valide, autorise_par: 'Pierre Louis' })).statut, 201, 'nouveau nom');
+  const ancien = await modifiee.appeler({ ...valide, autorise_par: 'Jean Jacques' });
+  assert.strictEqual(ancien.statut, 400, 'retiré de la liste : refusé');
+  assert.match(ancien.json.error, /Madame Dioumitrie et Pierre Louis/, 'le message cite la liste actuelle, sans doublon ni valeur invalide');
+  for (const vide of [[], ['', ' '], 'texte', {}, null, [1, 2]]) {
+    assert.strictEqual((await monter({ reglage: vide }).appeler({ ...valide, autorise_par: 'Jean Jacques' })).statut, 201, `réglage ${JSON.stringify(vide)} : liste d'origine`);
+  }
 });
 
 test('rejeu (même local_id) : la sortie déjà enregistrée est renvoyée, jamais une 2e ; erreur de la base → 500', async () => {
