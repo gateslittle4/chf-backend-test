@@ -95,3 +95,15 @@ test('consultation ouverte : seuil par défaut 30 jours (fermeture automatique �
   assert.deepStrictEqual(ctrl(r, 'consultation_ouverte').exemples.map(x => x.id), ['c'], 'seuil 30 jours par défaut');
   assert.deepStrictEqual(ctrl(r, 'episodes_ouverts_multiples').exemples.map(x => [x.id, x.nombre]), [['1', 2]]);
 });
+
+test("27/10 : une exonération de créance et un dépôt rendu au patient n'ont par nature aucune fiche — ce ne sont pas des « paiements liés à aucune fiche »", () => {
+  const dossiers = [{ id: 'd1', numero_dossier: '1', nom: 'Jean Pierre' }];
+  const episodes = [{ id: 'e1', dossier_id: 'd1', statut: 'ouvert', voie_entree: 'consultation' }];
+  const paiements = [
+    { id: 'x1', episode_id: 'e1', fiche_id: null, mode: 'exoneration', montant: 0, details: { exoneration_creance: true }, exoneration: { montantExonere: 500 } },
+    { id: 'x2', episode_id: 'e1', fiche_id: null, mode: 'remboursement_patient', montant: 300, details: { depot_rendu: true, montant_depot_utilise: 300 } },
+    { id: 'x3', episode_id: 'e1', fiche_id: null, mode: 'cash', montant: 100 },
+  ];
+  const r = controlerQualite({ dossiers, episodes, paiements, maintenantMs: Date.now() });
+  assert.deepEqual(r.controles.find(x => x.cle === 'paiement_sans_fiche').exemples.map(x => x.id), ['x3'], 'seul le vrai paiement sans fiche reste signalé');
+});
