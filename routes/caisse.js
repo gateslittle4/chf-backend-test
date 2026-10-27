@@ -341,6 +341,46 @@ app.patch('/api/depenses-caisse/:id/repondre', async (req, res) => {
   res.json(data[0]);
 });
 
+// 27/10 (Esdras) : « une sortie de caisse n'a pas besoin de demander » — la direction décide SUR PAPIER, la caisse saisit le motif, le montant et « autorisé par » (qui a décidé), puis
+// clique sur « Passer » : la sortie est enregistrée tout de suite comme ACCORDÉE (même ligne que les demandes accordées : elle sort du tiroir et du « théorique attendu »,
+// compte pour la session de la personne). Pas d'étape « en attente ». Motif et « autorisé par » obligatoires, trace dans le journal d'audit ; le poste de caisse ouvert est exigé côté écran.
+app.post('/api/depenses-caisse/passer', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise pour passer une sortie de caisse." });
+  }
+  const motif = typeof (req.body && req.body.motif) === 'string' ? req.body.motif.trim() : '';
+  const autorisePar = typeof (req.body && req.body.autorise_par) === 'string' ? req.body.autorise_par.trim() : '';
+  if (motif.length < 3) return res.status(400).json({ error: 'Le motif est requis (3 caractères au moins).', code: 'MOTIF_REQUIS' });
+  if (motif.length > 300) return res.status(400).json({ error: 'Motif trop long (300 caractères au maximum).' });
+  if (autorisePar.length < 2) return res.status(400).json({ error: "« Autorisé par » est requis : écris le nom de la personne qui a décidé cette sortie.", code: 'AUTORISE_PAR_REQUIS' });
+  if (autorisePar.length > 100) return res.status(400).json({ error: '« Autorisé par » est trop long (100 caractères au maximum).' });
+  const corpsMontant = { mode: 'sortie_caisse', montant: req.body && req.body.montant };
+  const erreurMontant = validerMontantPaiement(corpsMontant);
+  if (erreurMontant) return res.status(400).json({ error: erreurMontant.replace('du paiement', 'de la sortie') });
+  normaliserMontant(corpsMontant);
+  const montant = corpsMontant.montant;
+  if (!(montant > 0)) return res.status(400).json({ error: 'Le montant doit être supérieur à 0.', code: 'MONTANT_REQUIS' });
+  const local_id = (req.body && (req.body.local_id || req.body.localId)) || null;
+  if (local_id) {
+    const { data: existant } = await supabase.from('depenses_caisse').select('*').eq('local_id', local_id).maybeSingle();
+    if (existant) return res.status(200).json(existant);
+  }
+  const qui = req.user.email || req.user.id;
+  const { data, error } = await supabase.from('depenses_caisse').insert({
+    motif, montant, autorise_par: autorisePar, statut: 'accorde',
+    demandeur: qui, demandeur_uid: req.user.id, caissier: qui, caissier_uid: req.user.id, date_reponse: new Date().toISOString(), local_id,
+  }).select().single();
+  if (error) {
+    if (error.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('depenses_caisse').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  enregistrerAuditServeur(req, 'sortie_caisse_passee', { id: data.id, montant, motif, autorise_par: autorisePar });
+  res.status(201).json(data);
+});
+
 // Autres revenus (20/10, Esdras) : de l'argent encaissé à la caisse qui ne concerne AUCUN patient (certificat, location, don...). Table à part (sql/autres_revenus.sql) : jamais mélangé aux revenus des soins.
 // Même contrôle que les paiements : il faut caisse_travailler pour en enregistrer, paiement_annuler pour en annuler (et jamais soi-même).
 const MESSAGE_AUTRE_REVENU_MOTIF = 'Le motif est requis (3 à 300 caractères).';

@@ -80,6 +80,7 @@ POST /api/paiements
 GET /api/depenses-caisse
 POST /api/depenses-caisse
 PATCH /api/depenses-caisse/:id/repondre
+POST /api/depenses-caisse/passer
 GET /api/autres-revenus
 POST /api/autres-revenus
 PATCH /api/autres-revenus/:id/annuler
