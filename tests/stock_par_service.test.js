@@ -10,6 +10,11 @@ const sauf = PGlite ? {} : { skip: 'Postgres embarqué (@electric-sql/pglite) no
 
 const serveur = require('./serveurSource').lireServeur();
 const sqlStock = fs.readFileSync(path.join(__dirname, '..', 'sql', 'stock_par_service.sql'), 'utf8');
+// 28/10 : la pharmacie seule (réquisition d'un service sans stock propre, SOP) passe par les VRAIES fonctions de décrément des ventes.
+const sqlDecrementBase = fs.readFileSync(path.join(__dirname, '..', 'sql', 'fonction_decrementer_stock_et_numerotation_lots.sql'), 'utf8');
+const sqlDecrementIdempotent = fs.readFileSync(path.join(__dirname, '..', 'sql', 'idempotence_decrement_stock.sql'), 'utf8');
+const sqlAjoutBase = fs.readFileSync(path.join(__dirname, '..', 'sql', 'fonction_maj_stock_medicament.sql'), 'utf8');
+const { serviceSansStockPropre } = require('../utils/servicesSansStockPropre');
 const tranche = (debut, fin) => { const d = serveur.indexOf(debut); const f = serveur.indexOf(fin, d + 1); assert.ok(d > 0 && f > d, `introuvable : ${debut}`); return serveur.slice(d, f); };
 const codeDecrementer = tranche("app.post('/api/stock/decrementer'", "app.post('/api/stock/restituer'");
 const codeRestituer = tranche("app.post('/api/stock/restituer'", '// ============================================================\n// RÉQUISITIONS');
@@ -22,15 +27,40 @@ async function monter({ items, droits = ['stock_gerer', 'requisition_modifier', 
     CREATE TABLE decrements_stock_appliques (local_id text PRIMARY KEY, applique_le timestamptz NOT NULL DEFAULT now());
     CREATE TABLE requisitions (id text PRIMARY KEY);`);
   await db.exec(sqlStock);
+  await db.exec(sqlDecrementBase); await db.exec(sqlDecrementIdempotent);
+  // La surcharge à 2 arguments existe en production (idempotence_decrement_stock.sql n'en documente le corps qu'en commentaire) : on la recrée ici, mêmes 2 blocs d'idempotence.
+  await db.exec(`CREATE OR REPLACE FUNCTION public.decrementer_stock_medicaments(p_decrements jsonb, p_local_id text) RETURNS jsonb LANGUAGE plpgsql AS $f$
+    DECLARE v_items jsonb; v_res jsonb;
+    BEGIN
+      SELECT items INTO v_items FROM catalog WHERE type = 'medicaments' FOR UPDATE;
+      IF p_local_id IS NOT NULL AND EXISTS (SELECT 1 FROM decrements_stock_appliques WHERE local_id = p_local_id) THEN
+        RETURN jsonb_build_object('succes', true, 'deja_applique', true, 'items', v_items);
+      END IF;
+      v_res := public.decrementer_stock_medicaments(p_decrements);
+      IF (v_res->>'succes')::boolean AND p_local_id IS NOT NULL THEN
+        INSERT INTO decrements_stock_appliques (local_id) VALUES (p_local_id) ON CONFLICT DO NOTHING;
+      END IF;
+      RETURN v_res;
+    END $f$;`);
+  await db.exec(sqlAjoutBase);
+  await db.exec(`CREATE OR REPLACE FUNCTION public.ajouter_stock_medicament(p_id text, p_quantite_ajoutee numeric, p_local_id text) RETURNS jsonb LANGUAGE plpgsql AS $f$
+    DECLARE v_res jsonb;
+    BEGIN
+      PERFORM 1 FROM catalog WHERE type = 'medicaments' FOR UPDATE;
+      IF p_local_id IS NOT NULL AND EXISTS (SELECT 1 FROM decrements_stock_appliques WHERE local_id = p_local_id) THEN RETURN NULL; END IF;
+      v_res := public.ajouter_stock_medicament(p_id, p_quantite_ajoutee);
+      IF p_local_id IS NOT NULL THEN INSERT INTO decrements_stock_appliques (local_id) VALUES (p_local_id) ON CONFLICT DO NOTHING; END IF;
+      RETURN v_res;
+    END $f$;`);
   await db.query(`INSERT INTO catalog VALUES ('medicaments', $1::jsonb, now())`, [JSON.stringify(items)]);
   const tableReq = requisitions;
   const audits = [];
   const supabase = {
     rpc: async (nom, args) => {
-      const parametres = { transferer_stock_service: ['p_service', 'p_lignes', 'p_local_id'], decrementer_stock_service: ['p_service', 'p_decrements', 'p_local_id'], restituer_stock_ventes: ['p_entrees', 'p_local_id'] }[nom];
+      const parametres = { transferer_stock_service: ['p_service', 'p_lignes', 'p_local_id'], decrementer_stock_service: ['p_service', 'p_decrements', 'p_local_id'], restituer_stock_ventes: ['p_entrees', 'p_local_id'], decrementer_stock_medicaments: ['p_decrements', 'p_local_id'], ajouter_stock_medicament: ['p_id', 'p_quantite_ajoutee', 'p_local_id'] }[nom];
       if (!parametres) return { data: null, error: { message: `rpc non simulée : ${nom}` } };
       try {
-        const r = await db.query(`select ${nom}(${parametres.map((p, i) => `$${i + 1}${/lignes|decrements|entrees/.test(p) ? '::jsonb' : '::text'}`).join(', ')}) as r`, parametres.map(p => (/lignes|decrements|entrees/.test(p) ? JSON.stringify(args[p]) : (args[p] ?? null))));
+        const r = await db.query(`select ${nom}(${parametres.map((p, i) => `$${i + 1}${/lignes|decrements|entrees/.test(p) ? '::jsonb' : (p === 'p_quantite_ajoutee' ? '::numeric' : '::text')}`).join(', ')}) as r`, parametres.map(p => (/lignes|decrements|entrees/.test(p) ? JSON.stringify(args[p]) : (args[p] ?? null))));
         return { data: r.rows[0].r, error: null };
       } catch (e) { return { data: null, error: { message: e.message } }; }
     },
@@ -61,7 +91,7 @@ async function monter({ items, droits = ['stock_gerer', 'requisition_modifier', 
   const audit = async (_r, a, d) => { audits.push({ a, d }); };
   new Function('app', 'supabase', 'aPermission', 'envoyerCallMeBot', 'console', codeDecrementer)(app, supabase, aPermission, () => {}, console);
   new Function('app', 'supabase', 'aPermission', 'console', codeRestituer)(app, supabase, aPermission, console);
-  new Function('app', 'supabase', 'aPermission', 'enregistrerAuditServeur', 'console', codeRequisitionPost)(app, supabase, aPermission, audit, console);
+  new Function('app', 'supabase', 'aPermission', 'enregistrerAuditServeur', 'console', 'serviceSansStockPropre', codeRequisitionPost)(app, supabase, aPermission, audit, console, serviceSansStockPropre);
   new Function('app', 'supabase', 'aPermission', 'lireToutesLesPages', 'enregistrerAuditServeur', 'console', codeRequisitionsFin)(app, supabase, aPermission, async (fn) => (await fn()).data, audit, console);
   const appeler = async (cle, req) => {
     const res = { code: 200, corps: null, status(x) { this.code = x; return this; }, json(b) { this.corps = b; return this; } };
@@ -213,10 +243,10 @@ test('retour à la pharmacie : réservé à requisition_modifier, limité à ce 
 
 test('une ancienne réquisition (avant le stock par service) s\'annule comme avant : le stock revient à la pharmacie', sauf, async () => {
   const m = await monter({ items: ITEMS(), requisitions: [{ id: 'r1', service_demandeur: 'Pédiatrie', lignes: [{ id: 'm1', nom: 'Amoxicilline', quantite: 3 }], annulee: false }] });
-  // l'ancien chemin utilise ajouter_stock_medicament (non simulé ici) : on vérifie seulement qu'il est bien choisi
   try {
     const r = await m.appeler('PATCH /api/requisitions/:id/annuler', { params: { id: 'r1' }, body: { motif: 'Ancienne réquisition' } });
-    assert.match(String(r.corps && r.corps.error), /ajouter_stock_medicament|Stock non remis/, 'chemin historique (ajouter_stock_medicament), pas le transfert par service');
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+    assert.deepStrictEqual(await m.stock('m1'), { pharmacie: 23, services: {} }, 'chemin historique (ajouter_stock_medicament) : le stock revient à la pharmacie, pas de transfert par service');
   } finally { await m.fermer(); }
 });
 
@@ -240,4 +270,40 @@ test('renommer un service d\'hospitalisation : son stock de médicaments suit (f
   const src = fs.readFileSync(path.join(__dirname, '..', 'utils', 'routesListesServices.js'), 'utf8');
   assert.match(src, /type === 'services_hospitalisation' && typeof supabase\.rpc === 'function'[\s\S]*renommer_service_stock/);
   assert.match(sqlStock, /FUNCTION public\.renommer_service_stock/);
+});
+
+test('SOP (service sans stock propre) : la réquisition fait sortir le stock de la pharmacie et reste dans l\'historique, mais ne crée AUCUN stock de service ; annuler remet tout à la pharmacie ; un rejeu ne sort rien de plus', sauf, async () => {
+  const m = await monter({ items: ITEMS() });
+  try {
+    const r = await m.appeler('POST /api/requisitions', { body: { service_demandeur: ' sop ', lignes: [{ id: 'm1', qte: 6 }], local_id: 'rq-sop' } });
+    assert.strictEqual(r.code, 201, JSON.stringify(r.corps));
+    assert.deepStrictEqual(await m.stock('m1'), { pharmacie: 14, services: {} }, 'la pharmacie diminue, aucun stock « SOP » n\'apparaît');
+    assert.strictEqual(m.requisitions.length, 1, 'la réquisition est dans l\'historique');
+    assert.strictEqual(m.requisitions[0].service_demandeur, 'sop');
+    assert.deepStrictEqual(m.requisitions[0].lignes.map(l => [l.id, l.quantite]), [['m1', 6]]);
+    assert.strictEqual(m.requisitions[0].stock_par_service, false, 'marquée « sans stock de service » : annulation / modification remettent le stock à la pharmacie');
+    const rejeu = await m.appeler('POST /api/requisitions', { body: { service_demandeur: 'SOP', lignes: [{ id: 'm1', qte: 6 }], local_id: 'rq-sop' } });
+    assert.strictEqual(rejeu.code, 200);
+    assert.deepStrictEqual(await m.stock('m1'), { pharmacie: 14, services: {} }, 'le rejeu ne sort rien de plus');
+    // Annulation : le stock revient à la pharmacie.
+    const id = m.requisitions[0].id;
+    const a = await m.appeler('PATCH /api/requisitions/:id/annuler', { params: { id }, body: { motif: 'Erreur de saisie' } });
+    assert.strictEqual(a.code, 200, JSON.stringify(a.corps));
+    assert.deepStrictEqual(await m.stock('m1'), { pharmacie: 20, services: {} }, 'stock remis à la pharmacie');
+    // Les autres services gardent leur stock propre.
+    const p = await m.appeler('POST /api/requisitions', { body: { service_demandeur: 'Pédiatrie', lignes: [{ id: 'm1', qte: 4 }], local_id: 'rq-ped' } });
+    assert.strictEqual(p.code, 201);
+    assert.deepStrictEqual(await m.stock('m1'), { pharmacie: 16, services: { 'Pédiatrie': 4 } });
+    assert.strictEqual(m.requisitions[1].stock_par_service, true);
+  } finally { await m.fermer(); }
+});
+
+test('SOP : pas assez à la pharmacie → 409, rien ne bouge, aucune réquisition écrite', sauf, async () => {
+  const m = await monter({ items: ITEMS() });
+  try {
+    const r = await m.appeler('POST /api/requisitions', { body: { service_demandeur: 'SOP', lignes: [{ id: 'm2', qte: 50 }] } });
+    assert.strictEqual(r.code, 409); assert.match(r.corps.error, /Stock insuffisant/);
+    assert.deepStrictEqual(await m.stock('m2'), { pharmacie: 5, services: {} });
+    assert.strictEqual(m.requisitions.length, 0);
+  } finally { await m.fermer(); }
 });

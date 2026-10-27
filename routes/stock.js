@@ -2,6 +2,7 @@
 // Découpé de server.js le 23/10 sans changer une ligne de logique : le texte des routes est celui d'avant. Ce module reçoit de server.js
 // l'application Express et ses dépendances partagées (base, droits, journal d'audit, lecteurs communs) ; voir « montage des routes » dans server.js.
 
+const { serviceSansStockPropre } = require('../utils/servicesSansStockPropre');
 
 module.exports = function monterStock(app, { aPermission, enregistrerAuditServeur, envoyerCallMeBot, lireToutesLesPages, supabase }) { // @enveloppe
 // Décrémente le stock de façon atomique (voir fonction_decrementer_stock_et_numerotation_lots.sql) — remplace le
@@ -132,11 +133,17 @@ app.post('/api/requisitions', async (req, res) => {
   if (lignes.some(l => !l || !l.id || !(Number(l.qte) > 0))) {
     return res.status(400).json({ error: 'Chaque ligne a besoin d\'un médicament et d\'une quantité supérieure à 0.' });
   }
-  const { data, error } = await supabase.rpc('transferer_stock_service', {
-    p_service: String(service_demandeur).trim(),
-    p_lignes: lignes.map(l => ({ id: l.id, qte: Number(l.qte) })),
-    p_local_id: local_id,
-  });
+  // 28/10 (Esdras) : SOP (et tout service listé dans utils/servicesSansStockPropre.js) n'a PAS de stock propre — son matériel est inclus dans le forfait, la caisse ne le facture pas. La réquisition fait
+  // sortir le stock de la pharmacie (même fonction atomique et idempotente que les ventes) et reste dans l'historique, mais ne crée aucun stock de service (`stock_par_service: false`, comme les réquisitions
+  // d'avant le 22/10 : leur annulation et leur modification savent déjà remettre le stock à la pharmacie).
+  const sansStockPropre = serviceSansStockPropre(service_demandeur);
+  const { data, error } = sansStockPropre
+    ? await supabase.rpc('decrementer_stock_medicaments', { p_decrements: lignes.map(l => ({ id: l.id, qte: Number(l.qte) })), p_local_id: local_id })
+    : await supabase.rpc('transferer_stock_service', {
+      p_service: String(service_demandeur).trim(),
+      p_lignes: lignes.map(l => ({ id: l.id, qte: Number(l.qte) })),
+      p_local_id: local_id,
+    });
   if (error) {
     if (error.code === '42883') {
       return res.status(500).json({ error: "La fonction SQL transferer_stock_service n'existe pas encore dans Supabase — colle stock_par_service.sql dans le SQL Editor." });
@@ -156,7 +163,7 @@ app.post('/api/requisitions', async (req, res) => {
   const { data: requisition, error: erreurInsert } = await supabase.from('requisitions').insert({
     service_demandeur: service_demandeur.trim(), lignes: lignesAvecNoms,
     demande_par: demande_par || null, demande_par_uid: req.user.id, local_id: local_id || null,
-    stock_par_service: true, // les réquisitions d'avant (stock simplement sorti de la pharmacie) gardent l'ancien comportement à l'annulation / modification
+    stock_par_service: !sansStockPropre, // les réquisitions d'avant le 22/10 et celles des services sans stock propre (SOP) : stock simplement sorti de la pharmacie, remis à la pharmacie à l'annulation / modification
   }).select().single();
   if (erreurInsert) {
     // 23505 = ce local_id est déjà en base : un rejeu a doublé l'insert entre la lecture ci-dessus
