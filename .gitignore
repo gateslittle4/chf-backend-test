@@ -4,3 +4,15 @@ node_modules/
 
 # Notes locales de l'outil Clawness (pas du code de l'appli)
 .clawness/
+
+# Secrets : ne jamais commiter une clé (24-26/10, vérification des dépôts). Les .env.example, eux, restent suivis (valeurs vides ou d'exemple).
+.env
+.env.*
+*.env
+!.env.example
+!.env.test.example
+*.pem
+*.key
+serviceAccount*.json
+service-account*.json
+*firebase-adminsdk*.json
