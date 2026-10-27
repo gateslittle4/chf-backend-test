@@ -72,13 +72,13 @@ test('SQL : un dépôt déjà entièrement rendu ne peut pas l\'être deux fois 
 });
 
 // ---------------- la route, avec de faux services ----------------
-function monterRoute({ droits = ['caisse_travailler'], rpc, existant = null } = {}) {
+function monterRoute({ droits = ['caisse_travailler'], rpc, existant = null, reglage } = {}) {
   const routes = {};
   const app = new Proxy({}, { get: (_, m) => (chemin, ...h) => { routes[`${String(m).toUpperCase()} ${chemin}`] = h[h.length - 1]; } });
   const audits = []; const appelsRpc = [];
   const table = (donnees) => { const q = { select: () => q, eq: () => q, is: () => q, maybeSingle: async () => ({ data: donnees, error: null }) }; return q; };
   const supabase = {
-    from: (nom) => table(nom === 'episodes' ? { id: EP, dossier_id: 'd1', type_patient: 'prive', ong_partenaire: null } : nom === 'dossiers' ? { nom: 'Marie Test' } : existant),
+    from: (nom) => nom === 'catalog' ? table(reglage === undefined ? null : { items: { autorisateursSortieCaisse: reglage } }) : table(nom === 'episodes' ? { id: EP, dossier_id: 'd1', type_patient: 'prive', ong_partenaire: null } : nom === 'dossiers' ? { nom: 'Marie Test' } : existant),
     rpc: async (nomFonction, args) => { appelsRpc.push({ nomFonction, args }); return rpc ? rpc(args) : { data: { id: 'p1', mode: 'remboursement_patient', montant: args.p_montant }, error: null }; },
   };
   require('../routes/caisse.js')(app, { aPermission: async (_, d) => droits.includes(d), calculerSoldeDepot: () => ({}), enregistrerAuditServeur: (_, a, d) => audits.push({ a, d }), estUnVraiUuid: (x) => /^[0-9a-f-]{36}$/.test(String(x || '')), lireToutesLesPages: async () => [], supabase, synchroListes: {} });
@@ -110,7 +110,11 @@ test('route : refus sans le droit, sans motif, sans « autorisé par », montant
   assert.strictEqual(m.appelsRpc.length, 0);
 });
 
-test("seuls Jean Jacques et Madame Dioumitrie peuvent autoriser de rendre un dépôt — tout autre nom est refusé par le serveur", async () => {
+test("« Autorisé par » : la liste réglée par la direction (par défaut Jean Jacques et Madame Dioumitrie) — tout autre nom est refusé par le serveur ; un nom ajouté dans Paramètres passe", async () => {
+  const modifiee = monterRoute({ reglage: ['Madame Dioumitrie', 'Pierre Louis'] });
+  assert.strictEqual((await modifiee.appeler({ ...valide, autorise_par: 'Pierre Louis' })).statut, 201, 'nom ajouté par la direction');
+  assert.strictEqual((await modifiee.appeler({ ...valide, autorise_par: 'Jean Jacques' })).statut, 400, 'nom retiré de la liste');
+  assert.strictEqual((await monterRoute({ reglage: [] }).appeler({ ...valide, autorise_par: 'Jean Jacques' })).statut, 201, 'réglage vide : liste d\'origine, la caisse n\'est jamais bloquée');
   for (const ok of ['Jean Jacques', 'Madame Dioumitrie']) assert.strictEqual((await monterRoute().appeler({ ...valide, autorise_par: ok })).statut, 201, ok);
   const m = monterRoute();
   for (const mauvais of ['Dr Esdras', 'jean jacques', 'Jean', 'Direction', 'Moi-même']) {
