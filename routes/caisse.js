@@ -384,6 +384,55 @@ app.post('/api/depenses-caisse/passer', async (req, res) => {
   res.status(201).json(data);
 });
 
+// 27/10 (Esdras) : « Rendre le dépôt » — un patient laisse un dépôt et n'en dépense pas la totalité : la caisse lui rend le reste. Même esprit que « Passer » une sortie de caisse : la direction décide
+// sur papier, la caisse saisit le montant, le motif et « autorisé par », puis un clic. Ligne « remboursement_patient » (argent qui SORT du tiroir, comme partout) qui baisse le dépôt disponible du dossier
+// du même montant, sous le verrou par épisode (sql/rendre_depot.sql) ; jamais plus que le dépôt réellement disponible. Jamais en file hors ligne.
+app.post('/api/episodes/:id/rendre-depot', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'caisse_travailler' requise pour rendre un dépôt." });
+  }
+  if (!estUnVraiUuid(req.params.id)) return res.status(400).json({ error: 'Épisode invalide.' });
+  const motif = typeof (req.body && req.body.motif) === 'string' ? req.body.motif.trim() : '';
+  const autorisePar = typeof (req.body && req.body.autorise_par) === 'string' ? req.body.autorise_par.trim() : '';
+  if (motif.length < 3) return res.status(400).json({ error: 'Le motif est requis (3 caractères au moins).', code: 'MOTIF_REQUIS' });
+  if (motif.length > 300) return res.status(400).json({ error: 'Motif trop long (300 caractères au maximum).' });
+  if (autorisePar.length < 2) return res.status(400).json({ error: "« Autorisé par » est requis : écris le nom de la personne qui a décidé de rendre ce dépôt.", code: 'AUTORISE_PAR_REQUIS' });
+  if (autorisePar.length > 100) return res.status(400).json({ error: '« Autorisé par » est trop long (100 caractères au maximum).' });
+  const autorisateurs = await lireAutorisateursSortieCaisse(supabase); // la liste réglée par la direction (Paramètres > Caisse)
+  if (!estAutorisateurSortieCaisse(autorisePar, autorisateurs)) return res.status(400).json({ error: messageAutorisateurInvalide(autorisateurs), code: 'AUTORISE_PAR_INVALIDE' });
+  const corpsMontant = { mode: 'remboursement_patient', montant: req.body && req.body.montant };
+  const erreurMontant = validerMontantPaiement(corpsMontant);
+  if (erreurMontant) return res.status(400).json({ error: erreurMontant.replace('du paiement', 'à rendre') });
+  normaliserMontant(corpsMontant);
+  const montant = corpsMontant.montant;
+  const localId = (req.body && (req.body.local_id || req.body.localId)) || null;
+  if (localId) {
+    const { data: dejaLa } = await supabase.from('paiements').select('*').eq('local_id', localId).maybeSingle();
+    if (dejaLa) return res.status(200).json(dejaLa);
+  }
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').select('id, dossier_id, type_patient, ong_partenaire').eq('id', req.params.id).is('supprime_le', null).maybeSingle();
+  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+  if (!episode) return res.status(404).json({ error: 'Épisode introuvable.' });
+  const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
+  const corps = {
+    patient_nom: (dossier && dossier.nom) || null, type_patient: episode.type_patient || null, ong_partenaire: episode.ong_partenaire || null,
+    encaisse_par: req.user.email || req.user.id, traite_par_uid: req.user.id, local_id: localId,
+    details: { motif, autorise_par: autorisePar },
+  };
+  const { data, error } = await supabase.rpc('rendre_depot_atomique', { p_episode: req.params.id, p_montant: montant, p_corps: corps, p_heure_serveur: true });
+  if (error) {
+    if (estRefusRemboursement(error)) return res.status(400).json({ error: messageRefusRemboursement(error), code: error.code });
+    if (estFonctionAbsente(error)) return res.status(503).json({ error: "Mise à jour du serveur en cours (la fonction « rendre_depot_atomique » n'est pas encore en base). Réessaie dans quelques minutes.", code: 'FONCTION_ABSENTE' });
+    if (error.code === '23505' && localId) {
+      const { data: existant } = await supabase.from('paiements').select('*').eq('local_id', localId).maybeSingle();
+      if (existant) return res.status(200).json(existant);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  enregistrerAuditServeur(req, 'depot_rendu', { episode_id: req.params.id, patient: (dossier && dossier.nom) || null, montant, motif, autorise_par: autorisePar });
+  res.status(201).json(data);
+});
+
 // Autres revenus (20/10, Esdras) : de l'argent encaissé à la caisse qui ne concerne AUCUN patient (certificat, location, don...). Table à part (sql/autres_revenus.sql) : jamais mélangé aux revenus des soins.
 // Même contrôle que les paiements : il faut caisse_travailler pour en enregistrer, paiement_annuler pour en annuler (et jamais soi-même).
 const MESSAGE_AUTRE_REVENU_MOTIF = 'Le motif est requis (3 à 300 caractères).';

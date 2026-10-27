@@ -71,7 +71,8 @@ function controlerQualite({ dossiers, episodes, paiements = [], maintenantMs, se
   const nomPaiement = (p) => { const e = epParId.get(p.episode_id); const dos = e ? parId.get(e.dossier_id) : null; return { type: 'paiement', id: p.id, episode_id: p.episode_id, dossier_id: dos ? dos.id : null, numero_dossier: dos ? dos.numero_dossier : null, nom: (dos && dos.nom) || p.patient_nom || null, montant: p.montant, mode: p.mode, date: p.date_paiement || null }; };
   const MODES_SANS_FICHE = ['depot', 'remboursement_credit'];
   ajouter('paiement_sans_fiche', 'Paiements liés à aucune fiche', 'moyenne',
-    pays.filter(p => vide(p.fiche_id) && !MODES_SANS_FICHE.includes(p.mode)).map(nomPaiement),
+    // 27/10 : une exonération de créance et un dépôt rendu au patient n'ont, par nature, aucune fiche : ce ne sont pas des anomalies.
+    pays.filter(p => vide(p.fiche_id) && !MODES_SANS_FICHE.includes(p.mode) && !(p.details && (p.details.exoneration_creance || p.details.depot_rendu))).map(nomPaiement),
     "Un encaissement qui ne correspond à aucune fiche n'est pas rattaché à ce qui a été facturé : à vérifier avec la caisse.");
   const couvert = (p) => { const d = p.details || {}; return Number(d.montant_depot_utilise) > 0 || Number(d.montant_credit_utilise) > 0 || Number(d.credit_utilise) > 0 || !!p.exoneration; };
   ajouter('paiement_zero', 'Paiements à zéro sans dépôt, crédit ni exonération', 'moyenne',
