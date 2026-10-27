@@ -85,7 +85,7 @@ function monterRoute({ droits = ['caisse_travailler'], rpc, existant = null } = 
   const appeler = async (corps, id = EP) => { let statut = 200; let json; const res = { status(s) { statut = s; return this; }, json(j) { json = j; return this; } }; await routes['POST /api/episodes/:id/rendre-depot']({ params: { id }, body: corps, user: { id: 'u1', email: 'caisse@chf.ht' } }, res); return { statut, json }; };
   return { appeler, audits, appelsRpc };
 }
-const valide = { montant: 2000.004, motif: 'Patient sorti, dépôt non dépensé', autorise_par: 'Direction (papier du 27/10)' };
+const valide = { montant: 2000.004, motif: 'Patient sorti, dépôt non dépensé', autorise_par: 'Madame Dioumitrie' };
 
 test('route : la caisse rend le dépôt — montant arrondi, motif et « autorisé par » gardés dans les détails, audit, 201', async () => {
   const m = monterRoute();
@@ -94,7 +94,7 @@ test('route : la caisse rend le dépôt — montant arrondi, motif et « autoris
   const { nomFonction, args } = m.appelsRpc[0];
   assert.strictEqual(nomFonction, 'rendre_depot_atomique');
   assert.strictEqual(args.p_montant, 2000);
-  assert.deepStrictEqual(args.p_corps.details, { motif: 'Patient sorti, dépôt non dépensé', autorise_par: 'Direction (papier du 27/10)' });
+  assert.deepStrictEqual(args.p_corps.details, { motif: 'Patient sorti, dépôt non dépensé', autorise_par: 'Madame Dioumitrie' });
   assert.strictEqual(args.p_corps.patient_nom, 'Marie Test');
   assert.strictEqual(m.audits[0].a, 'depot_rendu');
   assert.strictEqual(m.audits[0].d.montant, 2000);
@@ -108,6 +108,17 @@ test('route : refus sans le droit, sans motif, sans « autorisé par », montant
   for (const montant of [undefined, '', 'abc', -3]) assert.strictEqual((await m.appeler({ ...valide, montant })).statut, 400, String(montant));
   assert.strictEqual((await m.appeler(valide, 'pas-un-uuid')).statut, 400);
   assert.strictEqual(m.appelsRpc.length, 0);
+});
+
+test("seuls Jean Jacques et Madame Dioumitrie peuvent autoriser de rendre un dépôt — tout autre nom est refusé par le serveur", async () => {
+  for (const ok of ['Jean Jacques', 'Madame Dioumitrie']) assert.strictEqual((await monterRoute().appeler({ ...valide, autorise_par: ok })).statut, 201, ok);
+  const m = monterRoute();
+  for (const mauvais of ['Dr Esdras', 'jean jacques', 'Jean', 'Direction', 'Moi-même']) {
+    const r = await m.appeler({ ...valide, autorise_par: mauvais });
+    assert.strictEqual(r.statut, 400, mauvais);
+    assert.strictEqual(r.json.code, 'AUTORISE_PAR_INVALIDE', mauvais);
+  }
+  assert.strictEqual(m.appelsRpc.length, 0, 'la base n\'est jamais appelée');
 });
 
 test('route : refus de la base → 400 avec le montant en Gdes ; fonction absente → 503 ; rejeu → la ligne existante ; autre erreur → 500', async () => {

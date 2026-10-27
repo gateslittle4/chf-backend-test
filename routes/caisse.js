@@ -6,6 +6,7 @@ const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE
 const { validerMontantPaiement, normaliserMontant } = require('../utils/validationMontant');
 const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement } = require('../utils/soldeAtomique');
 const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('../utils/verificationPrixFiche');
+const { estAutorisateurSortieCaisse, MESSAGE_AUTORISATEUR_INVALIDE } = require('../utils/autorisateursSortieCaisse');
 
 module.exports = function monterCaisse(app, { aPermission, calculerSoldeDepot, enregistrerAuditServeur, estUnVraiUuid, lireToutesLesPages, supabase, synchroListes }) { // @enveloppe
 // Route : récupération des paiements
@@ -355,6 +356,7 @@ app.post('/api/episodes/:id/rendre-depot', async (req, res) => {
   if (motif.length > 300) return res.status(400).json({ error: 'Motif trop long (300 caractères au maximum).' });
   if (autorisePar.length < 2) return res.status(400).json({ error: "« Autorisé par » est requis : écris le nom de la personne qui a décidé de rendre ce dépôt.", code: 'AUTORISE_PAR_REQUIS' });
   if (autorisePar.length > 100) return res.status(400).json({ error: '« Autorisé par » est trop long (100 caractères au maximum).' });
+  if (!estAutorisateurSortieCaisse(autorisePar)) return res.status(400).json({ error: MESSAGE_AUTORISATEUR_INVALIDE, code: 'AUTORISE_PAR_INVALIDE' });
   const corpsMontant = { mode: 'remboursement_patient', montant: req.body && req.body.montant };
   const erreurMontant = validerMontantPaiement(corpsMontant);
   if (erreurMontant) return res.status(400).json({ error: erreurMontant.replace('du paiement', 'à rendre') });
