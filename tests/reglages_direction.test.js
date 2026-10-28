@@ -61,5 +61,5 @@ test("exonération de la caisse et heures de poste : valeurs d'origine, bornes",
   assert.strictEqual(reg.exonerationMaxCaisse({}), 100);
   assert.strictEqual(reg.exonerationMaxCaisse({ exonerationPourcentageMaxCaisse: 30 }), 30);
   for (const mauvais of [101, -1, 'x', null]) assert.strictEqual(reg.exonerationMaxCaisse({ exonerationPourcentageMaxCaisse: mauvais }), 100, String(mauvais));
-  assert.deepStrictEqual(reg.DEFAUTS, { exonerationPourcentageMaxCaisse: 100, plafondCreditEpisode: 0, heureFinPosteJour: 16, heureFinPosteNuit: 8 });
+  assert.deepStrictEqual(reg.DEFAUTS, { exonerationPourcentageMaxCaisse: 100, plafondCreditEpisode: 0, fermetureAutoPostes: true, heureFinPosteJour: 16, heureFinPosteNuit: 8 });
 });

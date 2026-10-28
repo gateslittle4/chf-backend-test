@@ -130,3 +130,18 @@ test("28/10 : aucun poste ouvert → aucune lecture des réglages (la vérificat
   const supabase = faux([{ id: 'v', statut: 'fermee', poste: 'jour', ouvertureISO: '2026-10-01T13:00:00Z' }]);
   assert.strictEqual(await fermerPostesExpires({ supabase, maintenant: () => Date.now(), journal: silencieux }), 0);
 });
+
+test("28/10 : fermeture automatique coupée dans Paramètres (fermetureAutoPostes = false) → AUCUN poste n'est fermé, même très en retard ; sans réglage ou réglage illisible, elle reste active", async () => {
+  const { fermetureAutoActive } = require('../utils/reglagesDirection');
+  assert.strictEqual(fermetureAutoActive({}), true);
+  assert.strictEqual(fermetureAutoActive(undefined), true);
+  for (const illisible of ['false', 0, null, 'non']) assert.strictEqual(fermetureAutoActive({ fermetureAutoPostes: illisible }), true, `valeur ${JSON.stringify(illisible)} : reste active`);
+  assert.strictEqual(fermetureAutoActive({ fermetureAutoPostes: false }), false);
+  const ouvert = [{ id: 'e', statut: 'ouverte', poste: 'jour', ouvertureISO: '2026-10-14T17:27:50.306Z' }];
+  const manuel = faux(ouvert, { reglages: { fermetureAutoPostes: false } });
+  assert.strictEqual(await fermerPostesExpires({ supabase: manuel, maintenant: () => new Date('2026-10-20T12:00:00Z').getTime(), journal: silencieux }), 0, 'six jours de retard : rien n\'est fermé');
+  assert.strictEqual(manuel.ecrit.length, 0, 'aucune écriture');
+  assert.strictEqual(manuel.audits.length, 0, 'aucune ligne de journal');
+  const auto = faux(ouvert, { reglages: { fermetureAutoPostes: true } });
+  assert.strictEqual(await fermerPostesExpires({ supabase: auto, maintenant: () => new Date('2026-10-20T12:00:00Z').getTime(), journal: silencieux }), 1, 'activée : le poste oublié est fermé');
+});

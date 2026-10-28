@@ -6,7 +6,7 @@
 //   - « Garder actif » écrit session.prolongeJusqua = limite + 10 min ; la limite effective est la plus tardive des deux ;
 //   - passé la limite effective, le serveur ferme le poste : fermetureISO = la limite (l'heure à laquelle il aurait dû se fermer, pas l'heure du réveil du serveur,
 //     qui peut être bien plus tard), argent NON compté (comptantRemis/fondConserve null, fermetureAuto: true) — aucun chiffre n'est inventé.
-const { lireReglagesDirection, heuresFinPoste } = require('./reglagesDirection');
+const { lireReglagesDirection, heuresFinPoste, fermetureAutoActive } = require('./reglagesDirection');
 const FUSEAU_HAITI = 'America/Port-au-Prince';
 const HEURE_FIN = { jour: 16, nuit: 8 }; // valeurs d'origine ; la direction les règle dans Paramètres (heureFinPosteJour / heureFinPosteNuit, voir utils/reglagesDirection.js) et elles arrivent ici en paramètre `heures`
 const PROLONGATION_MS = 10 * 60 * 1000;
@@ -73,7 +73,9 @@ async function fermerPostesExpires({ supabase, maintenant = () => Date.now(), jo
     const sessions = await lireSessionsOuvertes(supabase, journal);
     if (sessions === null) return 0;
     if (!sessions.some(x => x && x.statut === 'ouverte')) return 0; // aucun poste ouvert : rien à lire de plus (cette fonction tourne chaque minute)
-    const aFermer = sessionsAFermer(sessions, maintenant(), heuresFinPoste(await lireReglagesDirection(supabase)));
+    const reglages = await lireReglagesDirection(supabase);
+    if (!fermetureAutoActive(reglages)) return 0; // 28/10 : fermeture manuelle — chaque personne ferme son poste après avoir compté l'argent, rien n'est fermé tout seul
+    const aFermer = sessionsAFermer(sessions, maintenant(), heuresFinPoste(reglages));
     if (aFermer.length === 0) return 0;
     const maj = aFermer.map(({ session, limite }) => ({ id: session.id, champs: {
       fermetureISO: new Date(limite).toISOString(), comptantRemis: null, fondConserve: null, statut: 'fermee', fermetureAuto: true,
