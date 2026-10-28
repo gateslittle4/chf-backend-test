@@ -6,6 +6,7 @@ const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE
 const { validerMontantPaiement, normaliserMontant } = require('../utils/validationMontant');
 const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement } = require('../utils/soldeAtomique');
 const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('../utils/verificationPrixFiche');
+const { lireReglagesDirection, exonerationMaxCaisse, plafondCredit, messageExonerationTropElevee, messagePlafondCredit } = require('../utils/reglagesDirection');
 const { lireAutorisateursSortieCaisse, estAutorisateurSortieCaisse, messageAutorisateurInvalide } = require('../utils/autorisateursSortieCaisse');
 
 module.exports = function monterCaisse(app, { aPermission, calculerSoldeDepot, enregistrerAuditServeur, estUnVraiUuid, lireToutesLesPages, supabase, synchroListes }) { // @enveloppe
@@ -137,6 +138,12 @@ app.post('/api/paiements', async (req, res) => {
       if (motifExo.length < 3 && !rejeuExo) {
         return res.status(400).json({ error: "Écris le motif de l'exonération (3 caractères au moins).", code: 'MOTIF_EXONERATION_REQUIS' });
       }
+      // 28/10 : plafond réglé par la direction (Paramètres) pour ce que la CAISSE peut accorder ; la direction n'est jamais limitée. Un rejeu hors ligne n'est jamais refusé (la vente a déjà eu lieu).
+      const pctDemande = Number(exo.pourcentage);
+      if (!rejeuExo && Number.isFinite(pctDemande)) {
+        const maxCaisse = exonerationMaxCaisse(await lireReglagesDirection(supabase));
+        if (pctDemande > maxCaisse) return res.status(400).json({ error: messageExonerationTropElevee(pctDemande, maxCaisse), code: 'POURCENTAGE_EXONERATION_TROP_ELEVE', max: maxCaisse });
+      }
       auditExoneration = {
         fiche_id: req.body.fiche_id || req.body.ficheId || null, episode_id: req.body.episode_id || null, patient: req.body.patient_nom || null,
         montant_exonere: Number(exo.montantExonere) || null, pourcentage: Number(exo.pourcentage) || null, motif: motifExo || null, rejeu: rejeuExo,
@@ -167,6 +174,22 @@ app.post('/api/paiements', async (req, res) => {
   // enregistrer_paiement_atomique (sql/solde_atomique.sql) fait lecture + calcul + écriture d'un seul bloc, sous un verrou par épisode. Tant que ce script SQL n'est pas
   // appliqué en base, on retombe sur l'ancien chemin ci-dessous (inchangé) : jamais une panne.
   if (corps.mode === 'remboursement_credit' && !corps.episode_id) return res.status(400).json({ error: 'episode_id requis pour un remboursement de crédit.' });
+  // 28/10 : plafond de dette par épisode réglé par la direction (0 = pas de limite). Ne vise que la CAISSE (la direction n'est pas limitée) et jamais un rejeu hors ligne. Le solde d'un épisode = celui de
+  // son dernier paiement valide ; on y ajoute ce que ce paiement laisse à crédit (crédit complet ou paiement partiel). Lecture puis écriture : deux caisses simultanées pourraient dépasser d'une fiche,
+  // ce qui reste voulu comme une limite de prudence et non un verrou comptable.
+  if (corps.mode !== 'remboursement_credit' && corps.episode_id && !estRejeu(req)) {
+    const ajoutCredit = soldeAjouteParPaiement(corps);
+    if (ajoutCredit > 0 && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+      const plafond = plafondCredit(await lireReglagesDirection(supabase));
+      if (plafond > 0) {
+        const { data: dernier, error: erreurSolde } = await supabase.from('paiements').select('solde_restant').eq('episode_id', corps.episode_id)
+          .or('annule.eq.false,annule.is.null').is('supprime_le', null).order('date_paiement', { ascending: false }).limit(1).maybeSingle();
+        if (erreurSolde) return res.status(500).json({ error: erreurSolde.message });
+        const dette = Math.round(((Number(dernier && dernier.solde_restant) || 0) + ajoutCredit) * 100) / 100;
+        if (dette > plafond) return res.status(400).json({ error: messagePlafondCredit(dette, plafond), code: 'PLAFOND_CREDIT_DEPASSE', plafond, dette });
+      }
+    }
+  }
   {
     const ajout = corps.mode === 'remboursement_credit' || !corps.episode_id ? 0 : soldeAjouteParPaiement(corps);
     const { data: dataAtomique, error: erreurAtomique } = await supabase.rpc('enregistrer_paiement_atomique', {

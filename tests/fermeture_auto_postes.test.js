@@ -32,12 +32,12 @@ test("sessionsAFermer : seulement les postes ouverts dont la limite est atteinte
   assert.deepStrictEqual(sessionsAFermer([{ ...ouvert, prolongeJusqua: '2026-10-15T20:10:00Z' }], t('2026-10-15T20:05:00Z')), []);
 });
 
-function faux(items, { erreurEcriture = null, sansFonctionOuvertes = false } = {}) {
+function faux(items, { erreurEcriture = null, sansFonctionOuvertes = false, reglages = {} } = {}) {
   const ecrit = []; const audits = []; const lectures = { complete: 0, ouvertes: 0 };
   return {
     ecrit, audits, lectures,
     from(table) {
-      if (table === 'catalog') return { select: () => ({ eq: () => ({ maybeSingle: async () => { lectures.complete++; return { data: { items }, error: null }; } }) }) };
+      if (table === 'catalog') return { select: () => ({ eq: (_c, type) => ({ maybeSingle: async () => { if (type === 'parametres') return { data: { items: reglages }, error: null }; lectures.complete++; return { data: { items }, error: null }; } }) }) };
       if (table === 'audit_log') return { insert: async (l) => { audits.push(l); return { error: null }; } };
       throw new Error('table ' + table);
     },
@@ -106,4 +106,27 @@ test("Tant que la fonction SQL n'existe pas en base, on retombe sur l'ancienne l
   const n = await fermerPostesExpires({ supabase, maintenant: () => new Date('2026-10-15T16:55:00Z').getTime(), journal: silencieux });
   assert.strictEqual(n, 1);
   assert.strictEqual(supabase.lectures.complete, 1);
+});
+
+test("28/10 : les heures de fin de poste se règlent dans Paramètres (heureFinPosteJour / heureFinPosteNuit) ; sans réglage, 16h et 8h comme avant", async () => {
+  const { heuresFinPoste } = require('../utils/reglagesDirection');
+  assert.deepStrictEqual(heuresFinPoste({}), { jour: 16, nuit: 8 });
+  assert.deepStrictEqual(heuresFinPoste({ heureFinPosteJour: 18, heureFinPosteNuit: 7 }), { jour: 18, nuit: 7 });
+  for (const mauvais of [24, -1, 7.5, 'abc', null, '']) assert.deepStrictEqual(heuresFinPoste({ heureFinPosteJour: mauvais, heureFinPosteNuit: mauvais }), { jour: 16, nuit: 8 }, `valeur invalide ${mauvais}`);
+  const s = { poste: 'jour', ouvertureISO: '2026-10-14T17:27:50.306Z' }; // 13h27 Haïti
+  assert.strictEqual(iso(limiteHabituelle(s, { jour: 18, nuit: 8 })), '2026-10-14T22:00:00.000Z', 'jour jusqu\'à 18h Haïti');
+  assert.strictEqual(iso(limiteHabituelle({ poste: 'nuit', ouvertureISO: '2026-10-14T20:05:00Z' }, { jour: 16, nuit: 7 })), '2026-10-15T11:00:00.000Z', 'nuit jusqu\'à 7h Haïti');
+  // Fermeture réelle avec le réglage : à 17h Haïti (21:00Z) le poste de jour reste ouvert si la direction a mis 18h, mais il est fermé avec l'heure par défaut.
+  const ouvert = [{ id: 'e', statut: 'ouverte', poste: 'jour', ouvertureISO: '2026-10-14T17:27:50.306Z' }];
+  const tard = faux(ouvert, { reglages: { heureFinPosteJour: 18 } });
+  assert.strictEqual(await fermerPostesExpires({ supabase: tard, maintenant: () => new Date('2026-10-14T21:00:00Z').getTime(), journal: silencieux }), 0);
+  assert.strictEqual(await fermerPostesExpires({ supabase: tard, maintenant: () => new Date('2026-10-14T22:00:00Z').getTime(), journal: silencieux }), 1);
+  assert.strictEqual(tard.ecrit[0][1].p_maj[0].champs.fermetureISO, '2026-10-14T22:00:00.000Z', 'fermée à l\'heure réglée, pas à l\'heure du réveil');
+  const defaut = faux(ouvert);
+  assert.strictEqual(await fermerPostesExpires({ supabase: defaut, maintenant: () => new Date('2026-10-14T21:00:00Z').getTime(), journal: silencieux }), 1);
+});
+
+test("28/10 : aucun poste ouvert → aucune lecture des réglages (la vérification tourne chaque minute)", async () => {
+  const supabase = faux([{ id: 'v', statut: 'fermee', poste: 'jour', ouvertureISO: '2026-10-01T13:00:00Z' }]);
+  assert.strictEqual(await fermerPostesExpires({ supabase, maintenant: () => Date.now(), journal: silencieux }), 0);
 });

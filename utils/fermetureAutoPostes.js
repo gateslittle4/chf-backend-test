@@ -6,8 +6,9 @@
 //   - « Garder actif » écrit session.prolongeJusqua = limite + 10 min ; la limite effective est la plus tardive des deux ;
 //   - passé la limite effective, le serveur ferme le poste : fermetureISO = la limite (l'heure à laquelle il aurait dû se fermer, pas l'heure du réveil du serveur,
 //     qui peut être bien plus tard), argent NON compté (comptantRemis/fondConserve null, fermetureAuto: true) — aucun chiffre n'est inventé.
+const { lireReglagesDirection, heuresFinPoste } = require('./reglagesDirection');
 const FUSEAU_HAITI = 'America/Port-au-Prince';
-const HEURE_FIN = { jour: 16, nuit: 8 };
+const HEURE_FIN = { jour: 16, nuit: 8 }; // valeurs d'origine ; la direction les règle dans Paramètres (heureFinPosteJour / heureFinPosteNuit, voir utils/reglagesDirection.js) et elles arrivent ici en paramètre `heures`
 const PROLONGATION_MS = 10 * 60 * 1000;
 
 // Parties de date/heure d'un instant, en heure d'Haïti.
@@ -30,9 +31,9 @@ function instantHaiti(an, mois, jour, heure) {
 }
 
 // Heure habituelle de fin (ms) : la première heure de fin (16h pour jour, 8h pour nuit, heure d'Haïti) STRICTEMENT après l'ouverture.
-function limiteHabituelle(session) {
+function limiteHabituelle(session, heures = HEURE_FIN) {
   const ouverture = new Date(session && session.ouvertureISO).getTime();
-  const heureFin = HEURE_FIN[session && session.poste] ?? HEURE_FIN.jour;
+  const heureFin = heures[session && session.poste] ?? heures.jour;
   if (!Number.isFinite(ouverture)) return null;
   const p = partiesHaiti(ouverture);
   let fin = instantHaiti(p.an, p.mois, p.jour, heureFin);
@@ -41,15 +42,15 @@ function limiteHabituelle(session) {
 }
 
 // Limite effective : la plus tardive entre l'heure habituelle et la prolongation demandée.
-function limiteEffective(session) {
-  const base = limiteHabituelle(session);
+function limiteEffective(session, heures = HEURE_FIN) {
+  const base = limiteHabituelle(session, heures);
   if (base === null) return null;
   const prolonge = new Date(session.prolongeJusqua).getTime();
   return Number.isFinite(prolonge) ? Math.max(base, prolonge) : base;
 }
 
-function sessionsAFermer(sessions, maintenantMs) {
-  return (sessions || []).filter(s => s && s.statut === 'ouverte').map(s => ({ session: s, limite: limiteEffective(s) }))
+function sessionsAFermer(sessions, maintenantMs, heures = HEURE_FIN) {
+  return (sessions || []).filter(s => s && s.statut === 'ouverte').map(s => ({ session: s, limite: limiteEffective(s, heures) }))
     .filter(x => x.limite !== null && maintenantMs >= x.limite);
 }
 
@@ -71,7 +72,8 @@ async function fermerPostesExpires({ supabase, maintenant = () => Date.now(), jo
   try {
     const sessions = await lireSessionsOuvertes(supabase, journal);
     if (sessions === null) return 0;
-    const aFermer = sessionsAFermer(sessions, maintenant());
+    if (!sessions.some(x => x && x.statut === 'ouverte')) return 0; // aucun poste ouvert : rien à lire de plus (cette fonction tourne chaque minute)
+    const aFermer = sessionsAFermer(sessions, maintenant(), heuresFinPoste(await lireReglagesDirection(supabase)));
     if (aFermer.length === 0) return 0;
     const maj = aFermer.map(({ session, limite }) => ({ id: session.id, champs: {
       fermetureISO: new Date(limite).toISOString(), comptantRemis: null, fondConserve: null, statut: 'fermee', fermetureAuto: true,

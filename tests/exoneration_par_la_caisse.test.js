@@ -12,10 +12,11 @@ assert.ok(d > 0 && fin > d, 'route introuvable');
 const garde = src.slice(debutCorps, fin);
 
 // Exécute uniquement les contrôles d'entrée de POST /api/paiements ; renvoie { code, corps } ou { passe: true, auditExoneration }.
-async function appeler({ droits, corps, rejeu = false }) {
+async function appeler({ droits, corps, rejeu = false, reglages = {} }) {
   const res = { code: 200, corps: null, status(c) { this.code = c; return this; }, json(b) { this.corps = b; return this; } };
-  const f = new (Object.getPrototypeOf(async function () {}).constructor)('req', 'res', 'aPermission', 'estRejeu', 'enregistrerAuditServeur', `${garde}\nreturn { passe: true, auditExoneration };`);
-  const r = await f({ user: { id: 'u1' }, body: corps, headers: {} }, res, async (_u, cle) => droits.includes(cle), () => rejeu, () => {});
+  const f = new (Object.getPrototypeOf(async function () {}).constructor)('req', 'res', 'aPermission', 'estRejeu', 'enregistrerAuditServeur', 'supabase', 'lireReglagesDirection', 'exonerationMaxCaisse', 'messageExonerationTropElevee', `${garde}\nreturn { passe: true, auditExoneration };`);
+  const reg = require('../utils/reglagesDirection');
+  const r = await f({ user: { id: 'u1' }, body: corps, headers: {} }, res, async (_u, cle) => droits.includes(cle), () => rejeu, () => {}, null, async () => reglages, reg.exonerationMaxCaisse, reg.messageExonerationTropElevee);
   return r && r.passe ? { passe: true, auditExoneration: r.auditExoneration } : res;
 }
 const EXO = (motif) => ({ mode: 'exoneration', montant: 0, fiche_id: 'f1', episode_id: 'e1', patient_nom: 'Marie', exoneration: { pourcentage: 100, montantExonere: 5000, motif } });
@@ -71,4 +72,20 @@ test('la caisse (comptable, pharmacien, pharmacien en chef) a le droit par défa
     const ligne = bloc.slice(bloc.indexOf(`{ role: '${role}'`), bloc.indexOf('\n', bloc.indexOf(`{ role: '${role}'`)));
     assert.match(ligne, /'exoneration_accorder'/, role);
   }
+});
+
+test("28/10 : plafond du % d'exonération de la CAISSE réglé par la direction (exonerationPourcentageMaxCaisse) — la direction n'est jamais limitée, un rejeu hors ligne n'est jamais refusé, sans réglage : 100 %", async () => {
+  const exo = (pourcentage) => ({ ...EXO('motif valable'), exoneration: { pourcentage, montantExonere: 500, motif: 'motif valable' } });
+  const caisse = ['caisse_travailler', 'exoneration_accorder'];
+  assert.strictEqual((await appeler({ droits: caisse, corps: exo(100) })).passe, true, 'sans réglage : tout reste permis');
+  const r = await appeler({ droits: caisse, corps: exo(60), reglages: { exonerationPourcentageMaxCaisse: 50 } });
+  assert.strictEqual(r.code, 400);
+  assert.strictEqual(r.corps.code, 'POURCENTAGE_EXONERATION_TROP_ELEVE');
+  assert.strictEqual(r.corps.max, 50);
+  assert.match(r.corps.error, /50 %.*60 %/);
+  assert.strictEqual((await appeler({ droits: caisse, corps: exo(50), reglages: { exonerationPourcentageMaxCaisse: 50 } })).passe, true, 'pile au plafond : accepté');
+  assert.strictEqual((await appeler({ droits: [...caisse, 'demandes_repondre'], corps: exo(100), reglages: { exonerationPourcentageMaxCaisse: 50 } })).passe, true, 'la direction passe toujours');
+  assert.strictEqual((await appeler({ droits: caisse, corps: exo(100), reglages: { exonerationPourcentageMaxCaisse: 50 }, rejeu: true })).passe, true, 'rejeu hors ligne : jamais refusé');
+  assert.strictEqual((await appeler({ droits: caisse, corps: exo(100), reglages: { exonerationPourcentageMaxCaisse: 'n importe quoi' } })).passe, true, 'réglage invalide : 100 %');
+  assert.strictEqual((await appeler({ droits: caisse, corps: exo(1), reglages: { exonerationPourcentageMaxCaisse: 0 } })).code, 400, '0 % : la caisse ne peut plus rien accorder, la direction seule');
 });
