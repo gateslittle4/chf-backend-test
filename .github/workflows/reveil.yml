@@ -1,0 +1,17 @@
+# Garde le serveur gratuit de Render éveillé (il s'endort après 15 min sans visite et met ~1 min à se réveiller).
+# Visite /sante toutes les 5 minutes. GitHub peut retarder une exécution de quelques minutes aux heures chargées :
+# ce n'est pas une garantie à 100 %. Solution définitive : passer le service Render à l'offre « Starter ».
+# Pour arrêter : supprimer ce fichier, ou GitHub → Actions → « Reveil serveur » → ⋯ → Disable workflow.
+name: Reveil serveur
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions: {}
+jobs:
+  reveil:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Visiter /sante
+        run: curl --fail --silent --show-error --max-time 90 --retry 2 --retry-delay 15 --retry-all-errors https://chf-backend-test.onrender.com/sante
