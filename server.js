@@ -98,9 +98,9 @@ const {
 // piège dès la première nouvelle installation. Toute modification de utils/permissions.js dans
 // chf-app2 doit être recopiée ici dans le même mouvement.
 const PERMISSIONS_PAR_DEFAUT = [
-  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation','stock_reception','requisition_modifier'] },
+  { role: 'direction', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','demandes_repondre','dossier_annuler','paiement_annuler','facturation_supprimer','facturation_modifier','facturation_exporter','direction_voir','analytics_voir','rapport_chf_voir','catalogue_gerer','stock_gerer','partenaires_gerer','audit_voir','sortie_caisse_demander','pharmacie_voir','acte_naissance_derogation','episode_ouvert_derogation','stock_reception','requisition_modifier','caisse_voir_tout'] },
   { role: 'comptable', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','caisse_travailler','demandes_voir','facturation_modifier','rapport_chf_voir','exoneration_accorder'] },
-  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir'] },
+  { role: 'auditeur', permissions: ['episode_creer','fiche_patient_voir','fiche_patient_voir_finances','facturation_exporter','rapport_chf_voir','audit_voir','facturation_voir','caisse_voir','caisse_voir_tout'] },
   { role: 'lecteur', permissions: ['episode_creer','fiche_patient_voir','facturation_voir'] },
   // 22/10 (Esdras) : l'archive crée des patients, avec ou sans numéro de dossier (elle tape celui que la personne a déjà) ; le site ne donne un numéro qu'à qui n'en a pas.
   { role: 'archiviste', permissions: ['dossier_creer','dossier_numero_saisir','fiche_patient_voir','facturation_voir'] },
