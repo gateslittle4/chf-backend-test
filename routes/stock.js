@@ -3,8 +3,11 @@
 // l'application Express et ses dépendances partagées (base, droits, journal d'audit, lecteurs communs) ; voir « montage des routes » dans server.js.
 
 const { serviceSansStockPropre } = require('../utils/servicesSansStockPropre');
+const { avecStockIllimite } = require('../utils/stockIllimite');
 
 module.exports = function monterStock(app, { aPermission, enregistrerAuditServeur, envoyerCallMeBot, lireToutesLesPages, supabase }) { // @enveloppe
+// Réglage « Stock illimité » (17/11) : voir utils/stockIllimite.js. La ligne suivante est une enveloppe : les tests qui lisent le texte des routes ne la voient pas.
+supabase = avecStockIllimite(supabase); // @enveloppe
 // Décrémente le stock de façon atomique (voir fonction_decrementer_stock_et_numerotation_lots.sql) — remplace le
 // calcul côté navigateur + réécriture complète du catalogue, qui pouvait perdre une vente si
 // 2 ventes du même médicament arrivaient presque en même temps (2e écriture qui efface la

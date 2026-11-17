@@ -4,6 +4,7 @@
 //   exonerationPourcentageMaxCaisse (100)  plus gros % d'exonération que la CAISSE peut accorder (la direction, elle, va toujours jusqu'à 100 %).
 //   plafondCreditEpisode (0)               plus grosse dette (en gourdes) qu'un épisode peut porter après un crédit ou un paiement partiel de la caisse ; 0 = pas de limite. La direction n'est pas limitée.
 //   fermetureAutoPostes (true)             false : plus aucun poste n'est fermé automatiquement — chaque personne ferme le sien après avoir compté l'argent (28/10, Esdras).
+//   stockIllimite (false)                  true : le stock ne bloque jamais une vente ni une réquisition et ses quantités ne bougent plus (17/11, Esdras : « met tous les stocks de façon infinie pour l'instant »). Voir utils/stockIllimite.js.
 //   heureFinPosteJour (16), heureFinPosteNuit (8)   heures d'Haïti (0 à 23) où un poste oublié ouvert est fermé automatiquement (voir utils/fermetureAutoPostes.js).
 const DEFAUTS = { exonerationPourcentageMaxCaisse: 100, plafondCreditEpisode: 0, fermetureAutoPostes: true, heureFinPosteJour: 16, heureFinPosteNuit: 8 };
 
@@ -25,6 +26,8 @@ const exonerationMaxCaisse = (reglages) => nombreOuDefaut(reglages && reglages.e
 const plafondCredit = (reglages) => nombreOuDefaut(reglages && reglages.plafondCreditEpisode, DEFAUTS.plafondCreditEpisode, { min: 0 });
 // Active sauf si la direction l'a EXPLICITEMENT coupée (une valeur absente ou illisible garde la fermeture automatique : jamais de poste oublié ouvert par accident).
 const fermetureAutoActive = (reglages) => !(reglages && reglages.fermetureAutoPostes === false);
+// Inactif sauf si la direction l'a EXPLICITEMENT activé (true) : une valeur absente ou illisible garde le stock réel.
+const stockIllimiteActif = (reglages) => !!(reglages && reglages.stockIllimite === true);
 function heuresFinPoste(reglages) {
   return {
     jour: nombreOuDefaut(reglages && reglages.heureFinPosteJour, DEFAUTS.heureFinPosteJour, { min: 0, max: 23, entier: true }),
@@ -35,4 +38,4 @@ function heuresFinPoste(reglages) {
 const messageExonerationTropElevee = (pourcentage, max) => `La caisse peut accorder une exonération de ${max} % au plus (demandée : ${pourcentage} %). Au-delà, la direction doit l'accorder.`;
 const messagePlafondCredit = (dette, plafond) => `Cette fiche laisserait ${dette} Gdes à crédit sur cet épisode ; la limite fixée par la direction est de ${plafond} Gdes. Encaisse davantage maintenant, ou demande à la direction.`;
 
-module.exports = { DEFAUTS, lireReglagesDirection, nombreOuDefaut, exonerationMaxCaisse, plafondCredit, heuresFinPoste, fermetureAutoActive, messageExonerationTropElevee, messagePlafondCredit };
+module.exports = { DEFAUTS, lireReglagesDirection, nombreOuDefaut, exonerationMaxCaisse, plafondCredit, heuresFinPoste, fermetureAutoActive, stockIllimiteActif, messageExonerationTropElevee, messagePlafondCredit };
