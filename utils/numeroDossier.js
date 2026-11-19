@@ -14,6 +14,9 @@ const PREFIXE_VENTE_COMPTOIR = 'AUTO-';
 const PREFIXE_EXAMENS = 'EXAMEN-';
 const LONGUEUR_MAX = 30;
 
+// 19/11 (Esdras) : « je ne veux pas que les clients comptoir apparaissent là où l'on cherche les dossiers ». Une vente comptoir (⚡ Achat Express) crée un dossier interne « AUTO-… » : ce n'est pas un patient, il ne se retrouve jamais dans une recherche.
+const estVenteComptoir = (numero) => typeof numero === 'string' && numero.toUpperCase().startsWith(PREFIXE_VENTE_COMPTOIR);
+const sansVentesComptoir = (dossiers) => (Array.isArray(dossiers) ? dossiers.filter(d => !(d && estVenteComptoir(d.numero_dossier))) : dossiers);
 const estEnAttente = (numero) => typeof numero === 'string' && numero.startsWith(PREFIXE_EN_ATTENTE);
 const estExamensSeulement = (numero) => typeof numero === 'string' && numero.startsWith(PREFIXE_EXAMENS);
 // Pas de vrai numéro : en attente (la caisse le donnera) ou examens seulement (jamais de numéro tant que la caisse n'en donne pas un).
@@ -95,4 +98,4 @@ async function marquerExamensSeulement({ supabase, dossierId }) {
   return { numero, ancien: dossier.numero_dossier };
 }
 
-module.exports = { PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, PREFIXE_EXAMENS, LONGUEUR_MAX, estEnAttente, estExamensSeulement, estSansVraiNumero, numeroProvisoire, numeroExamens, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement };
+module.exports = { estVenteComptoir, sansVentesComptoir, PREFIXE_EN_ATTENTE, PREFIXE_VENTE_COMPTOIR, PREFIXE_EXAMENS, LONGUEUR_MAX, estEnAttente, estExamensSeulement, estSansVraiNumero, numeroProvisoire, numeroExamens, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement };
