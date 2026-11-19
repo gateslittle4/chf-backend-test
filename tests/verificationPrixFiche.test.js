@@ -123,3 +123,16 @@ test('arrondi au centime : une différence de 1 centime (flottants) ne déclench
   const r = verifierTotalFiche({ raw_state: { lignesCalcul: [ligne(MED, 3, 33.33)] }, total_global: 99.99, breakdown: { med: 99.99 }, episode: PRIVE, catalogue: { med: [{ ...MED, prix: 33.33 }], actes: [] }, parametres: {}, ongDoc: null });
   assert.strictEqual(r.ok, true);
 });
+
+// 19/11 (Esdras) : nouvelle catégorie d'actes « Certificat ». Une fiche qui range un certificat dans « certificat » est acceptée ; sans que le serveur connaisse cette catégorie,
+// son montant tomberait dans « chirurgie » et la fiche serait refusée (le détail envoyé par l'app ne correspondrait plus).
+test('un acte classé « certificat » : la fiche est acceptée avec son détail par catégorie « certificat » (jamais refusée, jamais rangée en chirurgie)', () => {
+  const CERTIFICAT = { id: 'a17', nom: 'Certificat (Santé, Maladie, Grossesse)', prix: 500, sub: 'certificat' };
+  const catalogue = { med: [MED], actes: [ACTE, CERTIFICAT] };
+  const r = verifierTotalFiche({
+    raw_state: { lignesCalcul: [ligne(CERTIFICAT, 1, 500), ligne(MED, 1, 100)] },
+    total_global: 600, breakdown: { med: 100, certificat: 500 },
+    episode: PRIVE, catalogue, parametres: {}, ongDoc: null,
+  });
+  assert.deepStrictEqual(r, { ok: true });
+});

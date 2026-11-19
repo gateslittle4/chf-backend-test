@@ -105,7 +105,7 @@ function verifierTotalFiche({ raw_state, total_global, breakdown, episode, catal
     const montantLigne = qte * prixLigne;
     sommeLignes += montantLigne;
     if (ligne.type === 'med') breakdownAttendu.med = (breakdownAttendu.med || 0) + montantLigne;
-    else if (breakdownAttendu[ligne.sub] !== undefined || ['service','hospit','labo','med','oxygene','curetage','accouchement','sono','cesarienne','chirurgie','ecg','suture','pansement','drainage','radio','pap','visite','nebulisation'].includes(ligne.sub)) {
+    else if (breakdownAttendu[ligne.sub] !== undefined || ['service','hospit','labo','med','oxygene','curetage','accouchement','sono','cesarienne','chirurgie','ecg','suture','pansement','drainage','radio','pap','visite','nebulisation','certificat'].includes(ligne.sub)) {
       breakdownAttendu[ligne.sub] = (breakdownAttendu[ligne.sub] || 0) + montantLigne;
     } else breakdownAttendu.chirurgie = (breakdownAttendu.chirurgie || 0) + montantLigne;
   }
