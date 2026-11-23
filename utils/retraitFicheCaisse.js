@@ -59,4 +59,25 @@ function evaluerRetraitCaisse({ fiche, paiements, episode, parametres, motif, ma
   return { ok: true, horsDelai: !memeJourOuSession, limite, total };
 }
 
-module.exports = { evaluerRetraitCaisse, limiteRetrait, estRefusSolde, CODES_REFUS_SOLDE, MONTANT_RETRAIT_PAR_DEFAUT, MOTIF_MIN, MOTIF_MAX };
+// 17/11 (Esdras) : « une petite corbeille en bas à droite des fiches validées pour récupérer une fiche qu'on a supprimée par erreur ».
+// La direction (dossier_annuler) récupère toute fiche de la corbeille (route existante, inchangée). La CAISSE récupère une fiche qu'elle (ou quelqu'un) a retirée LE MÊME JOUR, tant que le retrait
+// n'a laissé aucune dette à recalculer : retirer une fiche à crédit ou en paiement partiel a réduit la dette des paiements d'après (sql/retrait_fiche_solde.sql), et la remettre demande à la direction.
+// `paiements` = paiements de CETTE fiche mis à la corbeille avec elle. Retourne { ok: true } ou { ok: false, code, message }.
+function evaluerRestaurationCaisse({ fiche, paiements, episode, maintenantMs = Date.now() }) {
+  const refus = (code, message) => ({ ok: false, code, message });
+  if (!fiche || !fiche.supprime_le) return refus('PAS_A_LA_CORBEILLE', "Cette fiche n'est pas à la corbeille.");
+  if (jourHaiti(new Date(fiche.supprime_le).getTime()) !== jourHaiti(maintenantMs)) {
+    return refus('HORS_DELAI', "La caisse ne peut récupérer une fiche que le jour même où elle a été retirée. Voir la direction.");
+  }
+  if (episode && (episode.verrouille_facture || episode.numero_lot)) {
+    return refus('DOSSIER_VERROUILLE', 'Ce dossier est déjà facturé au partenaire : la fiche ne peut plus être récupérée par la caisse.');
+  }
+  const liste = paiements || [];
+  if (liste.some(p => p.mode === 'remboursement_credit')) return refus('PAIEMENT_NON_RESTAURABLE', "Un remboursement de crédit ne se récupère pas depuis une fiche. Voir la direction.");
+  if (liste.some(p => p.mode === 'credit' || Number(p.solde_restant) > 0)) {
+    return refus('FICHE_A_CREDIT', "Cette fiche laissait un reste à payer (crédit ou paiement partiel) : seule la direction peut la récupérer.");
+  }
+  return { ok: true };
+}
+
+module.exports = { evaluerRestaurationCaisse, evaluerRetraitCaisse, limiteRetrait, estRefusSolde, CODES_REFUS_SOLDE, MONTANT_RETRAIT_PAR_DEFAUT, MOTIF_MIN, MOTIF_MAX };
