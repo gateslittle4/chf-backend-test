@@ -284,8 +284,9 @@ app.put('/api/episodes/:id', async (req, res) => {
           if (erreurDejaLa) return res.status(500).json({ error: `Nouvelle fiche : ${erreurDejaLa.message}` });
           if (dejaLa && dejaLa.length > 0) {
             const { numero_fiche: _numero, ...sansNumero } = colonnes;
-            const { error: eMaj } = await supabase.from('fiches').update(sansNumero).eq('id', dejaLa[0].id);
+            const { data: majFiche, error: eMaj } = await supabase.from('fiches').update(sansNumero).eq('id', dejaLa[0].id).select();
             if (eMaj) return res.status(500).json({ error: `Fiche ${dejaLa[0].id} : ${eMaj.message}` });
+            if (!majFiche || majFiche.length === 0) return res.status(404).json({ error: `Fiche ${dejaLa[0].id} introuvable — rien n'a été modifié.` });
             continue;
           }
         }
