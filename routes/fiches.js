@@ -2,7 +2,7 @@
 // Découpé de server.js le 23/10 sans changer une ligne de logique : le texte des routes est celui d'avant. Ce module reçoit de server.js
 // l'application Express et ses dépendances partagées (base, droits, journal d'audit, lecteurs communs) ; voir « montage des routes » dans server.js.
 const { compterActesNaissance, conflitActeNaissance, motifDerogationValide } = require('../utils/actesNaissance');
-const { evaluerRetraitCaisse, estRefusSolde, MOTIF_MIN } = require('../utils/retraitFicheCaisse');
+const { evaluerRetraitCaisse, evaluerRestaurationCaisse, estRefusSolde, MOTIF_MIN } = require('../utils/retraitFicheCaisse');
 const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('../utils/heureServeur');
 const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement } = require('../utils/soldeAtomique');
 const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('../utils/verificationPrixFiche');
@@ -358,15 +358,23 @@ app.post('/api/fiches/:id/retirer-caisse', async (req, res) => {
 
 // Restauration d'une fiche mise à la corbeille — même logique que /api/episodes/:id/restaurer :
 // ne restaure que les paiements dont supprime_le correspond exactement à celui de la fiche.
+// 17/11 (Esdras) : la CAISSE peut aussi récupérer une fiche retirée le jour même, sans dette à recalculer (voir utils/retraitFicheCaisse.js::evaluerRestaurationCaisse) — trace au Journal d'audit.
 app.post('/api/fiches/:id/restaurer', async (req, res) => {
-  if (!(await aPermission(req.user.id, 'dossier_annuler'))) {
-    return res.status(403).json({ error: "Permission 'dossier_annuler' requise pour restaurer une fiche." });
+  const peutTout = await aPermission(req.user.id, 'dossier_annuler');
+  if (!peutTout && !(await aPermission(req.user.id, 'caisse_travailler'))) {
+    return res.status(403).json({ error: "Permission 'dossier_annuler' ou 'caisse_travailler' requise pour restaurer une fiche." });
   }
-  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('supprime_le, numero_fiche, episode_id').eq('id', req.params.id).maybeSingle();
+  const { data: fiche, error: erreurLecture } = await supabase.from('fiches').select('supprime_le, numero_fiche, episode_id, total_global').eq('id', req.params.id).maybeSingle();
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!fiche) return res.status(404).json({ error: 'Fiche introuvable.' });
   if (!fiche.supprime_le) return res.status(400).json({ error: "Cette fiche n'est pas à la corbeille." });
   const horodatageSuppression = fiche.supprime_le;
+  if (!peutTout) {
+    const { data: paiementsSupprimes } = await supabase.from('paiements').select('id, mode, solde_restant').eq('fiche_id', req.params.id).eq('supprime_le', horodatageSuppression);
+    const { data: episode } = fiche.episode_id ? await supabase.from('episodes').select('id, verrouille_facture, numero_lot').eq('id', fiche.episode_id).maybeSingle() : { data: null };
+    const verdict = evaluerRestaurationCaisse({ fiche, paiements: paiementsSupprimes || [], episode });
+    if (!verdict.ok) return res.status(403).json({ error: verdict.message, code: verdict.code });
+  }
   // Une fiche supprimée a pu lâcher son numéro (NULL, voir renumeroter_fiches) : elle revient à la FIN du dossier, au prochain numéro libre.
   const modifsRestauration = { supprime_le: null };
   if (fiche.numero_fiche == null && fiche.episode_id) {
@@ -378,6 +386,28 @@ app.post('/api/fiches/:id/restaurer', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   if (!ficheRestauree || ficheRestauree.length === 0) return res.status(404).json({ error: 'Fiche introuvable.' });
   await supabase.from('paiements').update({ supprime_le: null }).eq('fiche_id', req.params.id).eq('supprime_le', horodatageSuppression).select();
-  res.json({ success: true });
+  enregistrerAuditServeur(req, 'fiche_restauree', { fiche_id: req.params.id, episode_id: fiche.episode_id, numero_fiche: ficheRestauree[0].numero_fiche, total: fiche.total_global, avec_droit_direction: peutTout });
+  res.json({ success: true, numero_fiche: ficheRestauree[0].numero_fiche });
+});
+
+// Corbeille des fiches d'UN dossier (17/11, Esdras) : les fiches retirées, pour la petite corbeille du Calculateur. Pour chacune : peut-elle être récupérée par cette personne, et sinon pourquoi.
+// Les lignes de la fiche (raw_state) servent à remettre son stock en vente à la restauration.
+app.get('/api/fiches/episode/:episodeId/corbeille', async (req, res) => {
+  const peutTout = await aPermission(req.user.id, 'dossier_annuler');
+  if (!peutTout && !(await aPermission(req.user.id, 'caisse_travailler'))) return res.status(403).json({ error: "Permission 'dossier_annuler' ou 'caisse_travailler' requise." });
+  const { data: fiches, error } = await supabase.from('fiches').select('*').eq('episode_id', req.params.episodeId).not('supprime_le', 'is', null).order('supprime_le', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  const { data: episode } = await supabase.from('episodes').select('id, verrouille_facture, numero_lot').eq('id', req.params.episodeId).maybeSingle();
+  const resultat = [];
+  for (const f of fiches || []) {
+    let restaurable = true; let raison = null;
+    if (!peutTout) {
+      const { data: paiements } = await supabase.from('paiements').select('id, mode, solde_restant').eq('fiche_id', f.id).eq('supprime_le', f.supprime_le);
+      const verdict = evaluerRestaurationCaisse({ fiche: f, paiements: paiements || [], episode });
+      restaurable = verdict.ok; raison = verdict.ok ? null : verdict.message;
+    }
+    resultat.push({ ...f, restaurable, raison_non_restaurable: raison });
+  }
+  res.json(resultat);
 });
 }; // @enveloppe
