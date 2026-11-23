@@ -489,6 +489,40 @@ app.post('/api/stock/decrementer-dons', async (req, res) => {
   res.json({ success: true, items: data.items });
 });
 
+// Supprime (retire) une quantité de stock DONNÉ par un ONG pour UN médicament — « tu n'as qu'à ajouter le bouton Supprimer et la quantité à supprimer » (23/11, Esdras).
+// Réservé à ceux qui gèrent le stock (stock_gerer). Même fonction SQL atomique que la vente de stock donné (decrementer_stock_dons) : jamais plus que ce que cet ONG a donné et pas encore sorti.
+// L'identifiant d'idempotence porte la marque « -retrait-don » : même avec « Stock illimité » actif, un retrait voulu par la direction SORT vraiment le stock (voir utils/stockIllimite.js).
+// Tracé dans le journal d'audit (qui, quoi, combien).
+app.post('/api/stock/retirer-don', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  }
+  const { id, ong, quantite } = req.body;
+  if (!id || !ong || typeof quantite !== 'number' || !(quantite > 0)) {
+    return res.status(400).json({ error: 'id, ong et quantite (nombre positif) requis.' });
+  }
+  const brut = req.body.local_id || req.body.localId || null;
+  const local_id = brut ? (/-retrait-don/.test(String(brut)) ? String(brut) : `${brut}-retrait-don`) : `${require('crypto').randomUUID()}-retrait-don`;
+  const { data, error } = await supabase.rpc('decrementer_stock_dons', { p_decrements: [{ id, ong, qte: quantite }], p_local_id: local_id });
+  if (error) {
+    if (error.code === '42883') {
+      return res.status(500).json({ error: "La fonction SQL decrementer_stock_dons n'existe pas encore dans Supabase — colle fonction_stock_dons.sql puis idempotence_decrement_stock.sql dans le SQL Editor." });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  if (data.deja_applique) {
+    console.log(`↩️ Retrait de stock donné déjà appliqué (local_id=${local_id}) — rejeu ignoré.`);
+    return res.json({ success: true, deja_applique: true, items: data.items });
+  }
+  if (!data.succes) {
+    const detail = (data.manquants || []).map(m => `${m.nom || m.id} — don ${m.ong} (${m.disponible} restant)`).join(', ');
+    return res.status(409).json({ error: `Stock donné insuffisant : ${detail}`, manquants: data.manquants });
+  }
+  const nom = ((data.items || []).find(i => i.id === id) || {}).nom || null;
+  await enregistrerAuditServeur(req, 'suppression_stock_don', { id, nom, ong, quantite });
+  res.json({ success: true, items: data.items });
+});
+
 // Modifie stock + seuil d'alerte d'UN médicament de façon atomique (même fonction SQL, même
 // raison que ci-dessus).
 app.patch('/api/stock/:id', async (req, res) => {
