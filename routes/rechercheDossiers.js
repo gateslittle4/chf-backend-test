@@ -1,7 +1,7 @@
 // routes/rechercheDossiers.js — Recherche d'un dossier et numéro de dossier donné par la caisse.
 // Découpé de server.js le 23/10 sans changer une ligne de logique : le texte des routes est celui d'avant. Ce module reçoit de server.js
 // l'application Express et ses dépendances partagées (base, droits, journal d'audit, lecteurs communs) ; voir « montage des routes » dans server.js.
-const { numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement } = require('../utils/numeroDossier');
+const { sansVentesComptoir, numeroProvisoire, erreurNumeroDossier, erreurNumeroDepart, donnerNumeroAuPremierEpisode, marquerExamensSeulement } = require('../utils/numeroDossier');
 
 module.exports = function monterRechercheDossiers(app, { aPermission, enregistrerAuditServeur, supabase }) { // @enveloppe
 // ============================================================
@@ -28,9 +28,9 @@ app.get('/api/dossiers/recherche', async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
     // 14/10 : un dossier FUSIONNÉ dans un autre renvoie le dossier final (le numéro de l'ancien dossier retrouve la bonne personne).
     const fusionnes = (data || []).filter(d => d.fusionne_dans);
-    if (fusionnes.length === 0) return res.json(data);
+    if (fusionnes.length === 0) return res.json(sansVentesComptoir(data));
     const { data: finaux } = await supabase.from('dossiers').select('*').in('id', fusionnes.map(d => d.fusionne_dans));
-    return res.json((data || []).filter(d => !d.fusionne_dans).concat(finaux || []));
+    return res.json(sansVentesComptoir((data || []).filter(d => !d.fusionne_dans).concat(finaux || [])));
   }
 
   const { data, error } = await supabase.rpc('rechercher_dossiers_flou', { p_nom: nom });
@@ -39,11 +39,11 @@ app.get('/api/dossiers/recherche', async (req, res) => {
       let { data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').is('fusionne_dans', null).ilike('nom', `%${nom}%`);
       if (erreurRepli && erreurRepli.code === '42703') ({ data: repli, error: erreurRepli } = await supabase.from('dossiers').select('*').ilike('nom', `%${nom}%`)); // base pas encore migrée
       if (erreurRepli) return res.status(500).json({ error: erreurRepli.message });
-      return res.json(repli);
+      return res.json(sansVentesComptoir(repli));
     }
     return res.status(500).json({ error: error.message });
   }
-  res.json(data);
+  res.json(sansVentesComptoir(data));
 });
 
 // Liste des patients pour la recherche HORS LIGNE (audit du 28/09 avant la mise en production).
