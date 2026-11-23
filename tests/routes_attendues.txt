@@ -69,6 +69,7 @@ GET /api/fiches/episode/:episodeId
 DELETE /api/fiches/:id
 POST /api/fiches/:id/retirer-caisse
 POST /api/fiches/:id/restaurer
+GET /api/fiches/episode/:episodeId/corbeille
 GET /api/catalog/:type
 PUT /api/catalog/:type
 POST /api/catalog/:type/item
