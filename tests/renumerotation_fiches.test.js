@@ -185,8 +185,10 @@ test("Script SQL pas encore collé (fonctions absentes) : la suppression reste v
 
 test("PUT /api/episodes/:id ne réécrit JAMAIS le numéro d'une fiche existante (un écran resté sur d'anciens numéros écraserait la renumérotation)", () => {
   const i = serverSrc.indexOf("if (Array.isArray(d.fiches)) {");
-  const bloc = serverSrc.slice(i, i + 1600);
+  const bloc = serverSrc.slice(i, i + 4200);
   assert.match(bloc, /const \{ numero_fiche: _numeroIgnore, \.\.\.colonnesSansNumero \} = ficheVersColonnes\(f\);/);
   assert.match(bloc, /\.update\(colonnesSansNumero\)\.eq\('id', f\.id\)/);
-  assert.match(bloc, /\.insert\(\{ episode_id: req\.params\.id, \.\.\.ficheVersColonnes\(f\) \}\)/, "une NOUVELLE fiche garde son numéro");
+  // 23/11 : l'insertion d'une nouvelle fiche est idempotente (voir tests/archivage_fiche_deja_enregistree.test.js) ; elle garde son numéro tant qu'il est libre.
+  assert.match(bloc, /const colonnes = ficheVersColonnes\(f\);/);
+  assert.match(bloc, /\.insert\(\{ episode_id: req\.params\.id, \.\.\.colonnes, \.\.\.\(idsLocaux\.length > 0 \? \{ local_id: idsLocaux\[0\] \} : \{\}\) \}\)/, "une NOUVELLE fiche garde son numéro");
 });

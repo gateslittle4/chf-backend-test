@@ -272,7 +272,32 @@ app.put('/api/episodes/:id', async (req, res) => {
         if (!fd || fd.length === 0) return res.status(404).json({ error: `Fiche ${f.id} introuvable — rien n'a été modifié.` });
       }
       else {
-        const { error: ei } = await supabase.from('fiches').insert({ episode_id: req.params.id, ...ficheVersColonnes(f) });
+        // 23/11 : « duplicate key value violates unique constraint fiches_episode_id_numero_fiche_key » à l'archivage. Une fiche déjà enregistrée (encaissée juste avant via /api/fiches) revenait dans ce tableau avec son identifiant
+        // LOCAL, donc prise pour une nouvelle : son numéro existait déjà → refus, alors que le dossier était déjà marqué archivé. L'insertion est maintenant idempotente :
+        //   1. une fiche de CET épisode qui porte déjà ce local_id est simplement mise à jour (jamais réinsérée) ;
+        //   2. si le numéro est déjà pris par une fiche identique (même total, même mode), c'est la même fiche : rien à faire ;
+        //   3. sinon (vrai conflit de numéro), la fiche prend le numéro libre suivant.
+        const colonnes = ficheVersColonnes(f);
+        const idsLocaux = [f.localId, f.local_id, f.id].filter(x => typeof x === 'string' && x);
+        if (idsLocaux.length > 0) {
+          const { data: dejaLa, error: erreurDejaLa } = await supabase.from('fiches').select('id').eq('episode_id', req.params.id).in('local_id', idsLocaux).limit(1);
+          if (erreurDejaLa) return res.status(500).json({ error: `Nouvelle fiche : ${erreurDejaLa.message}` });
+          if (dejaLa && dejaLa.length > 0) {
+            const { numero_fiche: _numero, ...sansNumero } = colonnes;
+            const { data: majFiche, error: eMaj } = await supabase.from('fiches').update(sansNumero).eq('id', dejaLa[0].id).select();
+            if (eMaj) return res.status(500).json({ error: `Fiche ${dejaLa[0].id} : ${eMaj.message}` });
+            if (!majFiche || majFiche.length === 0) return res.status(404).json({ error: `Fiche ${dejaLa[0].id} introuvable — rien n'a été modifié.` });
+            continue;
+          }
+        }
+        let { error: ei } = await supabase.from('fiches').insert({ episode_id: req.params.id, ...colonnes, ...(idsLocaux.length > 0 ? { local_id: idsLocaux[0] } : {}) });
+        if (ei && ei.code === '23505') {
+          const { data: memeNumero } = await supabase.from('fiches').select('id, total_global, mode_paiement').eq('episode_id', req.params.id).eq('numero_fiche', colonnes.numero_fiche).limit(1);
+          const existante = memeNumero && memeNumero[0];
+          if (existante && Number(existante.total_global) === Number(colonnes.total_global) && (existante.mode_paiement || null) === (colonnes.mode_paiement || null)) continue; // même fiche, déjà enregistrée
+          const { data: derniere } = await supabase.from('fiches').select('numero_fiche').eq('episode_id', req.params.id).not('numero_fiche', 'is', null).order('numero_fiche', { ascending: false }).limit(1).maybeSingle();
+          ({ error: ei } = await supabase.from('fiches').insert({ episode_id: req.params.id, ...colonnes, numero_fiche: ((derniere && derniere.numero_fiche) || 0) + 1, ...(idsLocaux.length > 0 ? { local_id: idsLocaux[0] } : {}) }));
+        }
         if (ei) return res.status(500).json({ error: `Nouvelle fiche : ${ei.message}` });
       }
     }
