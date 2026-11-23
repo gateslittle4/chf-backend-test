@@ -1,6 +1,6 @@
 // tests/aides/fauxSupabase.js — mini Supabase en mémoire pour tester les routes (select/insert/upsert/update/delete, filtres usuels, rpc).
 // Simule aussi une base « pas encore migrée » : colonnesAbsentes = { table: [colonnes] } → 42703 ; tablesAbsentes = [tables] → 42P01.
-function creerFauxSupabase(tables = {}, { rpcs = {}, colonnesAbsentes = {}, tablesAbsentes = [] } = {}) {
+function creerFauxSupabase(tables = {}, { rpcs = {}, colonnesAbsentes = {}, tablesAbsentes = [], uniques = {} } = {}) {
   let compteur = 0;
   const journal = [];
   const lignes = (nom) => (tables[nom] = tables[nom] || []);
@@ -19,6 +19,7 @@ function creerFauxSupabase(tables = {}, { rpcs = {}, colonnesAbsentes = {}, tabl
       neq(c, v) { etat.filtres.push(l => l[c] !== v); return q; },
       is(c, v) { etat.filtres.push(l => (v === null ? (l[c] === null || l[c] === undefined) : l[c] === v)); return q; },
       in(c, liste) { etat.filtres.push(l => liste.includes(l[c])); return q; },
+      not(c, op, v) { etat.filtres.push(l => (op === 'is' && v === null ? (l[c] !== null && l[c] !== undefined) : l[c] !== v)); return q; },
       gte(c, v) { etat.filtres.push(l => l[c] >= v); return q; },
       order(c, o = {}) { etat.tri = { c, asc: o.ascending !== false }; return q; },
       limit(n) { etat.limite = n; return q; },
@@ -39,6 +40,12 @@ function creerFauxSupabase(tables = {}, { rpcs = {}, colonnesAbsentes = {}, tabl
       const correspond = (l) => etat.filtres.every(f => f(l));
       let data;
       if (etat.op === 'insert') {
+        // uniques : { table: [['col1', 'col2'], ...] } → une insertion qui répète une combinaison déjà présente échoue en 23505, comme la vraie contrainte UNIQUE.
+        for (const v of (Array.isArray(etat.valeur) ? etat.valeur : [etat.valeur])) {
+          for (const cles of (uniques[nom] || [])) {
+            if (cles.every(c => v[c] !== null && v[c] !== undefined) && t.some(l => cles.every(c => l[c] === v[c]))) return { data: null, error: { code: '23505', message: `duplicate key value violates unique constraint "${nom}_${cles.join('_')}_key"` } };
+          }
+        }
         const ajout = (Array.isArray(etat.valeur) ? etat.valeur : [etat.valeur]).map(v => ({ id: v.id || `${nom}-${++compteur}`, ...v }));
         ajout.forEach(l => t.push(l)); data = ajout;
       } else if (etat.op === 'upsert') {
