@@ -104,6 +104,7 @@ POST /api/requisitions/retour
 POST /api/stock/ajouter
 POST /api/stock/ajouter-don
 POST /api/stock/decrementer-dons
+POST /api/stock/retirer-don
 PATCH /api/stock/:id
 POST /api/admin/users
 DELETE /api/admin/users/:uid
