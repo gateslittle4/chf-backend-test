@@ -505,13 +505,22 @@ app.patch('/api/autres-revenus/:id/annuler', async (req, res) => {
   if (erreurLecture) return res.status(500).json({ error: erreurLecture.message });
   if (!revenu) return res.status(404).json({ error: 'Autre revenu introuvable.' });
   if (revenu.annule) return res.status(400).json({ error: 'Cet autre revenu est déjà annulé.' });
-  if (revenu.caissier_uid === req.user.id) return res.status(403).json({ error: "Tu ne peux pas annuler un revenu que tu as toi-même enregistré : demande à la direction." });
+  // 24/11 (Esdras) : « permets à l'administrateur de supprimer n'importe ce qu'il a fait lui-même » — la règle « pas son propre revenu » reste pour tous les autres rôles ; l'administrateur (compte actif) peut annuler le sien,
+  // avec le même motif obligatoire et une ligne dédiée dans le journal d'audit.
+  let annuleParSonAuteurAdministrateur = false;
+  if (revenu.caissier_uid === req.user.id) {
+    const { data: profilAdmin } = await supabase.from('users').select('role, active').eq('id', req.user.id).maybeSingle();
+    if (!(profilAdmin && profilAdmin.role === 'administrateur' && profilAdmin.active !== false)) {
+      return res.status(403).json({ error: "Tu ne peux pas annuler un revenu que tu as toi-même enregistré : demande à la direction." });
+    }
+    annuleParSonAuteurAdministrateur = true;
+  }
   const { data, error } = await supabase.from('autres_revenus')
     .update({ annule: true, annule_par: req.user.email || req.user.id, annule_par_uid: req.user.id, annule_le: new Date().toISOString(), motif_annulation: motif })
     .eq('id', req.params.id).eq('annule', false).select();
   if (error) return res.status(500).json({ error: error.message });
   if (!data || data.length === 0) return res.status(409).json({ error: 'Cet autre revenu vient d\'être annulé par quelqu\'un d\'autre.' });
-  await enregistrerAuditServeur(req, 'autre_revenu_annule', { id: revenu.id, montant: revenu.montant, motif: revenu.motif, motifAnnulation: motif });
+  await enregistrerAuditServeur(req, 'autre_revenu_annule', { id: revenu.id, montant: revenu.montant, motif: revenu.motif, motifAnnulation: motif, ...(annuleParSonAuteurAdministrateur ? { par_son_auteur_administrateur: true } : {}) });
   res.json(data[0]);
 });
 
@@ -532,8 +541,15 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
   // caisse_travailler — ne doit jamais pouvoir encaisser en cash puis annuler pour empocher).
   // traite_par_uid absent (ex: paiement d'exonération) = pas de vérification possible, on laisse
   // passer plutôt que de bloquer une annulation légitime sans piste d'identification.
+  // 24/11 (Esdras) : « permets à l'administrateur de supprimer n'importe ce qu'il a fait lui-même » — la règle reste pour tous les autres rôles (direction comprise) ; l'administrateur (compte actif) peut annuler ce qu'il a
+  // lui-même encaissé, avec le même motif obligatoire et une ligne dédiée dans le journal d'audit.
+  let annuleParSonAuteurAdministrateur = false;
   if (paiement.traite_par_uid && paiement.traite_par_uid === req.user.id) {
-    return res.status(403).json({ error: "Impossible d'annuler une transaction que vous avez vous-même encaissée — demande à quelqu'un d'autre." });
+    const { data: profilAdmin } = await supabase.from('users').select('role, active').eq('id', req.user.id).maybeSingle();
+    if (!(profilAdmin && profilAdmin.role === 'administrateur' && profilAdmin.active !== false)) {
+      return res.status(403).json({ error: "Impossible d'annuler une transaction que vous avez vous-même encaissée — demande à quelqu'un d'autre." });
+    }
+    annuleParSonAuteurAdministrateur = true;
   }
 
   const { data, error } = await supabase
@@ -543,6 +559,7 @@ app.patch('/api/paiements/:id/annuler', async (req, res) => {
     .select()
     .single();
   if (error) return res.status(500).json({ error: error.message });
+  if (annuleParSonAuteurAdministrateur) await enregistrerAuditServeur(req, 'paiement_annule_par_son_auteur_administrateur', { paiement_id: data.id, numero_paiement: data.numero_paiement, montant: data.montant, mode: data.mode, motif });
   res.json(data);
 });
 
