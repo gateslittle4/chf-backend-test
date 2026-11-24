@@ -655,4 +655,43 @@ app.post('/api/credits-anterieurs', async (req, res) => {
   enregistrerAuditServeur(req, 'credit_anterieur_enregistre', { dossier_id: dossier.id, patient: dossier.nom, episode_id: episode.id, montant, date_credit: iso, note: note || null });
   res.status(201).json({ paiement, episode_id: episode.id });
 });
+// 24/11 (Esdras) : « permets aussi à l'administrateur de supprimer un crédit — si la personne a déjà payé un crédit que je ne savais pas, je dois le supprimer sans entrer de fonds dans la caisse ».
+// Supprime un crédit EXISTANT (saisi par POST /api/credits-anterieurs) : son paiement à crédit est ANNULÉ (la trace reste, avec le motif) et son épisode part à la corbeille. Aucun paiement n'est créé : pas un seul gourde n'entre
+// dans le tiroir (un remboursement de crédit, lui, y entrerait). Réservé à l'ADMINISTRATEUR. Refusé si un versement a déjà été enregistré sur ce crédit (cet argent est dans la caisse : l'annuler d'abord, depuis la transaction).
+// Une dette de SOINS (fiche à crédit) ne se supprime pas ici : elle se pardonne (« Exonérer cette créance »).
+app.post('/api/credits-anterieurs/:id/supprimer', async (req, res) => {
+  const { data: profilAdmin } = await supabase.from('users').select('role, active').eq('id', req.user.id).maybeSingle();
+  if (!(profilAdmin && profilAdmin.role === 'administrateur' && profilAdmin.active !== false)) {
+    return res.status(403).json({ error: "Réservé à l'administrateur : supprimer un crédit.", code: 'ADMINISTRATEUR_REQUIS' });
+  }
+  if (!estUnVraiUuid(req.params.id)) return res.status(400).json({ error: 'Épisode du crédit invalide.', code: 'EPISODE_INVALIDE' });
+  const motif = typeof (req.body && req.body.motif) === 'string' ? req.body.motif.trim() : '';
+  if (motif.length < 5) return res.status(400).json({ error: "Écris le motif de la suppression (5 caractères au moins).", code: 'MOTIF_REQUIS' });
+  if (motif.length > 300) return res.status(400).json({ error: 'Motif trop long (300 caractères au maximum).', code: 'MOTIF_TROP_LONG' });
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').select('id, dossier_id, type_consultation, supprime_le').eq('id', req.params.id).maybeSingle();
+  if (erreurEpisode) return res.status(500).json({ error: erreurEpisode.message });
+  if (!episode) return res.status(404).json({ error: 'Crédit introuvable.', code: 'INTROUVABLE' });
+  if (episode.type_consultation !== 'Crédit antérieur') {
+    return res.status(400).json({ error: "Seul un crédit existant (saisi comme « crédit antérieur ») se supprime ici. Une dette de soins se pardonne avec « Exonérer cette créance ».", code: 'PAS_UN_CREDIT_ANTERIEUR' });
+  }
+  const { data: paiements, error: erreurPaiements } = await supabase.from('paiements').select('*').eq('episode_id', episode.id).eq('annule', false);
+  if (erreurPaiements) return res.status(500).json({ error: erreurPaiements.message });
+  const valides = (paiements || []).filter(p => !p.supprime_le);
+  if (episode.supprime_le || valides.length === 0) return res.status(400).json({ error: 'Ce crédit est déjà supprimé.', code: 'DEJA_SUPPRIME' });
+  const versement = valides.find(p => p.mode === 'remboursement_credit');
+  if (versement) {
+    return res.status(409).json({ error: `Un versement a déjà été enregistré sur ce crédit (transaction n° ${versement.numero_paiement}) : annule-le d'abord, puis supprime le crédit.`, code: 'VERSEMENT_EXISTANT' });
+  }
+  const dette = Math.max(...valides.map(p => Number(p.solde_restant) || 0), 0);
+  const { data: annules, error: erreurAnnulation } = await supabase.from('paiements')
+    .update({ annule: true, annule_par: req.user.email || req.user.id, annule_par_uid: req.user.id, annule_le: new Date().toISOString(), motif_annulation: `Crédit supprimé — ${motif}` })
+    .eq('episode_id', episode.id).eq('annule', false).select();
+  if (erreurAnnulation) return res.status(500).json({ error: erreurAnnulation.message });
+  if (!annules || annules.length === 0) return res.status(409).json({ error: 'Ce crédit vient d\'être modifié par quelqu\'un d\'autre : recharge la page.', code: 'CONFLIT' });
+  const { error: erreurCorbeille } = await supabase.from('episodes').update({ supprime_le: new Date().toISOString() }).eq('id', episode.id).select();
+  if (erreurCorbeille) console.warn('Crédit supprimé, mais son épisode n\'a pas pu être mis à la corbeille :', erreurCorbeille.message);
+  const { data: dossier } = await supabase.from('dossiers').select('nom').eq('id', episode.dossier_id).maybeSingle();
+  await enregistrerAuditServeur(req, 'credit_anterieur_supprime', { episode_id: episode.id, dossier_id: episode.dossier_id, patient: (dossier && dossier.nom) || null, montant: dette, motif, paiements_annules: annules.length });
+  res.json({ success: true, episode_id: episode.id, montant_supprime: dette });
+});
 }; // @enveloppe
