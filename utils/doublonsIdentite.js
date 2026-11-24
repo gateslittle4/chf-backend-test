@@ -21,29 +21,73 @@ const TAILLE_MAX_GROUPE_COUPLES = 200; // les groupes « couple de mots + année
 
 const JETONS_BEBE = new Set(['bebe', 'bb', 'baby']);
 
-function distance(a, b) {
+// Distance de Levenshtein, deux lignes réutilisées (aucune allocation par appel). `borne` (facultatif) : dès que la distance dépasse `borne` on s'arrête et on renvoie borne + 1 — utile
+// quand seul compte « est-ce assez proche ? » (voir ratio). Sans borne, la distance exacte.
+let ligneA = new Int32Array(64), ligneB = new Int32Array(64);
+function distance(a, b, borne = Infinity) {
   if (a === b) return 0;
   if (!a.length) return b.length;
   if (!b.length) return a.length;
-  let prec = Array.from({ length: b.length + 1 }, (_, j) => j);
+  if (Math.abs(a.length - b.length) > borne) return borne + 1;
+  if (ligneA.length < b.length + 1) { ligneA = new Int32Array(b.length + 1); ligneB = new Int32Array(b.length + 1); }
+  let prec = ligneA, cour = ligneB;
+  for (let j = 0; j <= b.length; j++) prec[j] = j;
   for (let i = 1; i <= a.length; i++) {
-    const cour = [i];
+    cour[0] = i;
+    let minLigne = i;
+    const ca = a.charCodeAt(i - 1);
     for (let j = 1; j <= b.length; j++) {
-      cour[j] = Math.min(prec[j] + 1, cour[j - 1] + 1, prec[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      const v = Math.min(prec[j] + 1, cour[j - 1] + 1, prec[j - 1] + (ca === b.charCodeAt(j - 1) ? 0 : 1));
+      cour[j] = v;
+      if (v < minLigne) minLigne = v;
     }
-    prec = cour;
+    if (minLigne > borne) return borne + 1;
+    const t = prec; prec = cour; cour = t;
   }
   return prec[b.length];
 }
-const ratio = (a, b) => (a.length === 0 && b.length === 0 ? 1 : 1 - distance(a, b) / Math.max(a.length, b.length));
+// Ressemblance de deux mots (0..1). Seuls comptent les mots à 0,65 ou plus (voir similariteNoms) : au-delà de la distance qui ferait passer sous 0,65, on s'arrête et on renvoie 0.
+// Mémorisée par couple de mots : les mêmes prénoms et noms reviennent sans cesse d'un dossier à l'autre (le vocabulaire reste petit même avec 50 000 dossiers).
+const SEUIL_MOT = 0.65;
+const cacheRatio = new Map(); // mot le plus petit (ordre alphabétique) -> (autre mot -> ressemblance)
+let tailleCacheRatio = 0;
+const ratio = (a, b) => {
+  if (a.length === 0 && b.length === 0) return 1;
+  const [x, y] = a < b ? [a, b] : [b, a];
+  let ligne = cacheRatio.get(x);
+  if (ligne === undefined) { ligne = new Map(); cacheRatio.set(x, ligne); }
+  let r = ligne.get(y);
+  if (r === undefined) {
+    const longueur = Math.max(a.length, b.length);
+    const borne = Math.floor((1 - SEUIL_MOT) * longueur + 1e-9);
+    const dist = distance(a, b, borne);
+    r = dist > borne ? 0 : 1 - dist / longueur;
+    if (tailleCacheRatio > 300000) { cacheRatio.clear(); tailleCacheRatio = 0; ligne = new Map(); cacheRatio.set(x, ligne); }
+    ligne.set(y, r); tailleCacheRatio++;
+  }
+  return r;
+};
 
-const jetons = (nom) => jetonsDuNom(nom).split(' ').filter(Boolean);
+// Le découpage d'un nom en mots (accents, majuscules, ponctuation) est refait pour CHAQUE paire comparée : on le garde en mémoire, une fois par nom.
+const cacheJetons = new Map();
+function infosNom(nom) {
+  const k = String(nom);
+  let v = cacheJetons.get(k);
+  if (!v) {
+    const liste = jetonsDuNom(nom).split(' ').filter(Boolean);
+    v = { liste, sansBebe: liste.filter(t => !JETONS_BEBE.has(t)), bebe: liste.some(t => JETONS_BEBE.has(t)) };
+    if (cacheJetons.size > 200000) cacheJetons.clear();
+    cacheJetons.set(k, v);
+  }
+  return v;
+}
+const jetons = (nom) => infosNom(nom).liste;
 const sansBebe = (liste) => liste.filter(t => !JETONS_BEBE.has(t));
-const estBebe = (nom) => jetons(nom).some(t => JETONS_BEBE.has(t));
+const estBebe = (nom) => infosNom(nom).bebe;
 
 // Ressemblance de deux noms (0..1) : chaque mot du plus court est apparié à son meilleur mot de l'autre (≥ 0,65 de ressemblance : Joseph ≈ Josef), sans ordre.
 function similariteNoms(nomA, nomB) {
-  const a = sansBebe(jetons(nomA)), b = sansBebe(jetons(nomB));
+  const a = infosNom(nomA).sansBebe, b = infosNom(nomB).sansBebe;
   if (!a.length || !b.length) return 0;
   const [court, long] = a.length <= b.length ? [a, b] : [b, a];
   const restants = [...long];
@@ -73,7 +117,18 @@ function normaliserTel(tel) {
   return chiffres.length >= 8 ? chiffres.slice(-8) : '';
 }
 
-const annees = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / (365.25 * 86400000) : null; };
+const cacheAnnees = new Map();
+const annees = (iso) => {
+  const brut = iso || '';
+  let v = cacheAnnees.get(brut);
+  if (v === undefined) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(brut));
+    v = m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / (365.25 * 86400000) : null;
+    if (cacheAnnees.size > 100000) cacheAnnees.clear();
+    cacheAnnees.set(brut, v);
+  }
+  return v;
+};
 const niveauDe = (score) => NIVEAUX.find(n => score >= n.min) || null;
 
 // Score d'une paire { score, niveau, raisons } — ou null si la paire est écartée par un garde-fou ou trop faible.
@@ -153,11 +208,12 @@ function* parcourirDoublons(dossiers, { ignores = new Set(), seuil = SEUIL_MIN, 
     if (indices.length < 2 || indices.length > (cleGroupe.startsWith('y:') ? TAILLE_MAX_GROUPE_COUPLES : TAILLE_MAX_GROUPE)) continue;
     for (let x = 0; x < indices.length; x++) {
       for (let y = x + 1; y < indices.length; y++) {
-        const a = liste[indices[x]], b = liste[indices[y]];
-        const k = cle(a, b);
-        if (vues.has(k)) continue;
-        vues.add(k);
-        if (ignores.has(k)) continue;
+        const ia = indices[x], ib = indices[y];
+        const kn = ia < ib ? ia * liste.length + ib : ib * liste.length + ia; // clé numérique de la paire (indices dans la liste) : bien moins coûteuse qu'une chaîne
+        if (vues.has(kn)) continue;
+        vues.add(kn);
+        const a = liste[ia], b = liste[ib];
+        if (ignores.size > 0 && ignores.has(cle(a, b))) continue;
         const r = scorePaire(a, b);
         if (r && r.score >= seuil) paires.push({ a, b, ...r });
         if (++comparaisons % pas === 0) yield;
