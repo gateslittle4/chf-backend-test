@@ -3,7 +3,7 @@
 // l'application Express et ses dépendances partagées (base, droits, journal d'audit, lecteurs communs) ; voir « montage des routes » dans server.js.
 const { validerPaiementPartiel, soldeAjouteParPaiement } = require('../utils/paiementPartiel');
 const { middlewareHeureServeur, appliquerHeureAuPaiement, estRejeu, ENTETE_HEURE } = require('../utils/heureServeur');
-const { validerMontantPaiement, normaliserMontant } = require('../utils/validationMontant');
+const { validerMontantPaiement, normaliserMontant, lireMontant, MONTANT_MAX, arrondi2 } = require('../utils/validationMontant');
 const { estFonctionAbsente, estRefusRemboursement, messageRefusRemboursement } = require('../utils/soldeAtomique');
 const { verifierTotalFiche, verifierPaiementContreFiche, MODES_VENTE } = require('../utils/verificationPrixFiche');
 const { lireReglagesDirection, exonerationMaxCaisse, plafondCredit, messageExonerationTropElevee, messagePlafondCredit } = require('../utils/reglagesDirection');
@@ -598,5 +598,61 @@ app.post('/api/episodes/:id/exonerer-creance', async (req, res) => {
     dette_apres: data && data.solde_restant != null ? Number(data.solde_restant) : null, par_la_direction: parLaDirection,
   });
   res.status(201).json(data);
+});
+// 24/11 (Esdras) : « un endroit où mettre un montant que la personne doit à l'hôpital, genre crédit, puisque c'est maintenant que j'ajoute les personnes, et certains ont un crédit qui n'a pas encore été passé dans le système ».
+// Un crédit ANTÉRIEUR (dette d'avant le système) : un épisode « Crédit antérieur » déjà fermé, portant un paiement à crédit de 0 Gdes dont le solde restant est le montant dû. Aucun argent n'entre dans la caisse (montant 0) :
+// la dette apparaît dans Caisse > Créances et dans la Fiche Patient, et se rembourse comme n'importe quel crédit (remboursement_credit sur cet épisode). `date_credit` (facultatif) : depuis quand la personne doit ; l'âge de la dette
+// se compte à partir de là. Réservé à ceux qui modifient la facturation (direction, comptable, administrateur) : ce n'est pas un geste de caisse. Idempotent par local_id (un rejeu de la file hors ligne ne double pas la dette).
+app.post('/api/credits-anterieurs', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'facturation_modifier')) && !(await aPermission(req.user.id, 'demandes_repondre'))) {
+    return res.status(403).json({ error: "Permission 'facturation_modifier' requise pour enregistrer un crédit antérieur." });
+  }
+  const corps = req.body || {};
+  const dossierId = corps.dossier_id || corps.dossierId;
+  const local_id = corps.local_id || corps.localId || null;
+  if (!estUnVraiUuid(dossierId)) return res.status(400).json({ error: 'dossier_id (identifiant du dossier) requis.', code: 'DOSSIER_INVALIDE' });
+  const montantLu = lireMontant(corps.montant);
+  if (montantLu === null || !(montantLu > 0)) return res.status(400).json({ error: 'Le montant du crédit doit être un nombre supérieur à 0.', code: 'MONTANT_INVALIDE' });
+  if (montantLu > MONTANT_MAX) return res.status(400).json({ error: `Le montant dépasse la limite autorisée (${MONTANT_MAX.toLocaleString('fr-FR')} Gdes).`, code: 'MONTANT_INVALIDE' });
+  const montant = arrondi2(montantLu);
+  const note = typeof corps.note === 'string' ? corps.note.trim() : '';
+  if (note.length > 300) return res.status(400).json({ error: 'La note est trop longue (300 caractères au plus).', code: 'NOTE_TROP_LONGUE' });
+  let dateCredit = new Date();
+  if (corps.date_credit !== undefined && corps.date_credit !== null && corps.date_credit !== '') {
+    const d = new Date(corps.date_credit);
+    if (Number.isNaN(d.getTime())) return res.status(400).json({ error: 'La date du crédit est illisible.', code: 'DATE_INVALIDE' });
+    if (d.getTime() > Date.now() + 24 * 3600 * 1000) return res.status(400).json({ error: 'La date du crédit ne peut pas être dans le futur.', code: 'DATE_INVALIDE' });
+    dateCredit = d;
+  }
+  if (local_id) {
+    const { data: dejaLa } = await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle();
+    if (dejaLa) return res.status(200).json({ paiement: dejaLa, episode_id: dejaLa.episode_id, deja_applique: true });
+  }
+  const { data: dossier, error: erreurDossier } = await supabase.from('dossiers').select('id, nom, fusionne_dans').eq('id', dossierId).maybeSingle();
+  if (erreurDossier) return res.status(500).json({ error: erreurDossier.message });
+  if (!dossier) return res.status(404).json({ error: 'Dossier introuvable.', code: 'DOSSIER_INTROUVABLE' });
+  if (dossier.fusionne_dans) return res.status(400).json({ error: 'Ce dossier a été fusionné dans un autre : enregistre le crédit sur le dossier conservé.', code: 'DOSSIER_FUSIONNE' });
+  let par = req.user.email || String(req.user.id);
+  try { const { data: u } = await supabase.from('users').select('display_name').eq('id', req.user.id).maybeSingle(); if (u && u.display_name) par = u.display_name; } catch (e) { /* le nom est un confort */ }
+  const iso = dateCredit.toISOString();
+  const { data: episode, error: erreurEpisode } = await supabase.from('episodes').insert({
+    dossier_id: dossier.id, voie_entree: 'consultation', type_consultation: 'Crédit antérieur', type_patient: 'prive', statut: 'ferme', est_hospitalisation: false,
+    date_ouverture: iso, date_fermeture: iso, local_id: local_id ? `${local_id}-episode` : null,
+  }).select().single();
+  if (erreurEpisode) return res.status(500).json({ error: `Crédit antérieur : ${erreurEpisode.message}` });
+  const { data: paiement, error: erreurPaiement } = await supabase.from('paiements').insert({
+    episode_id: episode.id, mode: 'credit', montant: 0, solde_restant: montant, date_paiement: iso, patient_nom: dossier.nom, type_patient: 'prive',
+    encaisse_par: par, traite_par_uid: String(req.user.id), details: { credit_anterieur: true, note: note || null }, local_id: local_id || null,
+  }).select().single();
+  if (erreurPaiement) {
+    await supabase.from('episodes').delete().eq('id', episode.id); // pas d'épisode vide laissé derrière
+    if (erreurPaiement.code === '23505' && local_id) {
+      const { data: existant } = await supabase.from('paiements').select('*').eq('local_id', local_id).maybeSingle();
+      if (existant) return res.status(200).json({ paiement: existant, episode_id: existant.episode_id, deja_applique: true });
+    }
+    return res.status(500).json({ error: `Crédit antérieur : ${erreurPaiement.message}` });
+  }
+  enregistrerAuditServeur(req, 'credit_anterieur_enregistre', { dossier_id: dossier.id, patient: dossier.nom, episode_id: episode.id, montant, date_credit: iso, note: note || null });
+  res.status(201).json({ paiement, episode_id: episode.id });
 });
 }; // @enveloppe
