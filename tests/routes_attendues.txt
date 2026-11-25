@@ -89,6 +89,7 @@ PATCH /api/autres-revenus/:id/annuler
 PATCH /api/paiements/:id/annuler
 POST /api/episodes/:id/exonerer-creance
 POST /api/credits-anterieurs
+POST /api/credits-anterieurs/:id/supprimer
 POST /api/episodes/:id/transferer-partenaire
 POST /api/episodes/:id/rembourser-transferer-partenaire
 POST /api/lots/prochain-numero
