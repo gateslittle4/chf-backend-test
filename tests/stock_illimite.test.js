@@ -77,3 +77,21 @@ test('routes/stock.js enveloppe son client de base avec le réglage, sur une lig
   assert.match(src, /^supabase = avecStockIllimite\(supabase\); \/\/ @enveloppe$/m);
   assert.match(src, /const \{ avecStockIllimite \} = require\('\.\.\/utils\/stockIllimite'\);/);
 });
+
+test("25/11 : le retour d'un service vers la pharmacie (« -retour ») est un vrai transfert, même en mode illimité ; annulation et modification de réquisition restent sans effet", async () => {
+  const { supabase, appels } = baseSimulee({ stockIllimite: true });
+  const s = avecStockIllimite(supabase);
+  assert.strictEqual(estUnMouvementDeStock('transferer_stock_service', { p_local_id: 'abc-retour' }), false);
+  await s.rpc('transferer_stock_service', { p_service: 'Urgences', p_lignes: [{ id: 'm1', qte: -3 }], p_local_id: 'abc-retour' });
+  assert.strictEqual(appels.length, 1, 'le retour atteint la base');
+  assert.strictEqual(estUnMouvementDeStock('transferer_stock_service', { p_local_id: 'REQ-1-modif-xyz' }), true);
+  assert.strictEqual(estUnMouvementDeStock('transferer_stock_service', { p_local_id: 'REQ-1' }), true);
+  await s.rpc('transferer_stock_service', { p_service: 'Urgences', p_lignes: [{ id: 'm1', qte: 3 }], p_local_id: 'REQ-1' });
+  assert.strictEqual(appels.length, 1, 'la réquisition reste sans effet en mode illimité');
+});
+
+test("25/11 : la route de retour envoie toujours un identifiant « -retour » (même sans local_id)", () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stock.js'), 'utf8');
+  const route = src.slice(src.indexOf("app.post('/api/requisitions/retour'"));
+  assert.match(route.slice(0, 1500), /p_local_id: `\$\{local_id \|\| `\$\{Date\.now\(\)\}-\$\{Math\.random\(\)\.toString\(36\)\.slice\(2\)\}`\}-retour`/);
+});
