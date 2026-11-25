@@ -69,6 +69,10 @@ app.use('/api/paiements', async (req, res, next) => {
         if (fichesExpress && fichesExpress.length === 1) fiche = fichesExpress[0];
       }
     }
+    // 25/11 (Esdras : « il y a encore des non répartis »). Deux ventes Achat Express faites HORS LIGNE (24/11) arrivaient SANS fiche_id : le paiement n'était relié à aucune fiche, donc aucune catégorie
+    // (Consultation, Labo…) ne pouvait lui être attribuée et l'écran de caisse l'affichait en « Non réparti ». La fiche vient d'être retrouvée ci-dessus (même identifiant, ou fiche unique de l'épisode express) :
+    // on la rattache au paiement. (Une fiche supprimée n'est jamais rattachée.)
+    if (fiche && !fiche.supprime_le && !corps.fiche_id && !corps.ficheId) corps.fiche_id = fiche.id;
     // HORS LIGNE (rejeu de la file d'attente) : jamais refusé — l'argent est déjà pris et le reçu remis ; un refus ferait PERDRE la transaction (échec définitif dans la file du
     // téléphone). On enregistre et on SIGNALE à la direction (journal d'audit, action sensible). En ligne, le refus reste immédiat.
     const rejeu = estRejeu(req);
