@@ -376,7 +376,7 @@ app.post('/api/requisitions/retour', async (req, res) => {
   const motif = typeof req.body.motif === 'string' ? req.body.motif.trim().slice(0, 300) : '';
   const local_id = req.body.local_id || req.body.localId || null;
   const { data, error } = await supabase.rpc('transferer_stock_service', {
-    p_service: String(service).trim(), p_lignes: lignes.map(l => ({ id: l.id, qte: -Number(l.qte) })), p_local_id: local_id ? `${local_id}-retour` : null,
+    p_service: String(service).trim(), p_lignes: lignes.map(l => ({ id: l.id, qte: -Number(l.qte) })), p_local_id: `${local_id || `${Date.now()}-${Math.random().toString(36).slice(2)}`}-retour`, // toujours un identifiant « -retour » : il marque un vrai transfert (voir utils/stockIllimite.js)
   });
   if (error) {
     if (error.code === '42883') return res.status(500).json({ error: "La fonction SQL transferer_stock_service n'existe pas encore dans Supabase — colle stock_par_service.sql dans le SQL Editor." });

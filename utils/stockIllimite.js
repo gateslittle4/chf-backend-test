@@ -13,7 +13,11 @@ const MARQUES_REQUISITION = /-annulation-|-modif-/;
 // 23/11 : un retrait de stock donné VOULU par la direction (POST /api/stock/retirer-don, identifiant « -retrait-don ») sort vraiment le stock, même en mode illimité : ce n'est pas une vente.
 const MARQUE_RETRAIT_DON = /-retrait-don/;
 const estUnRetraitDeDon = (nom, params) => nom === 'decrementer_stock_dons' && !!params && typeof params.p_local_id === 'string' && MARQUE_RETRAIT_DON.test(params.p_local_id);
-const estUnMouvementDeStock = (nom, params) => (FONCTIONS_QUI_BOUGENT.has(nom) && !estUnRetraitDeDon(nom, params))
+// 25/11 (Esdras : « le retour à la pharmacie d'un stock du service Urgences ne fonctionne pas ») : le retour d'un service (POST /api/requisitions/retour, identifiant « -retour »)
+// est un VRAI transfert voulu par la pharmacie en chef — le stock du service baisse, celui de la pharmacie remonte — même en mode illimité. Avant, il « réussissait » sans rien bouger.
+const MARQUE_RETOUR_SERVICE = /-retour$/;
+const estUnRetourDeService = (nom, params) => nom === 'transferer_stock_service' && !!params && typeof params.p_local_id === 'string' && MARQUE_RETOUR_SERVICE.test(params.p_local_id);
+const estUnMouvementDeStock = (nom, params) => (FONCTIONS_QUI_BOUGENT.has(nom) && !estUnRetraitDeDon(nom, params) && !estUnRetourDeService(nom, params))
   || (nom === 'ajouter_stock_medicament' && !!params && typeof params.p_local_id === 'string' && MARQUES_REQUISITION.test(params.p_local_id));
 
 function avecStockIllimite(supabase) {
