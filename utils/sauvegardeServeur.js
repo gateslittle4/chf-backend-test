@@ -9,7 +9,7 @@ const TAILLE_LOT_RESTAURATION = 500;
 const TAILLE_LISTE_STORAGE = 1000;
 
 function creerServiceSauvegarde({
-  supabase, bucket, tables, clesPrimaires = {}, ordreRestauration, fuseau = 'America/Port-au-Prince',
+  supabase, bucket, tables, tablesFacultatives = [], clesPrimaires = {}, ordreRestauration, fuseau = 'America/Port-au-Prince',
   ouvrirCopieHorsSite = async () => null, journal = console, maintenant = () => new Date(),
   tailleTrancheMax = S.TAILLE_TRANCHE_MAX, taillePage = 500, tailleLotRestauration = TAILLE_LOT_RESTAURATION,
 }) {
@@ -73,6 +73,11 @@ function creerServiceSauvegarde({
         }
         infos[table] = { lignes, tranches };
       } catch (error) {
+        // Table facultative pas encore créée (script SQL pas encore appliqué) : rien à sauvegarder, ce n'est pas une panne. Toute autre erreur reste une panne.
+        if (tablesFacultatives.includes(table) && (['42P01', 'PGRST205'].includes(String(error.code)) || /does not exist|schema cache|could not find the table/i.test(String(error.message)))) {
+          journal.warn(`Sauvegarde : table facultative "${table}" pas encore créée — ignorée.`);
+          continue;
+        }
         journal.error(`⚠️ Sauvegarde : table "${table}" illisible — ${error.message}`);
         tablesEnEchec.push(`${table} (${error.message})`);
         if (envoyes.length > 0) { try { await stockage().remove(envoyes); } catch (_) { /* fichiers orphelins, sans manifeste ils ne servent à rien */ } }

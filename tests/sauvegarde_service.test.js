@@ -13,7 +13,7 @@ const serverSrc = require('./serveurSource').lireServeur();
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Fausse base : tables en mémoire (select / order / range / insert / update / eq) + Storage en mémoire. `.in()` n'existe PAS : l'appeler fait échouer le test.
 // ---------------------------------------------------------------------------------------------------------------------------------
-function fauxSupabase({ tables = {}, illisibles = [], refus = () => null, fichiers = new Map() } = {}) {
+function fauxSupabase({ tables = {}, illisibles = [], absentes = [], refus = () => null, fichiers = new Map() } = {}) {
   const appels = { order: [], insert: [] };
   const construire = (nom) => {
     let colonnes = '*', ordre = [], filtres = [], mode = 'select', lignesAInserer = [], maj = null;
@@ -25,6 +25,7 @@ function fauxSupabase({ tables = {}, illisibles = [], refus = () => null, fichie
       update(m) { mode = 'update'; maj = m; return q; },
       range: async (a, b) => {
         if (illisibles.includes(nom)) return { data: null, error: new Error('table illisible') };
+        if (absentes.includes(nom)) return { data: null, error: new Error(`relation "public.${nom}" does not exist`) };
         const lues = (tables[nom] || []).slice(a, b + 1).map(l => (colonnes === '*' ? { ...l } : Object.fromEntries(colonnes.split(',').map(c => [c, l[c]]))));
         return { data: lues, error: null };
       },
@@ -256,8 +257,22 @@ test("copie B2 : protocole natif (autorisation → bucket par nom → URL d'envo
   assert.match(serverSrc, /révocable seule/i, 'la clé B2 limitée à un bucket reste documentée');
 });
 
-test("câblage : les 22 tables sauvegardées incluent compteurs, doublons_ignores, migrations_appliquees, autres_revenus et receptions_medicaments", () => {
+test("câblage : les 23 tables sauvegardées incluent compteurs, doublons_ignores, migrations_appliquees, autres_revenus, receptions_medicaments et demandes_commande", () => {
   const sauvegardees = [...blocRoute('const TABLES_A_SAUVEGARDER = [', '];').matchAll(/'(\w+)'/g)].map(m => m[1]);
-  assert.strictEqual(sauvegardees.length, 22);
-  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees', 'autres_revenus', 'receptions_medicaments']) assert.ok(sauvegardees.includes(t), t);
+  assert.strictEqual(sauvegardees.length, 23);
+  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees', 'autres_revenus', 'receptions_medicaments', 'demandes_commande']) assert.ok(sauvegardees.includes(t), t);
+});
+
+test("sauvegarde : une table FACULTATIVE pas encore créée (SQL non appliqué) est ignorée sans faire échouer la vérification ; une table ordinaire absente reste une panne", async () => {
+  const facultative = fauxSupabase({ tables: donneesDepart(), absentes: ['compteurs'] });
+  const r = await service(facultative, { tablesFacultatives: ['compteurs'] }).sauvegarder();
+  assert.deepStrictEqual(r.tablesEnEchec, []);
+  assert.ok(r.verification.ok);
+  assert.strictEqual(r.nombreLignes.dossiers, 2500);
+  const ordinaire = fauxSupabase({ tables: donneesDepart(), absentes: ['compteurs'] });
+  const r2 = await service(ordinaire).sauvegarder();
+  assert.strictEqual(r2.tablesEnEchec.length, 1); assert.match(r2.tablesEnEchec[0], /^compteurs \(/);
+  const autreErreur = fauxSupabase({ tables: donneesDepart(), illisibles: ['compteurs'] });
+  const r3 = await service(autreErreur, { tablesFacultatives: ['compteurs'] }).sauvegarder();
+  assert.strictEqual(r3.tablesEnEchec.length, 1, 'une table facultative illisible pour une AUTRE raison reste une panne');
 });

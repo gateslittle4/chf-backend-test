@@ -543,4 +543,59 @@ app.patch('/api/stock/:id', async (req, res) => {
   }
   res.json({ success: true, item: data });
 });
+// ============================================================
+// Médicaments à commander (26/11, Esdras : « un onglet pour la pharmacienne en chef qui liste tous les médicaments en dessous du seuil, avec la quantité à commander, imprimer et envoyer à la direction »)
+//  - La pharmacienne en chef (droit stock_gerer) envoie la liste (médicament, stock, seuil, quantité à commander) : une ligne dans demandes_commande, gardée avec qui/quand.
+//  - La direction (droit direction_voir) la voit et la marque « commandée » ; rien ne change dans le stock : l'entrée de stock se fait toujours par l'onglet Réception.
+//  - Tant que sql/demandes_commande.sql n'est pas appliqué, la lecture renvoie une liste vide et l'envoi répond 503 avec la consigne.
+// ============================================================
+const tableCommandeAbsente = (e) => /demandes_commande/.test(String(e && e.message)) && /does not exist|schema cache|relation/.test(String(e && e.message));
+app.get('/api/demandes-commande', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer')) && !(await aPermission(req.user.id, 'direction_voir'))) {
+    return res.status(403).json({ error: "Permission 'stock_gerer' ou 'direction_voir' requise." });
+  }
+  try {
+    res.json(await lireToutesLesPages(() => supabase.from('demandes_commande').select('*').order('date_envoi', { ascending: false }).order('id')));
+  } catch (e) {
+    if (tableCommandeAbsente(e)) return res.json([]);
+    res.status(500).json({ error: e.message });
+  }
+});
+app.post('/api/demandes-commande', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'stock_gerer'))) return res.status(403).json({ error: "Permission 'stock_gerer' requise." });
+  const { lignes } = req.body;
+  if (!Array.isArray(lignes) || lignes.length === 0 || lignes.length > 200) return res.status(400).json({ error: 'lignes (1 à 200) requises.' });
+  const propres = [];
+  for (const l of lignes) {
+    if (!l || !l.id || !(Number(l.quantite) > 0) || Number(l.quantite) > 10000000) return res.status(400).json({ error: 'Chaque ligne a besoin d\'un médicament et d\'une quantité à commander supérieure à 0.' });
+    const nombre = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    propres.push({ id: String(l.id).slice(0, 100), nom: String(l.nom || l.id).slice(0, 200), stock: nombre(l.stock), seuil: nombre(l.seuil), quantite: Number(l.quantite) });
+  }
+  const local_id = req.body.local_id || req.body.localId || null;
+  const note = typeof req.body.note === 'string' && req.body.note.trim() ? req.body.note.trim().slice(0, 300) : null;
+  if (local_id) {
+    const { data: deja } = await supabase.from('demandes_commande').select('*').eq('local_id', local_id).maybeSingle();
+    if (deja) return res.status(200).json({ success: true, demande: deja, deja_enregistree: true }); // rejeu hors ligne : déjà envoyée
+  }
+  const { data, error } = await supabase.from('demandes_commande').insert({
+    lignes: propres, note, envoyee_par: req.user.email || req.user.id, envoyee_par_uid: req.user.id, local_id,
+  }).select().single();
+  if (error) {
+    if (tableCommandeAbsente(error)) return res.status(503).json({ error: "L'envoi à la direction n'est pas encore activé : colle demandes_commande.sql dans le SQL Editor de Supabase." });
+    if (error.code === '23505' && local_id) return res.status(200).json({ success: true, deja_enregistree: true });
+    return res.status(500).json({ error: error.message });
+  }
+  await enregistrerAuditServeur(req, 'demande_commande_envoyee', { lignes: propres.map(l => ({ id: l.id, quantite: l.quantite })), note });
+  res.status(201).json({ success: true, demande: data });
+});
+app.patch('/api/demandes-commande/:id/commandee', async (req, res) => {
+  if (!(await aPermission(req.user.id, 'direction_voir'))) return res.status(403).json({ error: "Permission 'direction_voir' requise." });
+  const { data, error } = await supabase.from('demandes_commande')
+    .update({ statut: 'commandee', traitee_par: req.user.email || req.user.id, traitee_par_uid: req.user.id, traitee_le: new Date().toISOString() })
+    .eq('id', req.params.id).eq('statut', 'envoyee').select().maybeSingle();
+  if (error) return res.status(tableCommandeAbsente(error) ? 503 : 500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Demande introuvable, ou déjà marquée comme commandée.' });
+  await enregistrerAuditServeur(req, 'demande_commande_traitee', { id: req.params.id });
+  res.json({ success: true, demande: data });
+});
 }; // @enveloppe
