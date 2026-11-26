@@ -108,6 +108,9 @@ POST /api/stock/ajouter-don
 POST /api/stock/decrementer-dons
 POST /api/stock/retirer-don
 PATCH /api/stock/:id
+GET /api/demandes-commande
+POST /api/demandes-commande
+PATCH /api/demandes-commande/:id/commandee
 POST /api/admin/users
 DELETE /api/admin/users/:uid
 POST /api/admin/generer-lien-reinitialisation
