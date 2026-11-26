@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { creerServiceSauvegarde } = require('../utils/sauvegardeServeur');
 const { fermerPostesExpires } = require('../utils/fermetureAutoPostes');
 const { creerMiddlewareIdempotence, purgerClesIdempotence } = require('../utils/idempotence');
+const { lireReglagesDirection, joursCorbeille } = require('../utils/reglagesDirection');
 
 module.exports = function monterSauvegarde(app, { BUCKET_PIECES_JOINTES, FUSEAU_HAITI, aPermission, envoyerCallMeBot, lancerSurveillanceQualite, supabase, surveillanceQualite, synchroListes }) { // @enveloppe
 // ============================================================
@@ -307,10 +308,12 @@ setTimeout(() => { fermerPostesExpires({ supabase }); }, 20000).unref();
 const JOURS_CORBEILLE_CATALOGUE = 30;
 async function purgerCorbeilleCatalogue() {
   const resultats = { medicaments: 0, actes: 0 };
+  // 26/11 (Esdras) : la durée est un réglage de la direction (Paramètres > joursCorbeille, 7 à 365) ; absent ou illisible : 30 jours (JOURS_CORBEILLE_CATALOGUE).
+  const jours = joursCorbeille(await lireReglagesDirection(supabase), JOURS_CORBEILLE_CATALOGUE);
   for (const type of ['medicaments', 'actes']) {
     const { data: ligne, error } = await supabase.from('catalog').select('items').eq('type', type).maybeSingle();
     if (error || !ligne) continue;
-    const limite = Date.now() - JOURS_CORBEILLE_CATALOGUE * 86400000;
+    const limite = Date.now() - jours * 86400000;
     const aPurger = (ligne.items || []).filter(i => i.supprimeLe && new Date(i.supprimeLe).getTime() < limite);
     for (const item of aPurger) {
       const { error: erreurSuppr } = await supabase.rpc('supprimer_article_catalogue', { p_type: type, p_id: item.id });
@@ -331,7 +334,9 @@ async function purgerCorbeilleCatalogue() {
 // fichier intact exprès : voir la route DELETE pieces-jointes plus haut).
 const JOURS_CORBEILLE_DOSSIERS = 30;
 async function purgerCorbeilleDossiers() {
-  const limite = new Date(Date.now() - JOURS_CORBEILLE_DOSSIERS * 86400000).toISOString();
+  // 26/11 (Esdras) : même réglage que la corbeille du catalogue (Paramètres > joursCorbeille) ; absent ou illisible : 30 jours (JOURS_CORBEILLE_DOSSIERS).
+  const jours = joursCorbeille(await lireReglagesDirection(supabase), JOURS_CORBEILLE_DOSSIERS);
+  const limite = new Date(Date.now() - jours * 86400000).toISOString();
   const resultats = { episodes: 0, fiches: 0, piecesJointes: 0 };
 
   const { data: episodesPurges, error: erreurEpisodes } = await supabase

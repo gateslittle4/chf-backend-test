@@ -5,8 +5,9 @@
 //   plafondCreditEpisode (0)               plus grosse dette (en gourdes) qu'un épisode peut porter après un crédit ou un paiement partiel de la caisse ; 0 = pas de limite. La direction n'est pas limitée.
 //   fermetureAutoPostes (true)             false : plus aucun poste n'est fermé automatiquement — chaque personne ferme le sien après avoir compté l'argent (28/10, Esdras).
 //   stockIllimite (false)                  true : le stock ne bloque jamais une vente ni une réquisition et ses quantités ne bougent plus (17/11, Esdras : « met tous les stocks de façon infinie pour l'instant »). Voir utils/stockIllimite.js.
+//   joursCorbeille (30)                    nombre de jours (7 à 365) pendant lesquels un dossier, une fiche, une pièce jointe, un médicament ou un acte supprimé reste récupérable dans la corbeille ; après, la purge quotidienne le supprime pour de bon (26/11, Esdras).
 //   heureFinPosteJour (16), heureFinPosteNuit (8)   heures d'Haïti (0 à 23) où un poste oublié ouvert est fermé automatiquement (voir utils/fermetureAutoPostes.js).
-const DEFAUTS = { exonerationPourcentageMaxCaisse: 100, plafondCreditEpisode: 0, fermetureAutoPostes: true, heureFinPosteJour: 16, heureFinPosteNuit: 8 };
+const DEFAUTS = { exonerationPourcentageMaxCaisse: 100, plafondCreditEpisode: 0, fermetureAutoPostes: true, heureFinPosteJour: 16, heureFinPosteNuit: 8, joursCorbeille: 30 };
 
 async function lireReglagesDirection(supabase) {
   try {
@@ -35,7 +36,10 @@ function heuresFinPoste(reglages) {
   };
 }
 
+// Durée de la corbeille : valeur absente ou illisible = 30 jours (jamais plus court par accident : une purge est irréversible) ; réglage valide = entier de 7 à 365.
+const joursCorbeille = (reglages, defaut = DEFAUTS.joursCorbeille) => nombreOuDefaut(reglages && reglages.joursCorbeille, defaut, { min: 7, max: 365, entier: true });
+
 const messageExonerationTropElevee = (pourcentage, max) => `La caisse peut accorder une exonération de ${max} % au plus (demandée : ${pourcentage} %). Au-delà, la direction doit l'accorder.`;
 const messagePlafondCredit = (dette, plafond) => `Cette fiche laisserait ${dette} Gdes à crédit sur cet épisode ; la limite fixée par la direction est de ${plafond} Gdes. Encaisse davantage maintenant, ou demande à la direction.`;
 
-module.exports = { DEFAUTS, lireReglagesDirection, nombreOuDefaut, exonerationMaxCaisse, plafondCredit, heuresFinPoste, fermetureAutoActive, stockIllimiteActif, messageExonerationTropElevee, messagePlafondCredit };
+module.exports = { DEFAUTS, lireReglagesDirection, nombreOuDefaut, exonerationMaxCaisse, plafondCredit, heuresFinPoste, joursCorbeille, fermetureAutoActive, stockIllimiteActif, messageExonerationTropElevee, messagePlafondCredit };
