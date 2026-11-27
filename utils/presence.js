@@ -19,9 +19,28 @@ function bornesJourHaiti(jour) {
   return null;
 }
 
+// Version de l'application que le navigateur fait tourner (27/11, Esdras : « savoir quelle version chaque utilisateur a, pour voir si un poste a bien téléchargé une version que j'ai ajoutée »).
+// L'app envoie, avec chaque requête, X-App-Version (identifiant de la version : le commit déployé) et X-App-Build (date de construction, ISO). Valeurs vérifiées : tout ce qui n'a pas la bonne forme est ignoré.
+const RE_VERSION = /^[A-Za-z0-9._-]{1,64}$/;
+function lireVersionApp(req) {
+  try {
+    const h = (req && req.headers) || {};
+    const version = String(h['x-app-version'] || '').trim();
+    if (!RE_VERSION.test(version) || version === 'dev') return null;
+    const brut = String(h['x-app-build'] || '').trim();
+    const t = Date.parse(brut);
+    return { version, build: Number.isFinite(t) ? new Date(t).toISOString() : null };
+  } catch (_) { return null; }
+}
+const ERREURS_COLONNE_ABSENTE = ['42703', 'PGRST204'];
+
 // Marque l'activité d'un compte au plus une fois par minute (mémoire du serveur), sans jamais bloquer la requête.
+// La version de l'app est notée dans la même cadence, SEULEMENT quand elle change (ou après un redémarrage du serveur), dans une écriture à part : si les colonnes version_app / version_build
+// n'existent pas encore (sql/version_app_utilisateurs.sql pas appliqué), cette écriture échoue sans conséquence et l'activité continue d'être suivie ; nouvel essai toutes les 10 minutes.
 function creerSuiviActivite(supabase, { intervalleMs = 60000, maintenant = () => Date.now() } = {}) {
   const dernier = new Map();
+  const versionNotee = new Map();
+  let prochainEssaiVersion = 0;
   return function suivreActivite(req, res, next) {
     try {
       const id = req.user && req.user.id;
@@ -30,6 +49,18 @@ function creerSuiviActivite(supabase, { intervalleMs = 60000, maintenant = () =>
         dernier.set(id, t);
         Promise.resolve(supabase.from('users').update({ derniere_activite: new Date(t).toISOString() }).eq('id', id))
           .catch(() => {});
+        const v = lireVersionApp(req);
+        if (v && versionNotee.get(id) !== v.version && t >= prochainEssaiVersion) {
+          versionNotee.set(id, v.version);
+          Promise.resolve(supabase.from('users').update({ version_app: v.version, version_build: v.build }).eq('id', id))
+            .then(r => {
+              if (r && r.error) {
+                versionNotee.delete(id);
+                if (ERREURS_COLONNE_ABSENTE.includes(String(r.error.code))) prochainEssaiVersion = t + 10 * 60 * 1000;
+              }
+            })
+            .catch(() => { versionNotee.delete(id); });
+        }
       }
     } catch (e) { /* le suivi ne doit jamais gêner le travail */ }
     next();
@@ -42,6 +73,7 @@ function classerConnectes(utilisateurs, maintenant = Date.now()) {
     return {
       id: u.id, nom: u.display_name || u.email || '', email: u.email || '', role: u.role, actif: u.active !== false,
       derniere_activite: u.derniere_activite || null,
+      version: u.version_app || null, version_build: u.version_build || null, // null = pas encore vue (le navigateur n'a pas encore chargé une version qui l'envoie)
       en_ligne: vu !== null && maintenant - vu <= EN_LIGNE_MS,
     };
   }).sort((a, b) => (b.en_ligne - a.en_ligne) || String(b.derniere_activite || '').localeCompare(String(a.derniere_activite || '')));
@@ -68,4 +100,4 @@ function resumerCaisseDuJour(paiements, clotures, utilisateursParId = {}) {
   };
 }
 
-module.exports = { jourHaiti, bornesJourHaiti, creerSuiviActivite, classerConnectes, resumerCaisseDuJour, EN_LIGNE_MS };
+module.exports = { jourHaiti, bornesJourHaiti, creerSuiviActivite, classerConnectes, resumerCaisseDuJour, lireVersionApp, ERREURS_COLONNE_ABSENTE, EN_LIGNE_MS };
