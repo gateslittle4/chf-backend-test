@@ -118,3 +118,82 @@ test('Le fichier SQL est additif : une table, RLS activée, annulation par marqu
   assert.ok(!/DROP |DELETE |ALTER TABLE public\.(dossiers|paiements|episodes|fiches)/i.test(sql), 'rien d\'existant n\'est modifié ni supprimé');
   assert.match(sql, /annule boolean NOT NULL DEFAULT false/);
 });
+
+// ===== GET /api/dossiers-papier/suivi : la liste de l'onglet, sur une fausse base à 5 tables =====
+const { construireSuivi, fenetreJourHaiti } = require('../utils/suiviDossiersPapier');
+const debutSuivi = source.indexOf('const tableDossiersPapierAbsente');
+const codeComplet = source.slice(debutSuivi, source.lastIndexOf("res.json({ success: true, mouvement: data });\n});\n") + "res.json({ success: true, mouvement: data });\n});\n".length);
+
+function monterSuivi({ droits = ['dossier_numero_saisir'], base }) {
+  const routes = {};
+  const app = { get: (c, f) => { routes['GET ' + c] = f; }, post: () => {}, patch: () => {} };
+  const supabase = {
+    from: (table) => {
+      let lignes = [...(base[table] || [])]; let limite = Infinity;
+      const c = {
+        select: () => c, order: () => c, or: () => c, limit: (n) => { limite = n; return c; },
+        eq: (k, v) => { lignes = lignes.filter(r => r[k] === v); return c; },
+        in: (k, vs) => { lignes = lignes.filter(r => vs.includes(r[k])); return c; },
+        is: (k, v) => { lignes = lignes.filter(r => (r[k] == null) === (v === null)); return c; },
+        gte: (k, v) => { lignes = lignes.filter(r => Date.parse(r[k]) >= Date.parse(v)); return c; },
+        lt: (k, v) => { lignes = lignes.filter(r => Date.parse(r[k]) < Date.parse(v)); return c; },
+        ilike: (k, motif) => { const re = new RegExp('^' + motif.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*') + '$', 'i'); lignes = lignes.filter(r => re.test(String(r[k] || ''))); return c; },
+        then: (ok) => ok({ data: lignes.filter(r => !('annule' in r) || r.annule === false || r.annule == null || table === 'mouvements_dossier_papier').slice(0, limite), error: null }),
+      };
+      return c;
+    },
+  };
+  const aPermission = async (_u, cle) => droits.includes(cle);
+  const lireToutesLesPages = async (fabrique) => { const r = await fabrique(); if (r.error) throw new Error(r.error.message); return r.data; };
+  const lireParLotsDIds = async (ids, fabrique) => (ids.length ? lireToutesLesPages(() => fabrique(ids)) : []);
+  new Function('app', 'supabase', 'aPermission', 'lireToutesLesPages', 'lireParLotsDIds', 'enregistrerAuditServeur', 'construireSuivi', 'fenetreJourHaiti', codeComplet)(app, supabase, aPermission, lireToutesLesPages, lireParLotsDIds, async () => {}, construireSuivi, fenetreJourHaiti);
+  return routes;
+}
+const BASE = () => ({
+  dossiers: [{ id: 'd1', nom: 'Marie Joseph', numero_dossier: '120', fusionne_dans: null }, { id: 'd2', nom: 'Jean Pierre', numero_dossier: '121', fusionne_dans: null }, { id: 'd9', nom: 'Marie Ancienne', numero_dossier: '5', fusionne_dans: 'd1' }],
+  episodes: [{ id: 'e1', dossier_id: 'd1', supprime_le: null }, { id: 'e2', dossier_id: 'd2', supprime_le: null }],
+  fiches: [{ id: 'f1', breakdown: { med: 300 } }, { id: 'f2', breakdown: { labo: 900 } }],
+  paiements: [
+    { id: 'p1', numero_paiement: 516, episode_id: 'e1', fiche_id: 'f1', mode: 'cash', date_paiement: '2026-11-28T15:30:00Z', annule: false, supprime_le: null },
+    { id: 'p2', numero_paiement: 515, episode_id: 'e2', fiche_id: 'f2', mode: 'cash', date_paiement: '2026-11-28T16:00:00Z', annule: false, supprime_le: null },
+    { id: 'p3', numero_paiement: 300, episode_id: 'e2', fiche_id: 'f2', mode: 'cash', date_paiement: '2026-11-20T16:00:00Z', annule: false, supprime_le: null },
+  ],
+  mouvements_dossier_papier: [{ id: 'm1', dossier_id: 'd1', type: 'entree', date: '2026-11-28T14:00:00Z', par: 'archive@chf.com', annule: false }],
+});
+
+test('Suivi du jour : les patients qui ont payé ce jour d\'Haïti ; la sortie automatique vient du médicament acheté après l\'entrée', async () => {
+  const routes = monterSuivi({ base: BASE() });
+  const res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: '2026-11-28' } }, res);
+  assert.strictEqual(res.code, 200);
+  assert.deepStrictEqual(res.corps.lignes.map(l => [l.nom, l.etat]), [['Jean Pierre', 'pas_entre'], ['Marie Joseph', 'sorti']]);
+  const marie = res.corps.lignes.find(l => l.nom === 'Marie Joseph');
+  assert.deepStrictEqual([marie.sortie.origine, marie.sortie.numero_paiement, marie.entree.date], ['automatique', 516, '2026-11-28T14:00:00Z']);
+});
+
+test('Suivi : un autre jour montre les patients de CE jour ; un jour sans paiement donne une liste vide', async () => {
+  const routes = monterSuivi({ base: BASE() });
+  let res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: '2026-11-20' } }, res);
+  assert.deepStrictEqual(res.corps.lignes.map(l => l.nom), ['Jean Pierre']);
+  res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: '2026-11-01' } }, res);
+  assert.deepStrictEqual(res.corps.lignes, []);
+});
+
+test('Suivi : recherche par nom (ou numéro) sur toutes les dates, sans les dossiers fusionnés ; 2 lettres au moins', async () => {
+  const routes = monterSuivi({ base: BASE() });
+  let res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { q: 'mari' } }, res);
+  assert.deepStrictEqual(res.corps.lignes.map(l => l.nom), ['Marie Joseph'], 'le dossier fusionné n\'apparaît pas');
+  res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { q: '121' } }, res);
+  assert.deepStrictEqual(res.corps.lignes.map(l => l.nom), ['Jean Pierre']);
+  assert.strictEqual(res.corps.lignes[0].nb_transactions, 2, 'toutes les dates comptent dans une recherche');
+  res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { q: 'm' } }, res); assert.strictEqual(res.code, 400);
+});
+
+test('Suivi : refusé sans droit ; l\'archiviste n\'a pas besoin de lire les paiements ; jour illisible = 400', async () => {
+  let routes = monterSuivi({ droits: ['caisse_travailler'], base: BASE() });
+  let res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: '2026-11-28' } }, res); assert.strictEqual(res.code, 403);
+  routes = monterSuivi({ droits: ['dossier_numero_saisir'], base: BASE() }); // l'archiviste : pas de fiche_patient_voir_finances, mais il voit l'état et la date de sortie
+  res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: 'hier' } }, res); assert.strictEqual(res.code, 400);
+  res = reponse(); await routes['GET /api/dossiers-papier/suivi']({ user: { id: 'u1' }, query: { jour: '2026-11-28' } }, res);
+  assert.strictEqual(res.code, 200);
+  assert.ok(!JSON.stringify(res.corps).includes('"montant"'), 'aucun montant d\'argent dans la réponse');
+});
