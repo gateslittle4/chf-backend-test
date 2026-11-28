@@ -27,10 +27,10 @@ const TABLES_A_SAUVEGARDER = [
   'dossiers', 'episodes', 'fiches', 'paiements', 'catalog', 'cloture_caisse', 'ong_partenaires',
   'users', 'audit_log', 'demandes_exoneration', 'pieces_jointes', 'requisitions',
   'transferts_service', 'salaires_service', 'depenses_caisse', 'autres_revenus', 'receptions_medicaments', 'decrements_stock_appliques',
-  'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees', 'demandes_commande',
+  'invitations', 'compteurs', 'doublons_ignores', 'migrations_appliquees', 'demandes_commande', 'mouvements_dossier_papier',
 ];
 // 26/11 : tables dont le script SQL peut ne pas être encore appliqué quand le serveur démarre — absentes, elles sont ignorées par la sauvegarde au lieu de la déclarer en échec.
-const TABLES_FACULTATIVES = ['demandes_commande'];
+const TABLES_FACULTATIVES = ['demandes_commande', 'mouvements_dossier_papier']; // 28/11 : suivi des dossiers papier (sql/mouvements_dossier_papier.sql)
 // Clé primaire de chaque table quand ce n'est pas "id" (recoupé le 25/09 dans
 // information_schema.table_constraints — mêmes valeurs que ORDRE_RESTAURATION plus bas). Sert au
 // tri TOTAL qu'exige la lecture paginée de la sauvegarde (voir lireToutesLesPages).
@@ -181,6 +181,7 @@ const ORDRE_RESTAURATION = [
   ['audit_log', 'id'], ['requisitions', 'id'], ['salaires_service', 'id'],
   ['depenses_caisse', 'id'], ['autres_revenus', 'id'], ['receptions_medicaments', 'id'], ['decrements_stock_appliques', 'local_id'], ['invitations', 'token'], ['compteurs', 'id'],
   ['doublons_ignores', 'dossier_a,dossier_b'], ['migrations_appliquees', 'nom'], ['demandes_commande', 'id'],
+  ['mouvements_dossier_papier', 'id'], // 28/11 : après dossiers (clé étrangère dossier_id)
 ];
 
 const serviceSauvegarde = creerServiceSauvegarde({
