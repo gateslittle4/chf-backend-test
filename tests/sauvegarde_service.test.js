@@ -235,6 +235,7 @@ test("câblage : ORDRE_RESTAURATION couvre exactement les tables sauvegardées, 
   const pos = (t) => noms.indexOf(t);
   assert.ok(pos('ong_partenaires') < pos('episodes') && pos('ong_partenaires') < pos('paiements'), "le déclencheur retrouve l'identifiant du partenaire d'après son nom : il doit déjà exister");
   assert.ok(pos('dossiers') < pos('episodes') && pos('episodes') < pos('fiches') && pos('fiches') < pos('paiements'));
+  assert.ok(pos('dossiers') < pos('mouvements_dossier_papier'), 'la table du suivi des dossiers papier référence dossiers');
   for (const t of ['pieces_jointes']) assert.ok(pos('dossiers') < pos(t));
   for (const t of ['transferts_service', 'demandes_exoneration']) assert.ok(pos('episodes') < pos(t));
   const cle = Object.fromEntries(ordre);
@@ -257,10 +258,10 @@ test("copie B2 : protocole natif (autorisation → bucket par nom → URL d'envo
   assert.match(serverSrc, /révocable seule/i, 'la clé B2 limitée à un bucket reste documentée');
 });
 
-test("câblage : les 23 tables sauvegardées incluent compteurs, doublons_ignores, migrations_appliquees, autres_revenus, receptions_medicaments et demandes_commande", () => {
+test("câblage : les 24 tables sauvegardées incluent compteurs, doublons_ignores, migrations_appliquees, autres_revenus, receptions_medicaments, demandes_commande et mouvements_dossier_papier", () => {
   const sauvegardees = [...blocRoute('const TABLES_A_SAUVEGARDER = [', '];').matchAll(/'(\w+)'/g)].map(m => m[1]);
-  assert.strictEqual(sauvegardees.length, 23);
-  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees', 'autres_revenus', 'receptions_medicaments', 'demandes_commande']) assert.ok(sauvegardees.includes(t), t);
+  assert.strictEqual(sauvegardees.length, 24);
+  for (const t of ['compteurs', 'doublons_ignores', 'migrations_appliquees', 'autres_revenus', 'receptions_medicaments', 'demandes_commande', 'mouvements_dossier_papier']) assert.ok(sauvegardees.includes(t), t);
 });
 
 test("sauvegarde : une table FACULTATIVE pas encore créée (SQL non appliqué) est ignorée sans faire échouer la vérification ; une table ordinaire absente reste une panne", async () => {

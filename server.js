@@ -750,6 +750,7 @@ require('./routes/catalogue')(app, contexte);
 require('./routes/caisse')(app, contexte);
 require('./routes/partenaires')(app, contexte);
 require('./routes/stock')(app, contexte);
+require('./routes/dossiersPapier')(app, contexte);
 require('./routes/administration')(app, contexte);
 require('./routes/sauvegarde')(app, contexte);
 

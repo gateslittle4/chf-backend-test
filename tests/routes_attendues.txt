@@ -111,6 +111,10 @@ PATCH /api/stock/:id
 GET /api/demandes-commande
 POST /api/demandes-commande
 PATCH /api/demandes-commande/:id/commandee
+GET /api/dossiers-papier/mouvements
+GET /api/dossiers-papier/suivi
+POST /api/dossiers-papier/mouvements
+PATCH /api/dossiers-papier/mouvements/:id/annuler
 POST /api/admin/users
 DELETE /api/admin/users/:uid
 POST /api/admin/generer-lien-reinitialisation
